@@ -22,21 +22,28 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             var result by remember { mutableStateOf("") }
+            var isRunning by remember { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
             Column {
                 Text("RawCam core: ${NativeBridge.nativeVersion()}")
-                Button(onClick = {
+                Button(enabled = !isRunning, onClick = {
+                    if (isRunning) return@Button
+                    isRunning = true
                     scope.launch {
-                        val mbps = withContext(Dispatchers.IO) {
-                            val path = File(getExternalFilesDir(null), "bench.bin").absolutePath
-                            // ~6GB, ≈10s of 12MP RAW16 @24fps
-                            NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                        try {
+                            val mbps = withContext(Dispatchers.IO) {
+                                val path = File(getExternalFilesDir(null), "bench.bin").absolutePath
+                                // ~6GB, ≈10s of 12MP RAW16 @24fps
+                                NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                            }
+                            result = "%.0f MB/s".format(mbps)
+                            Log.d("RawCamBench", "sustained=$result raw=$mbps")
+                        } finally {
+                            isRunning = false
                         }
-                        result = "%.0f MB/s".format(mbps)
-                        Log.d("RawCamBench", "sustained=$result raw=$mbps")
                     }
                 }) {
-                    Text("Benchmark")
+                    Text(if (isRunning) "Running..." else "Benchmark")
                 }
                 Text(result)
             }

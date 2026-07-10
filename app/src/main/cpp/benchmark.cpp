@@ -11,7 +11,11 @@ double benchmarkWrite(const char* path, uint32_t frameBytes, uint32_t frames) {
   if (fd < 0) return -1.0;
   auto t0 = std::chrono::steady_clock::now();
   for (uint32_t i = 0; i < frames; i++)
-    if (!io::writeAll(fd, frame.data(), frame.size())) { io::closeFd(fd); return -1.0; }
+    if (!io::writeAll(fd, frame.data(), frame.size())) {
+      io::closeFd(fd);
+      std::remove(path);  // don't leave a partial multi-GB file behind (e.g. ENOSPC)
+      return -1.0;
+    }
 #ifndef _WIN32
   fsync(fd);
 #endif
