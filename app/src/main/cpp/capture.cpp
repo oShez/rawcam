@@ -57,16 +57,34 @@ FrameMeta Capture::matchMeta(int64_t timestampNs) {
 }
 
 void Capture::processImage(AImage* image) {
+  // Once a write has failed (e.g. disk full) don't keep pounding the disk:
+  // consume the image, count the drop, keep the camera fed with buffers.
+  if (writeFailed_) {
+    dropped_++;
+    AImage_delete(image);
+    return;
+  }
+
   uint8_t* data = nullptr;
   int dataLen = 0;
-  AImage_getPlaneData(image, 0, &data, &dataLen);
+  if (AImage_getPlaneData(image, 0, &data, &dataLen) != AMEDIA_OK || data == nullptr) {
+    dropped_++;
+    AImage_delete(image);
+    return;
+  }
 
   int64_t timestampNs = 0;
   AImage_getTimestamp(image, &timestampNs);
 
   if (!writerInitialized_) {
     int32_t rowStride = 0;
-    AImage_getPlaneRowStride(image, 0, &rowStride);
+    if (AImage_getPlaneRowStride(image, 0, &rowStride) != AMEDIA_OK || rowStride <= 0) {
+      // Don't bake a garbage stride into the header; drop this frame and let
+      // the next good frame initialize the writer.
+      dropped_++;
+      AImage_delete(image);
+      return;
+    }
     rowStride_ = rowStride;
 
     FileHeader hdr = headerTemplate_;
@@ -79,28 +97,40 @@ void Capture::processImage(AImage* image) {
     }
     headerTemplate_ = hdr;
     writer_ = RawvWriter::create(path_, hdr);
+    if (!writer_) {
+      // Could not even create the file: fail the session, count every frame.
+      writeFailed_ = true;
+      dropped_++;
+      AImage_delete(image);
+      return;
+    }
     writerInitialized_ = true;
   }
 
   FrameMeta meta = matchMeta(timestampNs);
-  meta.frameIndex = writer_ ? writer_->framesWritten() : 0;
+  meta.frameIndex = writer_->framesWritten();
   meta.droppedSoFar = (uint32_t)dropped_.load();
 
-  if (writer_) {
-    if ((PackMode)headerTemplate_.packMode == PackMode::Packed10) {
-      // De-stride while packing: address each row via the original sensor
-      // stride, pack exactly `width_` pixels per row into the contiguous
-      // preallocated scratch buffer.
-      const size_t packedRowBytes = packed10Size((size_t)width_);
-      for (int32_t row = 0; row < height_; row++) {
-        const uint16_t* srcRow =
-            reinterpret_cast<const uint16_t*>(data + (size_t)row * (size_t)rowStride_);
-        pack10(srcRow, (size_t)width_, packBuf_.data() + (size_t)row * packedRowBytes);
-      }
-      writer_->writeFrame(meta, packBuf_.data());
-    } else {
-      writer_->writeFrame(meta, data);
+  bool ok;
+  if ((PackMode)headerTemplate_.packMode == PackMode::Packed10) {
+    // De-stride while packing: address each row via the original sensor
+    // stride, pack exactly `width_` pixels per row into the contiguous
+    // preallocated scratch buffer.
+    const size_t packedRowBytes = packed10Size((size_t)width_);
+    for (int32_t row = 0; row < height_; row++) {
+      const uint16_t* srcRow =
+          reinterpret_cast<const uint16_t*>(data + (size_t)row * (size_t)rowStride_);
+      pack10(srcRow, (size_t)width_, packBuf_.data() + (size_t)row * packedRowBytes);
     }
+    ok = writer_->writeFrame(meta, packBuf_.data());
+  } else {
+    ok = writer_->writeFrame(meta, data);
+  }
+  if (!ok) {
+    // Partial-write failure (e.g. ENOSPC mid-recording): the frame was not
+    // durably written, so count it as dropped and stop writing for good.
+    writeFailed_ = true;
+    dropped_++;
   }
 
   AImage_delete(image);
@@ -135,6 +165,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   height_ = height;
   rowStride_ = 0;
   writerInitialized_ = false;
+  writeFailed_ = false;
   writer_.reset();
   path_ = path;
   dropped_.store(0);

@@ -79,6 +79,7 @@ class Capture {
   int32_t height_ = 0;
   int32_t rowStride_ = 0;
   bool writerInitialized_ = false;
+  bool writeFailed_ = false;  // set on first write failure; later frames drop, disk untouched
   std::vector<uint8_t> packBuf_;  // preallocated Packed10 scratch buffer
 };
 
