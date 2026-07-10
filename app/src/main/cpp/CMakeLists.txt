@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22)
+project(rawcam_jni CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../core core_build)
+add_library(rawcam_jni SHARED jni_bridge.cpp)
+target_link_libraries(rawcam_jni rawcam_core android mediandk log)
