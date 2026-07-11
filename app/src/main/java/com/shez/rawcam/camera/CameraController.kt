@@ -74,6 +74,15 @@ class CameraController(private val context: Context) {
     /** Set by stopRecording(); counted down by the session's onReady (idle) callback. */
     @Volatile private var idleLatch: CountDownLatch? = null
 
+    /**
+     * Monotonic session generation, bumped by every createSession call. Only
+     * accessed on the camera thread (all createSession calls and session state
+     * callbacks run there). A late onConfigured from a superseded
+     * createCaptureSession must not clobber the current session reference; it
+     * compares its captured generation and closes itself instead.
+     */
+    private var sessionGeneration = 0
+
     init {
         cameraId = cameraManager.cameraIdList.first { id ->
             val c = cameraManager.getCameraCharacteristics(id)
@@ -165,7 +174,10 @@ class CameraController(private val context: Context) {
         cameraHandler.post {
             session?.close()
             session = null
-            createSession(listOf(preview, raw), forRecording = true) {
+            createSession(
+                listOf(preview, raw), forRecording = true,
+                onFailed = { configured.countDown() }, // fail fast; ok stays false
+            ) {
                 ok = true
                 configured.countDown()
             }
@@ -218,9 +230,14 @@ class CameraController(private val context: Context) {
         val idle = CountDownLatch(1)
         idleLatch = idle
         cameraHandler.post {
+            val s = session
+            if (s == null) {
+                idle.countDown() // no session => nothing in flight, already idle
+                return@post
+            }
             try {
-                session?.stopRepeating()
-                session?.abortCaptures()
+                s.stopRepeating()
+                s.abortCaptures()
             } catch (e: CameraAccessException) {
                 Log.e(TAG, "stopRepeating/abortCaptures failed", e)
                 idle.countDown()
@@ -269,32 +286,43 @@ class CameraController(private val context: Context) {
     // --- internals -------------------------------------------------------------
 
     private fun createSession(
-        surfaces: List<Surface>, forRecording: Boolean, onConfigured: () -> Unit,
+        surfaces: List<Surface>, forRecording: Boolean,
+        onFailed: () -> Unit = {}, onConfigured: () -> Unit,
     ) {
-        val dev = device ?: return
+        val dev = device ?: run { onFailed(); return }
+        val generation = ++sessionGeneration
         val config = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
             surfaces.map { OutputConfiguration(it) },
             cameraExecutor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
+                    if (generation != sessionGeneration) {
+                        // A newer createSession superseded this one while it was
+                        // configuring; do not clobber the current session.
+                        Log.w(TAG, "discarding stale session (gen $generation)")
+                        s.close()
+                        return
+                    }
                     session = s
                     try {
                         if (forRecording) setRepeatingRecord(s) else setRepeatingPreview(s)
                         onConfigured()
                     } catch (e: CameraAccessException) {
                         Log.e(TAG, "setRepeatingRequest failed", e)
+                        onFailed()
                     }
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
                     Log.e(TAG, "session configuration failed (recording=$forRecording)")
+                    if (generation == sessionGeneration) onFailed()
                 }
 
                 override fun onReady(s: CameraCaptureSession) {
                     // Fires when the session has no work in flight; used by
                     // stopRecording() as the frames-stopped barrier.
-                    idleLatch?.countDown()
+                    if (generation == sessionGeneration) idleLatch?.countDown()
                 }
             },
         )
