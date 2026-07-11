@@ -157,6 +157,8 @@ class CameraController(private val context: Context) {
         this.exposureNs = clampExposure(exposureNs, fps)
         this.focusDiopters = focusDiopters
         manualSet = true
+        // Set before frames can flow so the very first onCaptureCompleted forwards meta.
+        recording = true
 
         val configured = CountDownLatch(1)
         var ok = false
@@ -169,6 +171,7 @@ class CameraController(private val context: Context) {
             }
         }
         if (!configured.await(SESSION_TIMEOUT_S, TimeUnit.SECONDS) || !ok) {
+            recording = false
             Log.e(TAG, "recording session configuration failed")
             NativeBridge.nativeStopRecording() // discard the never-fed native writer
             rawSurface = null
@@ -177,7 +180,6 @@ class CameraController(private val context: Context) {
             }
             return false
         }
-        recording = true
         return true
     }
 
