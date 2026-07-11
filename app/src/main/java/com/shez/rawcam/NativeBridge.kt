@@ -14,4 +14,6 @@ object NativeBridge {
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)
     // returns longArrayOf(framesWritten, framesDropped)
     external fun nativeStopRecording(): LongArray
+    // atomic snapshot, safe to poll while recording: longArrayOf(framesWritten, framesDropped)
+    external fun nativeGetStats(): LongArray
 }

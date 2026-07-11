@@ -42,6 +42,13 @@ class Capture {
   // file and tears down the reader. Returns {framesWritten, framesDropped}.
   std::pair<uint64_t, uint64_t> stop();
 
+  // Lock-free snapshot of {framesWritten, framesDropped} for UI polling while
+  // recording is in progress. Safe to call from any thread concurrently with
+  // the writer thread; both counters are std::atomic.
+  std::pair<uint64_t, uint64_t> stats() const {
+    return {written_.load(std::memory_order_relaxed), dropped_.load(std::memory_order_relaxed)};
+  }
+
  private:
   Capture() = default;
   Capture(const Capture&) = delete;
@@ -71,6 +78,10 @@ class Capture {
   FrameMeta lastKnown_{};
 
   std::atomic<uint64_t> dropped_{0};
+  // Mirrors writer_->framesWritten(), but atomic so stats() can be read from
+  // the JNI/UI thread without touching the writer_ pointer itself (which is
+  // only ever safely accessed from the writer thread while recording).
+  std::atomic<uint64_t> written_{0};
 
   std::unique_ptr<RawvWriter> writer_;
   FileHeader headerTemplate_{};

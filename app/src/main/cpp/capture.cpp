@@ -131,6 +131,8 @@ void Capture::processImage(AImage* image) {
     // durably written, so count it as dropped and stop writing for good.
     writeFailed_ = true;
     dropped_++;
+  } else {
+    written_.fetch_add(1, std::memory_order_relaxed);
   }
 
   AImage_delete(image);
@@ -169,6 +171,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   writer_.reset();
   path_ = path;
   dropped_.store(0);
+  written_.store(0);
   lastKnown_ = FrameMeta{};
   {
     std::lock_guard<std::mutex> lock(metaMutex_);

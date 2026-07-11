@@ -68,3 +68,12 @@ Java_com_shez_rawcam_NativeBridge_nativeStopRecording(JNIEnv* env, jobject) {
   env->SetLongArrayRegion(arr, 0, 2, values);
   return arr;
 }
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeGetStats(JNIEnv* env, jobject) {
+  auto result = rawcam::Capture::instance().stats();
+  jlongArray arr = env->NewLongArray(2);
+  jlong values[2] = {(jlong)result.first, (jlong)result.second};
+  env->SetLongArrayRegion(arr, 0, 2, values);
+  return arr;
+}
