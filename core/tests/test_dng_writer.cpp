@@ -61,6 +61,13 @@ TEST_CASE("dng has required CFA tags and correct pixel strip") {
   CHECK(tags.count(50706) == 1);                // DNGVersion
   CHECK(tags.count(50721) == 1);                // ColorMatrix1
   CHECK(tags.at(50717).valueOrOffset == 1023);  // WhiteLevel
+  // BlackLevelRepeatDim [2,2] must accompany the 4-entry BlackLevel — DNG
+  // defaults to [1,1] without it, and Resolve rejects the file (media offline)
+  REQUIRE(tags.count(50713) == 1);
+  CHECK(tags.at(50713).type == 3);              // SHORT
+  CHECK(tags.at(50713).count == 2);
+  CHECK(tags.at(50713).valueOrOffset == (2u | (2u << 16)));
+  CHECK(tags.at(50714).count == 4);             // BlackLevel per CFA site
   // CFAPattern RGGB fits inline in value field: bytes 0,1,1,2
   uint32_t cfa = tags.at(33422).valueOrOffset;
   CHECK((cfa & 0xFF) == 0); CHECK(((cfa >> 8) & 0xFF) == 1);

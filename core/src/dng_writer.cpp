@@ -135,6 +135,10 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   d.addAscii(50708, hdr.deviceName);
   d.addBytes(50710, plane, 3);
   d.addShort(50711, 1);
+  // BlackLevelRepeatDim [2,2] is required for a 4-entry BlackLevel: without it
+  // the DNG default is [1,1], making count=4 malformed — LibRaw then ignores
+  // the black level and DaVinci Resolve rejects the file as media offline.
+  d.addShorts2(50713, 2, 2);
   d.addLongs(50714, hdr.blackLevel, 4);
   d.addLong(50717, hdr.whiteLevel);
   d.addRationals(50721, SRATIONAL, hdr.colorMatrix1, 9);
