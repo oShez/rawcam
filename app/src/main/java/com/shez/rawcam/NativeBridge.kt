@@ -16,4 +16,18 @@ object NativeBridge {
     external fun nativeStopRecording(): LongArray
     // atomic snapshot, safe to poll while recording: longArrayOf(framesWritten, framesDropped)
     external fun nativeGetStats(): LongArray
+
+    // Exports rawvPath (a finalized .rawv clip) to outDir/000000.dng, 000001.dng, ...
+    // outDir must already exist. cb.onProgress is called after each frame is written
+    // with (framesDone, totalFrames); returning false cancels the export. Returns
+    // false if the clip can't be opened/read or the export was cancelled.
+    external fun nativeExportClip(rawvPath: String, outDir: String, cb: ExportCallback): Boolean
+
+    // Reads just the header (+ crash-recovery frame count scan) of a .rawv clip.
+    // Returns intArrayOf(width, height, fps, frameCount), or all-zero if unreadable.
+    external fun nativeClipInfo(path: String): IntArray
+
+    fun interface ExportCallback {
+        fun onProgress(done: Long, total: Long): Boolean
+    }
 }

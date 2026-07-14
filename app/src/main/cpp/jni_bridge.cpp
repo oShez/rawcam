@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <string>
 #include "rawcam/rawv.h"
+#include "rawcam/rawv_reader.h"
+#include "rawcam/exporter.h"
 #include "benchmark.h"
 #include "capture.h"
 
@@ -75,5 +77,66 @@ Java_com_shez_rawcam_NativeBridge_nativeGetStats(JNIEnv* env, jobject) {
   jlongArray arr = env->NewLongArray(2);
   jlong values[2] = {(jlong)result.first, (jlong)result.second};
   env->SetLongArrayRegion(arr, 0, 2, values);
+  return arr;
+}
+
+// nativeExportClip is called synchronously from a Kotlin background thread
+// (ExportService's worker thread), which is already JVM-attached for the
+// duration of this call -- the progress lambda below runs on that same
+// thread/stack frame, never a native-spawned one, so no AttachCurrentThread
+// dance is needed. jCallback is still promoted to a global ref (and released
+// before returning) defensively, since it is invoked repeatedly from a
+// C++ lambda captured by exportClip rather than used once inline.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeExportClip(
+    JNIEnv* env, jobject, jstring jRawvPath, jstring jOutDir, jobject jCallback) {
+  const char* rawvChars = env->GetStringUTFChars(jRawvPath, nullptr);
+  std::string rawvPath(rawvChars ? rawvChars : "");
+  env->ReleaseStringUTFChars(jRawvPath, rawvChars);
+
+  const char* outDirChars = env->GetStringUTFChars(jOutDir, nullptr);
+  std::string outDir(outDirChars ? outDirChars : "");
+  env->ReleaseStringUTFChars(jOutDir, outDirChars);
+
+  jobject callback = env->NewGlobalRef(jCallback);
+  jclass cbClass = env->GetObjectClass(callback);
+  jmethodID onProgress = env->GetMethodID(cbClass, "onProgress", "(JJ)Z");
+  env->DeleteLocalRef(cbClass);
+
+  bool ok = false;
+  if (onProgress != nullptr) {
+    ok = rawcam::exportClip(
+        rawvPath, outDir,
+        [env, callback, onProgress](uint64_t done, uint64_t total) -> bool {
+          jboolean cont = env->CallBooleanMethod(callback, onProgress, (jlong)done, (jlong)total);
+          if (env->ExceptionCheck()) {
+            // No exceptions may cross back into native code; treat as cancel.
+            env->ExceptionClear();
+            return false;
+          }
+          return cont == JNI_TRUE;
+        });
+  }
+  env->DeleteGlobalRef(callback);
+  return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeClipInfo(JNIEnv* env, jobject, jstring jPath) {
+  const char* pathChars = env->GetStringUTFChars(jPath, nullptr);
+  std::string path(pathChars ? pathChars : "");
+  env->ReleaseStringUTFChars(jPath, pathChars);
+
+  jintArray arr = env->NewIntArray(4);
+  auto reader = rawcam::RawvReader::open(path);
+  if (!reader) {
+    jint zero[4] = {0, 0, 0, 0};
+    env->SetIntArrayRegion(arr, 0, 4, zero);
+    return arr;
+  }
+  const rawcam::FileHeader& h = reader->header();
+  jint fps = h.fpsDen > 0 ? (jint)(h.fpsNum / h.fpsDen) : (jint)h.fpsNum;
+  jint values[4] = {(jint)h.width, (jint)h.height, fps, (jint)reader->frameCount()};
+  env->SetIntArrayRegion(arr, 0, 4, values);
   return arr;
 }
