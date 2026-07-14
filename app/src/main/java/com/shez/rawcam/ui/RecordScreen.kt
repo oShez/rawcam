@@ -53,8 +53,11 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,10 +77,13 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /** UI state for [RecordScreen]. Sliders store the raw value the user picked; the
- * viewmodel derives exposureNs from [shutterIndex] against the fps-filtered stop list. */
+ * viewmodel derives exposureNs from [shutterIndex] against the fps-filtered stop list.
+ * [busy] is true while an async start/stop transition is in flight; the record button
+ * is disabled during it (debounce). */
 data class RecordUiState(
     val previewReady: Boolean = false,
     val recording: Boolean = false,
+    val busy: Boolean = false,
     val elapsedSeconds: Int = 0,
     val written: Long = 0,
     val dropped: Long = 0,
@@ -92,10 +98,21 @@ data class RecordUiState(
  * Owns the [CameraController] for the lifetime of the activity, the manual-control
  * state, the record/stop flow (with the free-space refusal check), the 500ms stats
  * poll while recording, and the thermal-status listener.
+ *
+ * All controller calls that may block (openAndPreview, startRecording, stopRecording,
+ * close) run on [cameraOps], a single-lane Default-dispatcher scope: nothing blocks the
+ * main thread, and serialization guarantees ordering (a stop always completes -- file
+ * finalized -- before a subsequent reopen/start/close runs). The scope deliberately
+ * outlives viewModelScope so an in-flight stop/close cannot be cancelled by onCleared.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RecordViewModel(application: Application) : AndroidViewModel(application) {
 
     val controller = CameraController(application)
+
+    private val cameraOps = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
+    )
 
     private val initialFps =
         FPS_OPTIONS.firstOrNull { it <= controller.rawSpec.maxFps } ?: controller.rawSpec.maxFps
@@ -108,7 +125,6 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val events: SharedFlow<String> = _events
 
-    private var opened = false
     private var pollJob: Job? = null
     private var recordStartMs = 0L
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
@@ -123,12 +139,25 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
     fun shutterStops(fps: Int): List<Int> = ALL_SHUTTER_DENOMS.filter { it > fps }
 
+    /**
+     * (Re)opens the camera against [surface]. Called from every surfaceCreated -- on
+     * first launch AND whenever the activity returns to the foreground with a fresh
+     * surface (the old one is destroyed on backgrounding, and the system may have
+     * force-disconnected the camera meanwhile). Reopening the same camera id from the
+     * same process is safe: the framework disconnects the previous device first.
+     */
     fun openCamera(surface: android.view.Surface) {
-        if (opened) return
-        opened = true
-        controller.openAndPreview(surface) {
-            _uiState.update { it.copy(previewReady = true) }
-            pushManual()
+        _uiState.update { it.copy(previewReady = false) }
+        cameraOps.launch {
+            try {
+                controller.openAndPreview(surface) {
+                    _uiState.update { it.copy(previewReady = true) }
+                    pushManual()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "openAndPreview failed", e)
+                _events.tryEmit("Camera open failed")
+            }
         }
     }
 
@@ -167,35 +196,43 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleRecord() {
-        if (_uiState.value.recording) stopRecordingInternal() else startRecordingInternal()
+        val s = _uiState.value
+        if (s.busy) return // debounce: a start/stop transition is already in flight
+        if (s.recording) stopRecordingInternal() else startRecordingInternal()
     }
 
     private fun startRecordingInternal() {
         val s = _uiState.value
         if (!s.previewReady || s.recording) return
-        val spec = controller.rawSpec
-        // Packed10 payload record size: (w*h/4)*5 + 64 bytes of FrameMeta.
-        val frameBytes = (spec.width.toLong() * spec.height / 4) * 5 + 64
-        val available = StatFs(controller.clipsDir.absolutePath).availableBytes
-        val required = frameBytes * s.fps * 35L
-        if (available < required) {
-            val maxSeconds = available / (frameBytes * s.fps)
-            _events.tryEmit("Not enough free space; max ~${maxSeconds}s recordable")
-            return
-        }
-        val name = "clip_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
-        val path = File(controller.clipsDir, name).absolutePath
+        _uiState.update { it.copy(busy = true) }
         val exposureNs = exposureNsFor(s)
-        viewModelScope.launch(Dispatchers.Default) {
-            val ok = controller.startRecording(path, s.fps, s.iso, exposureNs, s.focusDiopters)
-            withContext(Dispatchers.Main) {
+        cameraOps.launch {
+            try {
+                val spec = controller.rawSpec
+                // Packed10 payload record size: (w*h/4)*5 + 64 bytes of FrameMeta.
+                val frameBytes = (spec.width.toLong() * spec.height / 4) * 5 + 64
+                val available = StatFs(controller.clipsDir.absolutePath).availableBytes
+                val required = frameBytes * s.fps * 35L
+                if (available < required) {
+                    val maxSeconds = available / (frameBytes * s.fps)
+                    _events.tryEmit("Not enough free space; max ~${maxSeconds}s recordable")
+                    return@launch
+                }
+                val name =
+                    "clip_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
+                val path = File(controller.clipsDir, name).absolutePath
+                val ok = controller.startRecording(path, s.fps, s.iso, exposureNs, s.focusDiopters)
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
-                    _uiState.update { it.copy(recording = true, elapsedSeconds = 0, written = 0, dropped = 0) }
-                    startPolling()
+                    _uiState.update {
+                        it.copy(recording = true, elapsedSeconds = 0, written = 0, dropped = 0)
+                    }
+                    withContext(Dispatchers.Main) { startPolling() }
                 } else {
                     _events.tryEmit("Failed to start recording")
                 }
+            } finally {
+                _uiState.update { it.copy(busy = false) }
             }
         }
     }
@@ -215,44 +252,61 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     private fun stopRecordingInternal() {
         pollJob?.cancel()
         pollJob = null
-        viewModelScope.launch(Dispatchers.Default) {
-            val stats = controller.stopRecording()
-            withContext(Dispatchers.Main) {
-                _uiState.update { it.copy(recording = false, written = stats[0], dropped = stats[1]) }
+        _uiState.update { it.copy(busy = true) }
+        cameraOps.launch {
+            try {
+                val stats = controller.stopRecording()
+                _uiState.update {
+                    it.copy(recording = false, written = stats[0], dropped = stats[1])
+                }
                 if (stats[0] == 0L && stats[1] > 0L) {
                     _events.tryEmit("Recording failed: writer error")
                 } else {
                     _events.tryEmit("${stats[0]} frames, ${stats[1]} dropped")
                 }
+            } finally {
+                _uiState.update { it.copy(busy = false) }
             }
         }
     }
 
     /**
-     * Called from MainActivity.onStop() when a recording is in progress: finalizes
-     * the file and releases the camera before the system may tear things down.
-     * Deliberately synchronous (blocks the main thread briefly) so onStop cannot
-     * return before the writer has finalized -- see CameraController's documented
-     * contract, which explicitly allows calling stopRecording()/close() from main.
+     * Called from MainActivity.onStop() when a recording is in progress: finalizes the
+     * clip off the main thread. Trade-off (deliberate): onStop returns immediately and
+     * the stop runs on [cameraOps] -- serialization guarantees the finalize completes
+     * before any subsequent reopen (surfaceCreated on return) or close (onCleared)
+     * touches the camera, and the native writer additionally guards partial teardown.
+     * The controller is NOT closed here: close() is one-shot (it quits the camera
+     * HandlerThread), so closing on backgrounding would permanently kill the camera
+     * for the rest of the process. close() is reserved for onCleared().
      */
     fun handleActivityStop() {
         if (!_uiState.value.recording) return
         pollJob?.cancel()
         pollJob = null
-        val stats = controller.stopRecording()
-        _uiState.update { it.copy(recording = false, written = stats[0], dropped = stats[1]) }
-        controller.close()
-        opened = false
+        _uiState.update { it.copy(recording = false, busy = true) }
+        cameraOps.launch {
+            try {
+                val stats = controller.stopRecording()
+                _uiState.update { it.copy(written = stats[0], dropped = stats[1]) }
+                _events.tryEmit("${stats[0]} frames, ${stats[1]} dropped")
+            } finally {
+                _uiState.update { it.copy(busy = false) }
+            }
+        }
     }
 
     override fun onCleared() {
         pollJob?.cancel()
         val pm = getApplication<Application>().getSystemService(Context.POWER_SERVICE) as PowerManager
         pm.removeThermalStatusListener(thermalListener)
-        controller.close()
+        // Off-main and serialized after any in-flight stop; cameraOps outlives
+        // viewModelScope precisely so this final close cannot be cancelled.
+        cameraOps.launch { controller.close() }
     }
 
     companion object {
+        private const val TAG = "RecordViewModel"
         val ALL_SHUTTER_DENOMS = listOf(24, 48, 60, 120, 240, 500, 1000)
         val FPS_OPTIONS = listOf(24, 30)
     }
@@ -370,7 +424,7 @@ fun RecordScreen(viewModel: RecordViewModel = viewModel()) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Button(
-                enabled = state.previewReady,
+                enabled = state.previewReady && !state.busy,
                 onClick = { viewModel.toggleRecord() },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (state.recording) Color.Red else MaterialTheme.colorScheme.primary,

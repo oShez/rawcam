@@ -177,6 +177,13 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
     std::lock_guard<std::mutex> lock(metaMutex_);
     pendingMeta_.clear();
   }
+  {
+    // Defensive: stop() drains the queue, so it should already be empty. If
+    // anything is left it belongs to a deleted reader and must not be touched
+    // (AImage_delete on it would double-free); just drop the pointers.
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    queue_.clear();
+  }
 
   FileHeader hdr{};
   hdr.magic = kMagic;
@@ -246,9 +253,24 @@ void Capture::pushFrameMeta(int64_t timestampNs, int32_t iso, int64_t exposureNs
 std::pair<uint64_t, uint64_t> Capture::stop() {
   if (reader_ == nullptr) return {0, dropped_.load()};
 
+  // Detach the listener first so no new images get queued while we tear down.
+  AImageReader_setImageListener(reader_, nullptr);
+
   stopping_.store(true);
   queueCv_.notify_all();
   if (writerThread_.joinable()) writerThread_.join();
+
+  // Delete any image the callback managed to queue after the writer's final
+  // drain. This MUST happen before AImageReader_delete: deleting the reader
+  // invalidates outstanding AImages, and a stale invalidated image surviving
+  // in queue_ aborts the NEXT session's writer thread inside
+  // AImage_getPlaneData ("lockImage: AImage has no buffer" -- observed on
+  // device, 2026-07-13 12:19 crash).
+  {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    for (AImage* img : queue_) AImage_delete(img);
+    queue_.clear();
+  }
 
   uint64_t written = 0;
   if (writer_) {

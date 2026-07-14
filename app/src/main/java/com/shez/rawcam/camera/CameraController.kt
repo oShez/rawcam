@@ -205,10 +205,10 @@ class CameraController(private val context: Context) {
             val s = session ?: return@post
             try {
                 if (recording) setRepeatingRecord(s) else setRepeatingPreview(s)
-            } catch (e: CameraAccessException) {
+            } catch (e: Exception) {
+                // CameraAccessException, closed-session IllegalStateException, or
+                // abandoned-surface IllegalArgumentException; never fatal here.
                 Log.e(TAG, "updateManual failed", e)
-            } catch (e: IllegalStateException) {
-                Log.e(TAG, "updateManual on closed session", e)
             }
         }
     }
@@ -291,42 +291,55 @@ class CameraController(private val context: Context) {
     ) {
         val dev = device ?: run { onFailed(); return }
         val generation = ++sessionGeneration
-        val config = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
-            surfaces.map { OutputConfiguration(it) },
-            cameraExecutor,
-            object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) {
-                    if (generation != sessionGeneration) {
-                        // A newer createSession superseded this one while it was
-                        // configuring; do not clobber the current session.
-                        Log.w(TAG, "discarding stale session (gen $generation)")
-                        s.close()
-                        return
+        try {
+            val config = SessionConfiguration(
+                SessionConfiguration.SESSION_REGULAR,
+                surfaces.map { OutputConfiguration(it) },
+                cameraExecutor,
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) {
+                        if (generation != sessionGeneration) {
+                            // A newer createSession superseded this one while it was
+                            // configuring; do not clobber the current session.
+                            Log.w(TAG, "discarding stale session (gen $generation)")
+                            s.close()
+                            return
+                        }
+                        session = s
+                        try {
+                            if (forRecording) setRepeatingRecord(s) else setRepeatingPreview(s)
+                            onConfigured()
+                        } catch (e: Exception) {
+                            // CameraAccessException, or IllegalArgumentException if a
+                            // target surface was abandoned mid-flight (activity
+                            // backgrounded); must not kill the camera thread.
+                            Log.e(TAG, "setRepeatingRequest failed", e)
+                            onFailed()
+                        }
                     }
-                    session = s
-                    try {
-                        if (forRecording) setRepeatingRecord(s) else setRepeatingPreview(s)
-                        onConfigured()
-                    } catch (e: CameraAccessException) {
-                        Log.e(TAG, "setRepeatingRequest failed", e)
-                        onFailed()
+
+                    override fun onConfigureFailed(s: CameraCaptureSession) {
+                        Log.e(TAG, "session configuration failed (recording=$forRecording)")
+                        if (generation == sessionGeneration) onFailed()
                     }
-                }
 
-                override fun onConfigureFailed(s: CameraCaptureSession) {
-                    Log.e(TAG, "session configuration failed (recording=$forRecording)")
-                    if (generation == sessionGeneration) onFailed()
-                }
-
-                override fun onReady(s: CameraCaptureSession) {
-                    // Fires when the session has no work in flight; used by
-                    // stopRecording() as the frames-stopped barrier.
-                    if (generation == sessionGeneration) idleLatch?.countDown()
-                }
-            },
-        )
-        dev.createCaptureSession(config)
+                    override fun onReady(s: CameraCaptureSession) {
+                        // Fires when the session has no work in flight; used by
+                        // stopRecording() as the frames-stopped barrier.
+                        if (generation == sessionGeneration) idleLatch?.countDown()
+                    }
+                },
+            )
+            dev.createCaptureSession(config)
+        } catch (e: Exception) {
+            // OutputConfiguration() throws IllegalArgumentException ("Surface was
+            // abandoned") when the preview surface died while this call was queued,
+            // e.g. HOME pressed right as a recording started (observed on device).
+            // An uncaught exception here kills the camera HandlerThread and the
+            // process; fail soft so the UI can reopen with a fresh surface instead.
+            Log.e(TAG, "createCaptureSession failed", e)
+            onFailed()
+        }
     }
 
     private fun setRepeatingPreview(s: CameraCaptureSession) {
