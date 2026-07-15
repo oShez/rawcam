@@ -400,7 +400,10 @@ fun RecordScreen(viewModel: RecordViewModel = viewModel()) {
         }
 
         // Small benchmark trigger (Task 8), kept reachable but out of the way.
+        // Disabled while recording: its ~6 GB write would compete with the
+        // ~376 MB/s capture hot path and force drops.
         TextButton(
+            enabled = !state.recording && !state.busy,
             onClick = {
                 if (benchRunning) return@TextButton
                 benchRunning = true

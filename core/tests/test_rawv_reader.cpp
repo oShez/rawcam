@@ -43,6 +43,36 @@ TEST_CASE("round trip") {
   std::remove("rt.rawv");
 }
 
+TEST_CASE("open rejects headers whose geometry contradicts frameSizeBytes") {
+  auto corruptAndTry = [](void (*mutate)(FileHeader*)) {
+    writeClip("bad.rawv", 1);
+    int fd = io::openRead("bad.rawv");
+    std::vector<uint8_t> bytes((size_t)io::fileSize(fd));
+    io::readAll(fd, bytes.data(), bytes.size());
+    io::closeFd(fd);
+    mutate(reinterpret_cast<FileHeader*>(bytes.data()));
+    fd = io::openWrite("bad.rawv");
+    io::writeAll(fd, bytes.data(), bytes.size());
+    io::closeFd(fd);
+    bool rejected = RawvReader::open("bad.rawv") == nullptr;
+    std::remove("bad.rawv");
+    return rejected;
+  };
+  // Raw16: frameSizeBytes smaller than rowStrideBytes*height -> OOB read in consumers
+  CHECK(corruptAndTry([](FileHeader* h) { h->frameSizeBytes = 8; }));
+  // Raw16: stride can't cover a row
+  CHECK(corruptAndTry([](FileHeader* h) { h->rowStrideBytes = 4; }));
+  // Packed10: frameSizeBytes below packed10Size(w*h)
+  CHECK(corruptAndTry([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed10; h->frameSizeBytes = 4;
+  }));
+  // absurd geometry (multi-GB allocations downstream)
+  CHECK(corruptAndTry([](FileHeader* h) { h->width = 1u << 30; }));
+  CHECK(corruptAndTry([](FileHeader* h) { h->height = 0; }));
+  // unknown pack mode
+  CHECK(corruptAndTry([](FileHeader* h) { h->packMode = 7; }));
+}
+
 TEST_CASE("truncated file recovers whole frames only") {
   writeClip("tr.rawv", 5);
   // simulate crash: chop mid-record AND zero the header count like an unfinalized file

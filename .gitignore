@@ -6,3 +6,4 @@ local.properties
 *.iml
 core/build/
 .cxx/
+testfootage/

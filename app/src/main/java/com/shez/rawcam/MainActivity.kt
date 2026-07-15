@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,10 +30,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             var tab by remember { mutableStateOf(0) }
+            // Leaving the Record tab disposes its SurfaceView; mid-recording that
+            // abandons the session's preview target and silently stalls the RAW
+            // stream (the timer keeps counting, no frames land). Lock the tab
+            // until the recording (or an in-flight start/stop) is done.
+            val recState by viewModel.uiState.collectAsState()
+            val tabsLocked = recState.recording || recState.busy
             Column(Modifier.fillMaxSize()) {
                 TabRow(selectedTabIndex = tab, modifier = Modifier.statusBarsPadding()) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Record") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Clips") })
+                    Tab(selected = tab == 1, enabled = !tabsLocked, onClick = { tab = 1 },
+                        text = { Text("Clips") })
                 }
                 Column(Modifier.weight(1f)) {
                     if (tab == 0) RecordScreen(viewModel) else ClipsScreen()
