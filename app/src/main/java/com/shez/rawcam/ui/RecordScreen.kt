@@ -45,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -435,7 +436,7 @@ private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): 
     }
 }
 
-private enum class Param { ISO, SHUTTER, FOCUS }
+private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS }
 
 @Composable
 fun RecordScreen(
@@ -466,33 +467,43 @@ fun RecordScreen(
     }
 
     val spec = viewModel.controller.rawSpec
+    val lenses = viewModel.controller.lenses
+    val lens = lenses.getOrElse(state.lensIndex) { lenses[0] }
+    val sizes = lens.sizes
+    val size = sizes.getOrElse(state.sizeIndex) { sizes[0] }
     val shutterStops = viewModel.shutterStops(state.fps)
+    val modeEnabled = !state.recording && !state.busy
     val scope = rememberCoroutineScope()
     var benchRunning by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf<Param?>(null) }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // Letterboxed preview at the sensor's true aspect ratio; the side gutters
-        // that creates host the status/action rails.
-        AndroidView(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .fillMaxHeight()
-                .aspectRatio(spec.width.toFloat() / spec.height.toFloat()),
-            factory = { ctx ->
-                SurfaceView(ctx).apply {
-                    holder.addCallback(object : SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: SurfaceHolder) {
-                            viewModel.openCamera(holder.surface)
-                        }
-                        override fun surfaceChanged(
-                            holder: SurfaceHolder, format: Int, width: Int, height: Int,
-                        ) {}
-                        override fun surfaceDestroyed(holder: SurfaceHolder) {}
-                    })
-                }
-            },
-        )
+        // that creates host the status/action rails. Keyed on the selected mode:
+        // changing lens or resolution recreates the SurfaceView, and the fresh
+        // surfaceCreated -> openCamera reopens the camera with the new physical
+        // lens and spec (same path as returning from background).
+        key(state.lensIndex, state.sizeIndex) {
+            AndroidView(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxHeight()
+                    .aspectRatio(spec.width.toFloat() / spec.height.toFloat()),
+                factory = { ctx ->
+                    SurfaceView(ctx).apply {
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                viewModel.openCamera(holder.surface)
+                            }
+                            override fun surfaceChanged(
+                                holder: SurfaceHolder, format: Int, width: Int, height: Int,
+                            ) {}
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                        })
+                    }
+                },
+            )
+        }
 
         Box(Modifier.fillMaxSize().systemBarsPadding()) {
             if (state.thermalSevere) {
@@ -586,7 +597,7 @@ fun RecordScreen(
                     onClick = { viewModel.toggleRecord() },
                 )
                 FpsToggle(
-                    options = RecordViewModel.FPS_OPTIONS.filter { it <= spec.maxFps },
+                    options = viewModel.fpsOptions(),
                     selected = state.fps,
                     enabled = !state.recording,
                     onSelect = { viewModel.setFps(it) },
@@ -608,11 +619,24 @@ fun RecordScreen(
                         Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                             Text(
                                 when (param) {
+                                    Param.LENS -> "LENS"; Param.RES -> "RESOLUTION"
                                     Param.ISO -> "ISO"; Param.SHUTTER -> "SHUTTER"; Param.FOCUS -> "FOCUS"
                                 },
                                 color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp,
                             )
                             when (param) {
+                                Param.LENS -> OptionPills(
+                                    labels = lenses.map { it.label },
+                                    selectedIndex = state.lensIndex,
+                                    enabled = modeEnabled,
+                                    onSelect = { viewModel.setLens(it) },
+                                )
+                                Param.RES -> OptionPills(
+                                    labels = sizes.map { it.label },
+                                    selectedIndex = state.sizeIndex,
+                                    enabled = modeEnabled,
+                                    onSelect = { viewModel.setResolution(it) },
+                                )
                                 Param.ISO -> Slider(
                                     value = tFromIso(state.iso, spec.isoRange),
                                     onValueChange = { t -> viewModel.setIso(isoFromT(t, spec.isoRange)) },
@@ -637,10 +661,16 @@ fun RecordScreen(
                         }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     val denom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
                     val focusLabel =
                         if (state.focusDiopters <= 0f) "ƒ ∞" else "ƒ %.1fD".format(state.focusDiopters)
+                    ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
+                        expanded = if (expanded == Param.LENS) null else Param.LENS
+                    }
+                    ParamChip(size.label, expanded == Param.RES, enabled = modeEnabled) {
+                        expanded = if (expanded == Param.RES) null else Param.RES
+                    }
                     ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
                         expanded = if (expanded == Param.ISO) null else Param.ISO
                     }
@@ -721,16 +751,49 @@ private fun FpsToggle(options: List<Int>, selected: Int, enabled: Boolean, onSel
     }
 }
 
+/** Horizontal pill selector for the LENS / RESOLUTION panels (FpsToggle, by index). */
 @Composable
-private fun ParamChip(text: String, active: Boolean, onClick: () -> Unit) {
+private fun OptionPills(
+    labels: List<String>, selectedIndex: Int, enabled: Boolean, onSelect: (Int) -> Unit,
+) {
+    Row(
+        Modifier
+            .padding(vertical = 6.dp)
+            .alpha(if (enabled) 1f else 0.45f)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, RawCamColors.Outline, RoundedCornerShape(8.dp))
+    ) {
+        labels.forEachIndexed { i, label ->
+            val on = i == selectedIndex
+            Box(
+                Modifier
+                    .clickable(enabled = enabled) { onSelect(i) }
+                    .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    label,
+                    color = if (on) RawCamColors.OnSurface else RawCamColors.Muted,
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ParamChip(text: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     Surface(
         color = Color(0xB80A0B0D),
         shape = CircleShape,
         border = BorderStroke(1.dp, if (active) RawCamColors.Accent else RawCamColors.Outline),
+        modifier = Modifier.alpha(if (enabled) 1f else 0.45f),
     ) {
         Text(
             text, color = RawCamColors.OnSurface, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
-            modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp),
+            modifier = Modifier
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 7.dp),
         )
     }
 }
