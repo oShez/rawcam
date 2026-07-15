@@ -544,8 +544,8 @@ class CameraController(private val context: Context) {
     private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
         val (r, g, b) = kelvinRgb(kelvinValue)
         val gRef = g.coerceAtLeast(1f)
-        val gainR = gRef / r.coerceAtLeast(1f)
-        val gainB = gRef / b.coerceAtLeast(1f)
+        val gainR = (gRef / r.coerceAtLeast(1f)).coerceAtLeast(1f)
+        val gainB = (gRef / b.coerceAtLeast(1f)).coerceAtLeast(1f)
         val tintFactor = (1.0 - tintValue / 100.0).toFloat().coerceIn(0.3f, 2f)
         val gainG = tintFactor
         return RggbChannelVector(gainR, gainG, gainG, gainB)
