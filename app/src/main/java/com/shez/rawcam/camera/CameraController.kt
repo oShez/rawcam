@@ -27,6 +27,10 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import android.hardware.camera2.params.ColorSpaceTransform
+import android.hardware.camera2.params.RggbChannelVector
+import kotlin.math.ln
+import kotlin.math.pow
 
 /**
  * Camera2 controller for RAW video capture with fully manual exposure.
@@ -101,6 +105,8 @@ class CameraController(private val context: Context) {
     @Volatile private var iso = 100
     @Volatile private var exposureNs = 10_000_000L
     @Volatile private var focusDiopters = 0f
+    @Volatile private var kelvin = 5600
+    @Volatile private var tint = 0
     /** Set by stopRecording(); counted down by the session's onReady (idle) callback. */
     @Volatile private var idleLatch: CountDownLatch? = null
 
@@ -182,6 +188,7 @@ class CameraController(private val context: Context) {
      */
     fun startRecording(
         path: String, fps: Int, iso: Int, exposureNs: Long, focusDiopters: Float,
+        kelvin: Int, tint: Int,
     ): Boolean {
         if (recording) return false
         val preview = previewSurface ?: return false
@@ -198,6 +205,8 @@ class CameraController(private val context: Context) {
         this.iso = iso.coerceIn(spec.isoRange)
         this.exposureNs = clampExposure(exposureNs, fps)
         this.focusDiopters = focusDiopters
+        this.kelvin = kelvin
+        this.tint = tint
         manualSet = true
         // Set before frames can flow so the very first onCaptureCompleted forwards meta.
         recording = true
@@ -229,10 +238,12 @@ class CameraController(private val context: Context) {
     }
 
     /** Applies new manual values live, during preview or recording. */
-    fun updateManual(iso: Int, exposureNs: Long, focusDiopters: Float) {
+    fun updateManual(iso: Int, exposureNs: Long, focusDiopters: Float, kelvin: Int, tint: Int) {
         this.iso = iso.coerceIn(rawSpec.isoRange)
         this.exposureNs = if (recording) clampExposure(exposureNs, recordFps) else exposureNs
         this.focusDiopters = focusDiopters
+        this.kelvin = kelvin
+        this.tint = tint
         manualSet = true
         cameraHandler.post {
             val s = session ?: return@post
@@ -484,7 +495,6 @@ class CameraController(private val context: Context) {
         val dev = device ?: return
         val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewSurface ?: return)
-            set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
             if (manualSet) applyManual(this, withFrameDuration = false)
         }.build()
         s.setRepeatingRequest(req, null, cameraHandler)
@@ -496,10 +506,49 @@ class CameraController(private val context: Context) {
         val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             addTarget(previewSurface ?: return)
             addTarget(raw)
-            set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
             applyManual(this, withFrameDuration = true)
         }.build()
         s.setRepeatingRequest(req, captureCallback, cameraHandler)
+    }
+
+    /**
+     * Approximate blackbody color temperature -> RGB (0..255), the well-known
+     * Tanner Helland curve fit (public domain, valid 1000K-40000K; our UI
+     * range is 2000K-10000K, safely inside it). This is "the color of light
+     * at this temperature" -- gainsFor inverts it to get the gains that
+     * cancel that cast.
+     */
+    private fun kelvinRgb(kelvinValue: Int): Triple<Float, Float, Float> {
+        val temp = kelvinValue / 100.0
+        val red = if (temp <= 66.0) 255.0
+        else (329.698727446 * (temp - 60.0).pow(-0.1332047592)).coerceIn(0.0, 255.0)
+        val green = if (temp <= 66.0) {
+            (99.4708025861 * ln(temp) - 161.1195681661).coerceIn(0.0, 255.0)
+        } else {
+            (288.1221695283 * (temp - 60.0).pow(-0.0755148492)).coerceIn(0.0, 255.0)
+        }
+        val blue = when {
+            temp >= 66.0 -> 255.0
+            temp <= 19.0 -> 0.0
+            else -> (138.5177312231 * ln(temp - 10.0) - 305.0447927307).coerceIn(0.0, 255.0)
+        }
+        return Triple(red.toFloat(), green.toFloat(), blue.toFloat())
+    }
+
+    /**
+     * Kelvin/tint -> per-channel gains that cancel the color temperature's
+     * cast, normalized so green stays the reference channel (gain 1 before
+     * tint). Tint biases green relative to red/blue: positive = more
+     * magenta (green reduced), negative = more green (green raised).
+     */
+    private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
+        val (r, g, b) = kelvinRgb(kelvinValue)
+        val gRef = g.coerceAtLeast(1f)
+        val gainR = gRef / r.coerceAtLeast(1f)
+        val gainB = gRef / b.coerceAtLeast(1f)
+        val tintFactor = (1.0 - tintValue / 100.0).toFloat().coerceIn(0.3f, 2f)
+        val gainG = tintFactor
+        return RggbChannelVector(gainR, gainG, gainG, gainB)
     }
 
     private fun applyManual(b: CaptureRequest.Builder, withFrameDuration: Boolean) {
@@ -511,6 +560,10 @@ class CameraController(private val context: Context) {
         }
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
         b.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDiopters)
+        b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
+        b.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+        b.set(CaptureRequest.COLOR_CORRECTION_GAINS, gainsFor(kelvin, tint))
+        b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, IDENTITY_TRANSFORM)
     }
 
     /** Exposure must stay strictly below the frame duration (1e9 / fps). */
@@ -546,5 +599,14 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
+        // Identity 3x3 (row-major rationals num/den): color correction here is
+        // gains-only, no cross-channel matrix warp.
+        private val IDENTITY_TRANSFORM = ColorSpaceTransform(
+            intArrayOf(
+                1, 1, 0, 1, 0, 1,
+                0, 1, 1, 1, 0, 1,
+                0, 1, 0, 1, 1, 1,
+            )
+        )
     }
 }
