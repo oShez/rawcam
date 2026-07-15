@@ -109,6 +109,8 @@ data class RecordUiState(
     val freeSpaceBytes: Long = 0,
     val lensIndex: Int = 0,
     val sizeIndex: Int = 0,
+    val kelvin: Int = 5600,
+    val tint: Int = 0,
 )
 
 /**
@@ -233,6 +235,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         pushManual()
     }
 
+    fun setKelvin(k: Int) {
+        _uiState.update { it.copy(kelvin = k) }
+        pushManual()
+    }
+
+    fun setTint(t: Int) {
+        _uiState.update { it.copy(tint = t) }
+        pushManual()
+    }
+
     fun setFps(fps: Int) {
         if (_uiState.value.recording) return
         val stops = shutterStops(fps)
@@ -277,7 +289,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     private fun pushManual() {
         val s = _uiState.value
         if (!s.previewReady) return
-        controller.updateManual(s.iso, exposureNsFor(s), s.focusDiopters)
+        controller.updateManual(s.iso, exposureNsFor(s), s.focusDiopters, s.kelvin, s.tint)
     }
 
     fun toggleRecord() {
@@ -306,7 +318,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 val name =
                     "clip_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
                 val path = File(controller.clipsDir, name).absolutePath
-                val ok = controller.startRecording(path, s.fps, s.iso, exposureNs, s.focusDiopters)
+                val ok = controller.startRecording(
+                    path, s.fps, s.iso, exposureNs, s.focusDiopters, s.kelvin, s.tint,
+                )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
                     _uiState.update {
