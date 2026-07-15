@@ -3,20 +3,30 @@ package com.shez.rawcam.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.StatFs
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,14 +36,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.export.ExportService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Locale
 
 private data class ClipEntry(
@@ -57,6 +73,20 @@ private fun humanSize(bytes: Long): String {
     val mb = bytes / (1024.0 * 1024.0)
     return if (mb >= 1024) "%.2f GB".format(Locale.US, mb / 1024.0) else "%.1f MB".format(Locale.US, mb)
 }
+
+/** `clip_yyyyMMdd_HHmmss.rawv` -> "Jul 13 · 14:51"; anything else keeps its filename. */
+private fun clipTitle(f: File): String {
+    val m = Regex("clip_(\\d{8}_\\d{6})").find(f.name) ?: return f.name
+    return try {
+        val d = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).parse(m.groupValues[1])!!
+        SimpleDateFormat("MMM d · HH:mm", Locale.US).format(d)
+    } catch (e: Exception) {
+        f.name
+    }
+}
+
+private fun durationLabel(frames: Int, fps: Int): String =
+    if (fps > 0) "%.1f s".format(Locale.US, frames.toFloat() / fps) else "— s"
 
 private fun loadClips(context: android.content.Context): List<ClipEntry> {
     val clipsDir = clipsDirOf(context)
@@ -84,15 +114,17 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
  * which delegates to RawvReader -- crash-recovery scan included). Export starts
  * [ExportService] as a foreground service; progress/notification live there. Delete
  * asks for confirmation before removing the .rawv file. The list -- including each
- * clip's exported-folder DNG count -- refreshes on a 2s poll so an export finishing
- * in the background is reflected without user action.
+ * clip's exported-folder DNG count -- refreshes on a 2s poll (file I/O on
+ * Dispatchers.IO) so an export finishing in the background is reflected without
+ * user action.
  */
 @Composable
 fun ClipsScreen(onBack: () -> Unit = {}) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     var refreshTick by remember { mutableStateOf(0) }
-    var clips by remember { mutableStateOf(loadClips(context)) }
+    var clips by remember { mutableStateOf<List<ClipEntry>>(emptyList()) }
+    var freeBytes by remember { mutableStateOf(0L) }
     var pendingDelete by remember { mutableStateOf<File?>(null) }
 
     // Export runs as a foreground service with a progress notification (required on
@@ -110,7 +142,18 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
         }
     }
 
-    LaunchedEffect(refreshTick) { clips = loadClips(context) }
+    LaunchedEffect(refreshTick) {
+        val loaded = withContext(Dispatchers.IO) {
+            val free = try {
+                StatFs(context.getExternalFilesDir(null)!!.absolutePath).availableBytes
+            } catch (e: Exception) {
+                0L
+            }
+            free to loadClips(context)
+        }
+        freeBytes = loaded.first
+        clips = loaded.second
+    }
     LaunchedEffect(Unit) {
         while (true) {
             delay(2000)
@@ -136,18 +179,25 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
         )
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("←") }
-            Text("Clips", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("←", fontSize = 18.sp) }
+            Text("Clips", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.weight(1f))
+            Text(
+                humanSize(freeBytes) + " free",
+                color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+            )
         }
-        androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+        Spacer(Modifier.height(8.dp))
         if (clips.isEmpty()) {
-            Text("No clips recorded yet.")
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No clips yet — record something.", color = RawCamColors.Muted)
+            }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(clips, key = { it.file.absolutePath }) { clip ->
-                    ClipRow(
+                    ClipCard(
                         clip = clip,
                         onExport = {
                             val outDir = File(exportsDirOf(context), baseName(clip.file))
@@ -161,7 +211,6 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                         onCancel = { ExportService.cancel(context) },
                         onDelete = { pendingDelete = clip.file },
                     )
-                    HorizontalDivider()
                 }
             }
         }
@@ -169,37 +218,66 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
 }
 
 @Composable
-private fun ClipRow(
+private fun ClipCard(
     clip: ClipEntry, onExport: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit,
 ) {
     val status = ExportService.status[baseName(clip.file)]
     val running = status == ExportService.ExportStatus.RUNNING
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+    Card(
+        colors = CardDefaults.cardColors(containerColor = RawCamColors.Surface),
+        border = BorderStroke(1.dp, RawCamColors.Outline.copy(alpha = 0.5f)),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(clip.file.name, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-            Text("${clip.width}x${clip.height}@${clip.fps}fps  ${clip.frameCount} frames  ${humanSize(clip.file.length())}")
-            when {
-                running -> Text("Exporting…")
-                clip.exportedFrameCount >= 0 ->
-                    Text("Exported: ${clip.exportedFrameCount}/${clip.frameCount} DNGs" +
-                        when (status) {
-                            ExportService.ExportStatus.FAILED -> " (failed)"
-                            ExportService.ExportStatus.CANCELLED -> " (cancelled)"
-                            else -> ""
-                        })
-                else -> Text("Not exported")
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(clipTitle(clip.file), style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${clip.width}×${clip.height} · ${clip.fps} fps · ${clip.frameCount} frames · " +
+                        "${durationLabel(clip.frameCount, clip.fps)} · ${humanSize(clip.file.length())}",
+                    color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.height(6.dp))
+                when {
+                    running -> {
+                        val done = clip.exportedFrameCount.coerceAtLeast(0)
+                        Text(
+                            "Exporting…  $done / ${clip.frameCount}",
+                            fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = {
+                                if (clip.frameCount > 0) done.toFloat() / clip.frameCount else 0f
+                            },
+                            modifier = Modifier.fillMaxWidth(0.85f),
+                        )
+                    }
+                    clip.exportedFrameCount >= 0 -> {
+                        val (suffix, color) = when (status) {
+                            ExportService.ExportStatus.FAILED -> " (failed)" to RawCamColors.Accent
+                            ExportService.ExportStatus.CANCELLED -> " (cancelled)" to RawCamColors.Muted
+                            else -> "" to RawCamColors.Success
+                        }
+                        Text(
+                            "Exported · ${clip.exportedFrameCount} DNGs$suffix",
+                            color = color, fontSize = 12.sp,
+                        )
+                    }
+                    else -> Text("Not exported", color = RawCamColors.Muted, fontSize = 12.sp)
+                }
             }
-        }
-        Column(horizontalAlignment = androidx.compose.ui.Alignment.End) {
-            if (running) {
-                Button(onClick = onCancel) { Text("Cancel") }
-            } else {
-                Button(onClick = onExport) { Text("Export") }
+            Spacer(Modifier.width(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (running) {
+                    OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                } else {
+                    Button(onClick = onExport) { Text("Export") }
+                    TextButton(onClick = onDelete) { Text("Delete", color = RawCamColors.Muted) }
+                }
             }
-            OutlinedButton(onClick = onDelete, enabled = !running) { Text("Delete") }
         }
     }
 }
