@@ -21,9 +21,12 @@ import android.util.Log
 import android.view.Surface
 import com.shez.rawcam.NativeBridge
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Camera2 controller for RAW video capture with fully manual exposure.
@@ -46,12 +49,39 @@ class CameraController(private val context: Context) {
         val minFocusDiopters: Float, val deviceName: String,
     )
 
+    /** One selectable RAW output size of a lens. [label] is what the UI shows. */
+    data class LensSize(val width: Int, val height: Int, val maxFps: Int, val label: String)
+
+    /**
+     * One selectable back lens. [physicalId] is null only for the single-lens
+     * fallback (open the logical camera untagged — today's behavior). [fovMetric]
+     * is sensorPhysicalWidth / focalLength: proportional to field of view, used
+     * for sorting (widest first) and zoom labels.
+     */
+    data class LensInfo(
+        val physicalId: String?, val label: String, val focalMm: Float,
+        val fovMetric: Float, val sizes: List<LensSize>,
+        val cfa: Int, val whiteLevel: Int, val blackLevel: IntArray,
+        val colorMatrix1: FloatArray, val isoRange: ClosedRange<Int>,
+        val minFocusDiopters: Float,
+    )
+
     private val cameraManager =
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val cameraId: String
 
-    /** Sensor/RAW capabilities, queried once from CameraCharacteristics at init. */
-    val rawSpec: RawSpec
+    /** Selectable back lenses, widest first. At least one entry. */
+    val lenses: List<LensInfo>
+
+    /** Index in [lenses] of the main (1×) lens — the revert target on mode failure. */
+    val defaultLensIndex: Int
+
+    /** Snapshot of the selected lens+size mode. Replaced atomically by [selectMode]. */
+    @Volatile var rawSpec: RawSpec
+        private set
+
+    /** Physical camera id every session's OutputConfigurations are tagged with. */
+    @Volatile private var activePhysicalId: String? = null
 
     /** Directory Task 11 should place clip files in (created eagerly). */
     val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
@@ -90,41 +120,26 @@ class CameraController(private val context: Context) {
                 c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
                     ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW) == true
         }
-        val ch = cameraManager.getCameraCharacteristics(cameraId)
-        val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-        val size = map.getOutputSizes(ImageFormat.RAW_SENSOR).maxBy { it.width * it.height }
-        // Camera2 CFA constants share our Cfa enum order: RGGB=0 GRBG=1 GBRG=2 BGGR=3.
-        val cfa = ch.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT)!!
-        val blackLevel = IntArray(4).also {
-            ch.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)!!.copyTo(it, 0)
-        }
-        val xform = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1)!!
-        // Row-major 3x3: index i -> row i/3, column i%3 (getElement takes column, row).
-        val colorMatrix1 = FloatArray(9) { i -> xform.getElement(i % 3, i / 3).toFloat() }
-        val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)!!
-        val minFrameDurNs = map.getOutputMinFrameDuration(ImageFormat.RAW_SENSOR, size)
-        rawSpec = RawSpec(
-            width = size.width,
-            height = size.height,
-            cfa = cfa,
-            whiteLevel = ch.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL)!!,
-            blackLevel = blackLevel,
-            colorMatrix1 = colorMatrix1,
-            isoRange = sensRange.lower..sensRange.upper,
-            maxFps = (1e9 / minFrameDurNs).toInt(),
-            minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
-            deviceName = Build.MODEL,
-        )
+        lenses = enumerateLenses(cameraManager.getCameraCharacteristics(cameraId))
+        defaultLensIndex = lenses.indexOfFirst { it.label == "1×" }.coerceAtLeast(0)
+        activePhysicalId = lenses[defaultLensIndex].physicalId
+        rawSpec = specFor(lenses[defaultLensIndex], 0)
     }
 
-    /** Opens the camera and starts a preview-only repeating request (AWB auto). */
+    /**
+     * Opens the camera and starts a preview-only repeating request (AWB auto).
+     * [onFailed] fires when the device errors out or the preview session cannot
+     * be configured — e.g. an unsupported lens/size mode.
+     */
     @SuppressLint("MissingPermission")
-    fun openAndPreview(previewSurface: Surface, onReady: () -> Unit) {
+    fun openAndPreview(previewSurface: Surface, onFailed: () -> Unit = {}, onReady: () -> Unit) {
         this.previewSurface = previewSurface
         cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(cam: CameraDevice) {
                 device = cam
-                createSession(listOf(previewSurface), forRecording = false) { onReady() }
+                createSession(listOf(previewSurface), forRecording = false, onFailed = onFailed) {
+                    onReady()
+                }
             }
 
             override fun onDisconnected(cam: CameraDevice) {
@@ -137,8 +152,26 @@ class CameraController(private val context: Context) {
                 Log.e(TAG, "camera error $error")
                 cam.close()
                 device = null
+                onFailed()
             }
         }, cameraHandler)
+    }
+
+    /**
+     * Selects which lens+size the NEXT session uses. Refused while recording.
+     * Deliberately does not touch the live session: the caller re-keys the
+     * preview SurfaceView on the mode, and the resulting surfaceCreated ->
+     * openCamera -> openAndPreview reopens the camera with the new
+     * [activePhysicalId] and [rawSpec] — the same proven path as returning
+     * from background.
+     */
+    fun selectMode(lensIndex: Int, sizeIndex: Int): Boolean {
+        if (recording) return false
+        val lens = lenses.getOrNull(lensIndex) ?: return false
+        if (sizeIndex !in lens.sizes.indices) return false
+        activePhysicalId = lens.physicalId
+        rawSpec = specFor(lens, sizeIndex)
+        return true
     }
 
     /**
@@ -285,6 +318,107 @@ class CameraController(private val context: Context) {
 
     // --- internals -------------------------------------------------------------
 
+    /**
+     * Enumerates the logical camera's physical lenses: dedupes sensors exposed
+     * under two ids (same focal length -> keep the id with the most RAW sizes),
+     * sorts widest-first, and labels each with its zoom factor relative to the
+     * main lens (the focal length the logical camera itself advertises).
+     * Falls back to a single logical-camera entry when nothing enumerates.
+     */
+    private fun enumerateLenses(logicalCh: CameraCharacteristics): List<LensInfo> {
+        val candidates = logicalCh.physicalCameraIds.mapNotNull { id ->
+            try {
+                buildLensCandidate(id, cameraManager.getCameraCharacteristics(id))
+            } catch (e: Exception) {
+                Log.w(TAG, "skipping physical camera $id", e)
+                null
+            }
+        }
+        val deduped = candidates
+            .groupBy { it.focalMm }
+            .map { (_, group) -> group.maxBy { it.sizes.size } }
+            .sortedByDescending { it.fovMetric }
+            .ifEmpty { listOfNotNull(buildLensCandidate(null, logicalCh)) }
+        check(deduped.isNotEmpty()) { "no RAW-capable back lens" }
+        val logicalFocal =
+            logicalCh.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+        val mainIdx = if (logicalFocal == null) 0
+        else deduped.indices.minBy { abs(deduped[it].focalMm - logicalFocal) }
+        val mainFov = deduped[mainIdx].fovMetric
+        return deduped.map { lens ->
+            val zoom = mainFov / lens.fovMetric
+            val label =
+                if (zoom < 0.95f) "%.1f×".format(Locale.US, zoom) else "${zoom.roundToInt()}×"
+            lens.copy(label = label)
+        }
+    }
+
+    /** Null when [ch] lacks RAW, manual-sensor support, or any required key. */
+    private fun buildLensCandidate(physicalId: String?, ch: CameraCharacteristics): LensInfo? {
+        val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return null
+        if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)) return null
+        if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)) return null
+        val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val rawSizes = map.getOutputSizes(ImageFormat.RAW_SENSOR)
+            ?.takeIf { it.isNotEmpty() } ?: return null
+        val focal =
+            ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+                ?: return null
+        val physSize = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+        // Camera2 CFA constants share our Cfa enum order: RGGB=0 GRBG=1 GBRG=2 BGGR=3.
+        val cfa = ch.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: return null
+        val whiteLevel = ch.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: return null
+        val blackPattern = ch.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN) ?: return null
+        val xform = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
+        val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
+        val sorted = rawSizes.sortedByDescending { it.width.toLong() * it.height }
+        val maxArea = sorted.first().width.toLong() * sorted.first().height
+        val sizes = sorted.map { s ->
+            val minDur = map.getOutputMinFrameDuration(ImageFormat.RAW_SENSOR, s)
+            LensSize(
+                width = s.width, height = s.height,
+                maxFps = if (minDur > 0) (1e9 / minDur).toInt() else 30,
+                label = sizeLabel(s.width, s.height, maxArea),
+            )
+        }
+        return LensInfo(
+            physicalId = physicalId,
+            label = "", // filled by enumerateLenses once the main lens is known
+            focalMm = focal,
+            fovMetric = physSize.width / focal,
+            sizes = sizes,
+            cfa = cfa,
+            whiteLevel = whiteLevel,
+            blackLevel = IntArray(4).also { blackPattern.copyTo(it, 0) },
+            // Row-major 3x3: index i -> row i/3, column i%3 (getElement takes column, row).
+            colorMatrix1 = FloatArray(9) { i -> xform.getElement(i % 3, i / 3).toFloat() },
+            isoRange = sensRange.lower..sensRange.upper,
+            minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+        )
+    }
+
+    /** "4:3" / "16:9" for full-area sizes, "LOW" for binned (under half the max area). */
+    private fun sizeLabel(w: Int, h: Int, maxArea: Long): String {
+        if (w.toLong() * h < maxArea / 2) return "LOW"
+        val aspect = w.toFloat() / h
+        return when {
+            abs(aspect - 4f / 3f) < 0.05f -> "4:3"
+            abs(aspect - 16f / 9f) < 0.1f -> "16:9"
+            else -> "${h}p"
+        }
+    }
+
+    private fun specFor(lens: LensInfo, sizeIndex: Int): RawSpec {
+        val size = lens.sizes[sizeIndex]
+        return RawSpec(
+            width = size.width, height = size.height, cfa = lens.cfa,
+            whiteLevel = lens.whiteLevel, blackLevel = lens.blackLevel,
+            colorMatrix1 = lens.colorMatrix1, isoRange = lens.isoRange,
+            maxFps = size.maxFps, minFocusDiopters = lens.minFocusDiopters,
+            deviceName = Build.MODEL,
+        )
+    }
+
     private fun createSession(
         surfaces: List<Surface>, forRecording: Boolean,
         onFailed: () -> Unit = {}, onConfigured: () -> Unit,
@@ -294,7 +428,11 @@ class CameraController(private val context: Context) {
         try {
             val config = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
-                surfaces.map { OutputConfiguration(it) },
+                surfaces.map { s ->
+                    OutputConfiguration(s).apply {
+                        activePhysicalId?.let { setPhysicalCameraId(it) }
+                    }
+                },
                 cameraExecutor,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(s: CameraCaptureSession) {
