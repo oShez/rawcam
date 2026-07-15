@@ -6,25 +6,35 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.os.StatFs
+import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -41,8 +51,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -53,7 +67,6 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
-import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -92,6 +105,7 @@ data class RecordUiState(
     val shutterIndex: Int = 0,
     val focusDiopters: Float = 0f,
     val fps: Int = 24,
+    val freeSpaceBytes: Long = 0,
 )
 
 /**
@@ -134,6 +148,18 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     init {
         val pm = application.getSystemService(Context.POWER_SERVICE) as PowerManager
         pm.addThermalStatusListener(application.mainExecutor, thermalListener)
+        // Free-space poll for the "space remaining" readout; runs for the whole
+        // viewmodel lifetime so the value is honest both idle and mid-recording.
+        viewModelScope.launch {
+            while (isActive) {
+                val free = withContext(Dispatchers.IO) {
+                    try { StatFs(controller.clipsDir.absolutePath).availableBytes }
+                    catch (e: Exception) { 0L }
+                }
+                _uiState.update { it.copy(freeSpaceBytes = free) }
+                delay(2000)
+            }
+        }
     }
 
     /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
@@ -338,6 +364,17 @@ private fun isoFromT(t: Float, range: ClosedRange<Int>): Int {
     return iso.roundToInt().coerceIn(range.start, range.endInclusive)
 }
 
+/** Free space -> recordable time at the current fps/frame size ("~23 min"). */
+private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): String {
+    val frameBytes = (width.toLong() * height / 4) * 5 + 64
+    val perSecond = frameBytes * fps
+    if (perSecond <= 0) return "—"
+    val seconds = freeBytes / perSecond
+    return if (seconds >= 6000) "99+ min" else "~${seconds / 60} min"
+}
+
+private enum class Param { ISO, SHUTTER, FOCUS }
+
 @Composable
 fun RecordScreen(
     viewModel: RecordViewModel = viewModel(),
@@ -370,10 +407,16 @@ fun RecordScreen(
     val shutterStops = viewModel.shutterStops(state.fps)
     val scope = rememberCoroutineScope()
     var benchRunning by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf<Param?>(null) }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        // Letterboxed preview at the sensor's true aspect ratio; the side gutters
+        // that creates host the status/action rails.
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxHeight()
+                .aspectRatio(spec.width.toFloat() / spec.height.toFloat()),
             factory = { ctx ->
                 SurfaceView(ctx).apply {
                     holder.addCallback(object : SurfaceHolder.Callback {
@@ -389,129 +432,243 @@ fun RecordScreen(
             },
         )
 
-        if (state.thermalSevere) {
-            Surface(
-                color = Color.Red,
-                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+            if (state.thermalSevere) {
+                Surface(
+                    color = RawCamColors.Accent,
+                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                ) {
+                    Text(
+                        "THERMAL WARNING — device overheating",
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(8.dp).fillMaxWidth(),
+                    )
+                }
+            }
+
+            // Benchmark (Task 8), reachable but out of the way. Disabled while
+            // recording: its ~6 GB write would compete with the ~376 MB/s capture
+            // hot path and force drops.
+            TextButton(
+                enabled = !state.recording && !state.busy,
+                onClick = {
+                    if (benchRunning) return@TextButton
+                    benchRunning = true
+                    scope.launch {
+                        val mbps = withContext(Dispatchers.IO) {
+                            val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
+                            NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                        }
+                        benchRunning = false
+                        snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
+                    }
+                },
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
             ) {
                 Text(
-                    "THERMAL WARNING — device overheating",
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(8.dp).fillMaxWidth(),
+                    if (benchRunning) "…" else "BENCH",
+                    color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
                 )
             }
-        }
 
-        // Small benchmark trigger (Task 8), kept reachable but out of the way.
-        // Disabled while recording: its ~6 GB write would compete with the
-        // ~376 MB/s capture hot path and force drops.
-        TextButton(
-            enabled = !state.recording && !state.busy,
-            onClick = {
-                if (benchRunning) return@TextButton
-                benchRunning = true
-                scope.launch {
-                    val mbps = withContext(Dispatchers.IO) {
-                        val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
-                        NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
-                    }
-                    benchRunning = false
-                    snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
-                }
-            },
-            modifier = Modifier.align(Alignment.TopStart).padding(4.dp),
-        ) {
-            Text(if (benchRunning) "…" else "B", color = Color.White.copy(alpha = 0.6f))
-        }
-
-        // Temporary CLIPS button (Task 2 restyles it into the corner controls).
-        TextButton(
-            enabled = clipsEnabled,
-            onClick = onOpenClips,
-            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
-        ) { Text("CLIPS", color = Color.White.copy(alpha = 0.6f)) }
-
-        // Right rail: record/stop, timer, drop counter.
-        Column(
-            modifier = Modifier.align(Alignment.CenterEnd).padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Button(
-                enabled = state.previewReady && !state.busy,
-                onClick = { viewModel.toggleRecord() },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (state.recording) Color.Red else MaterialTheme.colorScheme.primary,
-                ),
-                shape = CircleShape,
-                modifier = Modifier.size(84.dp),
+            TextButton(
+                enabled = clipsEnabled,
+                onClick = onOpenClips,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
             ) {
-                Text(if (state.recording) "STOP" else "REC")
+                Text(
+                    "CLIPS",
+                    color = if (clipsEnabled) RawCamColors.OnSurface
+                            else RawCamColors.Muted.copy(alpha = 0.5f),
+                    fontSize = 11.sp, letterSpacing = 1.5.sp,
+                )
             }
-            Spacer(Modifier.height(12.dp))
-            Text(formatTimer(state.elapsedSeconds), color = Color.White, fontSize = 22.sp)
-            Text(
-                "dropped: ${state.dropped}",
-                color = if (state.dropped > 0) Color.Red else Color.White,
-            )
-        }
 
-        // Bottom rail: fps selector + manual sliders.
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.55f))
-                .padding(12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("FPS", color = Color.White, modifier = Modifier.width(70.dp))
-                RecordViewModel.FPS_OPTIONS.filter { it <= spec.maxFps }.forEach { fps ->
-                    TextButton(enabled = !state.recording, onClick = { viewModel.setFps(fps) }) {
-                        Text(
-                            "$fps" + if (fps == state.fps) " ✓" else "",
-                            color = if (fps == state.fps) Color.Yellow else Color.White,
-                        )
+            // Left status rail.
+            Column(
+                modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (state.recording) RecDot()
+                    Text(
+                        formatTimer(state.elapsedSeconds),
+                        color = RawCamColors.OnSurface, fontSize = 24.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                StatItem("${state.written}", "frames written")
+                StatItem(
+                    "${state.dropped}", "dropped",
+                    valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
+                )
+                StatItem(
+                    remainingLabel(state.freeSpaceBytes, state.fps, spec.width, spec.height),
+                    "space remaining",
+                )
+            }
+
+            // Right action rail.
+            Column(
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                ShutterButton(
+                    recording = state.recording,
+                    enabled = state.previewReady && !state.busy,
+                    onClick = { viewModel.toggleRecord() },
+                )
+                FpsToggle(
+                    options = RecordViewModel.FPS_OPTIONS.filter { it <= spec.maxFps },
+                    selected = state.fps,
+                    enabled = !state.recording,
+                    onSelect = { viewModel.setFps(it) },
+                )
+            }
+
+            // Bottom: one expandable slider + the parameter chips.
+            Column(
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp).width(400.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                expanded?.let { param ->
+                    Surface(
+                        color = Color(0xD90A0B0D), shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, RawCamColors.Outline),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                            Text(
+                                when (param) {
+                                    Param.ISO -> "ISO"; Param.SHUTTER -> "SHUTTER"; Param.FOCUS -> "FOCUS"
+                                },
+                                color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp,
+                            )
+                            when (param) {
+                                Param.ISO -> Slider(
+                                    value = tFromIso(state.iso, spec.isoRange),
+                                    onValueChange = { t -> viewModel.setIso(isoFromT(t, spec.isoRange)) },
+                                )
+                                Param.SHUTTER -> Slider(
+                                    value = state.shutterIndex
+                                        .coerceIn(0, (shutterStops.size - 1).coerceAtLeast(0)).toFloat(),
+                                    onValueChange = { v -> viewModel.setShutterIndex(v.roundToInt()) },
+                                    valueRange = 0f..(shutterStops.size - 1).coerceAtLeast(0).toFloat(),
+                                    steps = (shutterStops.size - 2).coerceAtLeast(0),
+                                )
+                                Param.FOCUS -> {
+                                    val maxFocus = spec.minFocusDiopters.coerceAtLeast(0.01f)
+                                    Slider(
+                                        value = state.focusDiopters.coerceIn(0f, maxFocus),
+                                        onValueChange = { viewModel.setFocus(it) },
+                                        valueRange = 0f..maxFocus,
+                                        enabled = spec.minFocusDiopters > 0f,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val denom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
+                    val focusLabel =
+                        if (state.focusDiopters <= 0f) "ƒ ∞" else "ƒ %.1fD".format(state.focusDiopters)
+                    ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
+                        expanded = if (expanded == Param.ISO) null else Param.ISO
+                    }
+                    ParamChip("1/$denom", expanded == Param.SHUTTER) {
+                        expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER
+                    }
+                    ParamChip(focusLabel, expanded == Param.FOCUS) {
+                        expanded = if (expanded == Param.FOCUS) null else Param.FOCUS
                     }
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("ISO ${state.iso}", color = Color.White, modifier = Modifier.width(120.dp))
-                Slider(
-                    value = tFromIso(state.iso, spec.isoRange),
-                    onValueChange = { t -> viewModel.setIso(isoFromT(t, spec.isoRange)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val denom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
-                Text("1/$denom s", color = Color.White, modifier = Modifier.width(120.dp))
-                Slider(
-                    value = state.shutterIndex.coerceIn(0, (shutterStops.size - 1).coerceAtLeast(0)).toFloat(),
-                    onValueChange = { v -> viewModel.setShutterIndex(v.roundToInt()) },
-                    valueRange = 0f..(shutterStops.size - 1).coerceAtLeast(0).toFloat(),
-                    steps = (shutterStops.size - 2).coerceAtLeast(0),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val focusLabel = if (state.focusDiopters <= 0f) "Focus: ∞" else "Focus: %.1fD".format(state.focusDiopters)
-                Text(focusLabel, color = Color.White, modifier = Modifier.width(120.dp))
-                val maxFocus = spec.minFocusDiopters.coerceAtLeast(0.01f)
-                Slider(
-                    value = state.focusDiopters.coerceIn(0f, maxFocus),
-                    onValueChange = { viewModel.setFocus(it) },
-                    valueRange = 0f..maxFocus,
-                    enabled = spec.minFocusDiopters > 0f,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
+            SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
         }
-
-        SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
     }
 }
 
+@Composable
+private fun RecDot() {
+    val pulse by rememberInfiniteTransition(label = "rec").animateFloat(
+        initialValue = 1f, targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse),
+        label = "recAlpha",
+    )
+    Box(
+        Modifier.size(12.dp).graphicsLayer { alpha = pulse }
+            .background(RawCamColors.Accent, CircleShape)
+    )
+}
+
+@Composable
+private fun StatItem(value: String, label: String, valueColor: Color = RawCamColors.OnSurface) {
+    Column {
+        Text(value, color = valueColor, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
+        Text(label, color = RawCamColors.Muted, fontSize = 11.sp)
+    }
+}
+
+/** Round camera shutter: red circle idle, red rounded square while recording. */
+@Composable
+private fun ShutterButton(recording: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val border = if (enabled) RawCamColors.OnSurface else RawCamColors.OnSurface.copy(alpha = 0.35f)
+    Box(
+        Modifier.size(76.dp)
+            .border(4.dp, border, CircleShape)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (recording) {
+            Box(Modifier.size(30.dp).background(RawCamColors.Accent, RoundedCornerShape(6.dp)))
+        } else {
+            val fill = if (enabled) RawCamColors.Accent else RawCamColors.Accent.copy(alpha = 0.4f)
+            Box(Modifier.size(56.dp).background(fill, CircleShape))
+        }
+    }
+}
+
+@Composable
+private fun FpsToggle(options: List<Int>, selected: Int, enabled: Boolean, onSelect: (Int) -> Unit) {
+    Row(
+        Modifier
+            .alpha(if (enabled) 1f else 0.45f)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, RawCamColors.Outline, RoundedCornerShape(8.dp))
+    ) {
+        options.forEach { fps ->
+            val on = fps == selected
+            Box(
+                Modifier
+                    .clickable(enabled = enabled) { onSelect(fps) }
+                    .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text("$fps", color = if (on) RawCamColors.OnSurface else RawCamColors.Muted, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ParamChip(text: String, active: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = Color(0xB80A0B0D),
+        shape = CircleShape,
+        border = BorderStroke(1.dp, if (active) RawCamColors.Accent else RawCamColors.Outline),
+    ) {
+        Text(
+            text, color = RawCamColors.OnSurface, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp),
+        )
+    }
+}
