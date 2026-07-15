@@ -20,18 +20,22 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -86,8 +90,6 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.ln
-import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /** UI state for [RecordScreen]. Sliders store the raw value the user picked; the
@@ -420,23 +422,6 @@ private fun formatTimer(totalSeconds: Int): String {
     return "%02d:%02d".format(s / 60, s % 60)
 }
 
-/** ISO slider position (0..1) <-> value, log scale across [range]. */
-private fun tFromIso(iso: Int, range: ClosedRange<Int>): Float {
-    val lo = range.start.toDouble()
-    val hi = range.endInclusive.toDouble()
-    if (hi <= lo) return 0f
-    val t = ln(iso.toDouble().coerceIn(lo, hi) / lo) / ln(hi / lo)
-    return t.toFloat().coerceIn(0f, 1f)
-}
-
-private fun isoFromT(t: Float, range: ClosedRange<Int>): Int {
-    val lo = range.start.toDouble()
-    val hi = range.endInclusive.toDouble()
-    if (hi <= lo) return range.start
-    val iso = lo * (hi / lo).pow(t.toDouble())
-    return iso.roundToInt().coerceIn(range.start, range.endInclusive)
-}
-
 /** Free space -> recordable time at the current fps/frame size ("~23 min"). */
 private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): String {
     val frameBytes = (width.toLong() * height / 4) * 5 + 64
@@ -450,7 +435,35 @@ private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): 
     }
 }
 
-private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS }
+private val NICE_ISO_STOPS =
+    listOf(50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400)
+
+/** Standard full-stop ISO values within [range], with the range's true endpoints spliced in
+ *  so the slider's ends always reach what the lens actually supports. */
+private fun isoStops(range: ClosedRange<Int>): List<Int> =
+    (NICE_ISO_STOPS.filter { it in range } + range.start + range.endInclusive)
+        .distinct().sorted()
+
+private val NICE_FOCUS_METERS = listOf(10f, 5f, 3f, 2f, 1f, 0.5f, 0.3f)
+
+/** Friendly focus-distance stops (infinity first) converted to diopters, clamped so the
+ *  macro-end stop is whatever the lens actually supports rather than a fixed distance. */
+private fun focusStops(minFocusDiopters: Float): List<Float> {
+    if (minFocusDiopters <= 0f) return listOf(0f)
+    val within = NICE_FOCUS_METERS.map { 1f / it }.filter { it < minFocusDiopters }
+    return (listOf(0f) + within + minFocusDiopters).distinct().sorted()
+}
+
+private fun focusLabel(diopters: Float): String {
+    if (diopters <= 0f) return "∞"
+    val meters = 1f / diopters
+    return if (meters >= 1f) "%.0fm".format(meters) else "%.0fcm".format(meters * 100f)
+}
+
+private val KELVIN_STOPS = listOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
+private val TINT_STOPS = (-50..50 step 5).toList()
+
+private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB }
 
 @Composable
 fun RecordScreen(
@@ -486,6 +499,7 @@ fun RecordScreen(
     val sizes = lens.sizes
     val size = sizes.getOrElse(state.sizeIndex) { sizes[0] }
     val shutterStops = viewModel.shutterStops(state.fps)
+    val shutterDenom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
     val modeEnabled = !state.recording && !state.busy
     val scope = rememberCoroutineScope()
     var benchRunning by remember { mutableStateOf(false) }
@@ -631,54 +645,77 @@ fun RecordScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Text(
-                                when (param) {
-                                    Param.LENS -> "LENS"; Param.RES -> "RESOLUTION"
-                                    Param.ISO -> "ISO"; Param.SHUTTER -> "SHUTTER"; Param.FOCUS -> "FOCUS"
-                                },
-                                color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp,
-                            )
                             when (param) {
-                                Param.LENS -> OptionPills(
-                                    labels = lenses.map { it.label },
-                                    selectedIndex = state.lensIndex,
-                                    enabled = modeEnabled,
-                                    onSelect = { viewModel.setLens(it) },
-                                )
-                                Param.RES -> OptionPills(
-                                    labels = sizes.map { it.label },
-                                    selectedIndex = state.sizeIndex,
-                                    enabled = modeEnabled,
-                                    onSelect = { viewModel.setResolution(it) },
-                                )
-                                Param.ISO -> Slider(
-                                    value = tFromIso(state.iso, spec.isoRange),
-                                    onValueChange = { t -> viewModel.setIso(isoFromT(t, spec.isoRange)) },
-                                )
-                                Param.SHUTTER -> Slider(
-                                    value = state.shutterIndex
-                                        .coerceIn(0, (shutterStops.size - 1).coerceAtLeast(0)).toFloat(),
-                                    onValueChange = { v -> viewModel.setShutterIndex(v.roundToInt()) },
-                                    valueRange = 0f..(shutterStops.size - 1).coerceAtLeast(0).toFloat(),
-                                    steps = (shutterStops.size - 2).coerceAtLeast(0),
-                                )
+                                Param.LENS -> {
+                                    ParamLabel("LENS")
+                                    OptionPills(
+                                        labels = lenses.map { it.label },
+                                        selectedIndex = state.lensIndex,
+                                        enabled = modeEnabled,
+                                        onSelect = { viewModel.setLens(it) },
+                                    )
+                                }
+                                Param.RES -> {
+                                    ParamLabel("RESOLUTION")
+                                    OptionPills(
+                                        labels = sizes.map { it.label },
+                                        selectedIndex = state.sizeIndex,
+                                        enabled = modeEnabled,
+                                        onSelect = { viewModel.setResolution(it) },
+                                    )
+                                }
+                                Param.ISO -> {
+                                    ParamLabel("ISO")
+                                    TickedSlider(
+                                        stops = isoStops(spec.isoRange),
+                                        selected = state.iso,
+                                        labelFor = { "$it" },
+                                        onSelect = { viewModel.setIso(it) },
+                                    )
+                                }
+                                Param.SHUTTER -> {
+                                    ParamLabel("SHUTTER")
+                                    TickedSlider(
+                                        stops = shutterStops,
+                                        selected = shutterDenom,
+                                        labelFor = { "1/$it" },
+                                        onSelect = { viewModel.setShutterIndex(shutterStops.indexOf(it)) },
+                                    )
+                                }
                                 Param.FOCUS -> {
-                                    val maxFocus = spec.minFocusDiopters.coerceAtLeast(0.01f)
-                                    Slider(
-                                        value = state.focusDiopters.coerceIn(0f, maxFocus),
-                                        onValueChange = { viewModel.setFocus(it) },
-                                        valueRange = 0f..maxFocus,
+                                    ParamLabel("FOCUS")
+                                    TickedSlider(
+                                        stops = focusStops(spec.minFocusDiopters),
+                                        selected = state.focusDiopters,
+                                        labelFor = ::focusLabel,
                                         enabled = spec.minFocusDiopters > 0f,
+                                        onSelect = { viewModel.setFocus(it) },
+                                    )
+                                }
+                                Param.WB -> {
+                                    ParamLabel("WHITE BALANCE")
+                                    TickedSlider(
+                                        stops = KELVIN_STOPS,
+                                        selected = state.kelvin,
+                                        labelFor = { "${it}K" },
+                                        onSelect = { viewModel.setKelvin(it) },
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    TickedSlider(
+                                        stops = TINT_STOPS,
+                                        selected = state.tint,
+                                        labelFor = { if (it > 0) "+$it" else "$it" },
+                                        onSelect = { viewModel.setTint(it) },
                                     )
                                 }
                             }
                         }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val denom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
-                    val focusLabel =
-                        if (state.focusDiopters <= 0f) "ƒ ∞" else "ƒ %.1fD".format(state.focusDiopters)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
                         expanded = if (expanded == Param.LENS) null else Param.LENS
                     }
@@ -688,11 +725,14 @@ fun RecordScreen(
                     ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
                         expanded = if (expanded == Param.ISO) null else Param.ISO
                     }
-                    ParamChip("1/$denom", expanded == Param.SHUTTER) {
+                    ParamChip("1/$shutterDenom", expanded == Param.SHUTTER) {
                         expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER
                     }
-                    ParamChip(focusLabel, expanded == Param.FOCUS) {
+                    ParamChip("ƒ ${focusLabel(state.focusDiopters)}", expanded == Param.FOCUS) {
                         expanded = if (expanded == Param.FOCUS) null else Param.FOCUS
+                    }
+                    ParamChip("${state.kelvin}K", expanded == Param.WB) {
+                        expanded = if (expanded == Param.WB) null else Param.WB
                     }
                 }
             }
@@ -808,6 +848,42 @@ private fun ParamChip(text: String, active: Boolean, enabled: Boolean = true, on
             modifier = Modifier
                 .clickable(enabled = enabled, onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 7.dp),
+        )
+    }
+}
+
+@Composable
+private fun ParamLabel(text: String) {
+    Text(text, color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
+}
+
+/**
+ * Discrete slider fixing the two concrete complaints about the old bare sliders:
+ * endpoint labels give a scale reference, and snapping to [stops] makes it
+ * possible to land on exact values. [stops] must have at least 2 entries.
+ */
+@Composable
+private fun <T> TickedSlider(
+    stops: List<T>, selected: T, labelFor: (T) -> String,
+    enabled: Boolean = true, onSelect: (T) -> Unit,
+) {
+    val index = stops.indexOf(selected).coerceAtLeast(0)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            labelFor(stops.first()), color = RawCamColors.Muted,
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+        )
+        Slider(
+            value = index.toFloat(),
+            onValueChange = { v -> onSelect(stops[v.roundToInt().coerceIn(0, stops.size - 1)]) },
+            valueRange = 0f..(stops.size - 1).toFloat(),
+            steps = (stops.size - 2).coerceAtLeast(0),
+            enabled = enabled,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            labelFor(stops.last()), color = RawCamColors.Muted,
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
         )
     }
 }
