@@ -106,6 +106,8 @@ data class RecordUiState(
     val focusDiopters: Float = 0f,
     val fps: Int = 24,
     val freeSpaceBytes: Long = 0,
+    val lensIndex: Int = 0,
+    val sizeIndex: Int = 0,
 )
 
 /**
@@ -132,7 +134,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         FPS_OPTIONS.firstOrNull { it <= controller.rawSpec.maxFps } ?: controller.rawSpec.maxFps
 
     private val _uiState = MutableStateFlow(
-        RecordUiState(iso = controller.rawSpec.isoRange.start, fps = initialFps, shutterIndex = 0)
+        RecordUiState(
+            iso = controller.rawSpec.isoRange.start, fps = initialFps, shutterIndex = 0,
+            lensIndex = controller.defaultLensIndex, sizeIndex = 0,
+        )
     )
     val uiState: StateFlow<RecordUiState> = _uiState.asStateFlow()
 
@@ -165,6 +170,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
     fun shutterStops(fps: Int): List<Int> = ALL_SHUTTER_DENOMS.filter { it > fps }
 
+    /** FPS choices valid for the selected lens/size mode. Never empty. */
+    fun fpsOptions(): List<Int> =
+        FPS_OPTIONS.filter { it <= controller.rawSpec.maxFps }
+            .ifEmpty { listOf(controller.rawSpec.maxFps) }
+
     /**
      * (Re)opens the camera against [surface]. Called from every surfaceCreated -- on
      * first launch AND whenever the activity returns to the foreground with a fresh
@@ -176,7 +186,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(previewReady = false) }
         cameraOps.launch {
             try {
-                controller.openAndPreview(surface) {
+                controller.openAndPreview(surface, onFailed = { handleModeFailure() }) {
                     _uiState.update { it.copy(previewReady = true) }
                     pushManual()
                 }
@@ -185,6 +195,26 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 _events.tryEmit("Camera open failed")
             }
         }
+    }
+
+    /**
+     * Preview session failed to configure. If a non-default lens/size mode is
+     * selected, revert to main lens full-res — the state change re-keys the
+     * SurfaceView, which reopens the camera on the safe mode. If the default
+     * mode itself failed, just report it (today's behavior). Runs on the camera
+     * thread; StateFlow.update and tryEmit are thread-safe.
+     */
+    private fun handleModeFailure() {
+        val s = _uiState.value
+        if (s.lensIndex == controller.defaultLensIndex && s.sizeIndex == 0) {
+            _events.tryEmit("Camera open failed")
+            return
+        }
+        controller.selectMode(controller.defaultLensIndex, 0)
+        _uiState.update {
+            coerceToMode(it.copy(lensIndex = controller.defaultLensIndex, sizeIndex = 0))
+        }
+        _events.tryEmit("Mode not supported — reverted to main lens")
     }
 
     fun setIso(iso: Int) {
@@ -207,6 +237,34 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val stops = shutterStops(fps)
         _uiState.update { it.copy(fps = fps, shutterIndex = it.shutterIndex.coerceIn(0, stops.size - 1)) }
         pushManual()
+    }
+
+    /** Lens change resets the size to the new lens's full resolution. */
+    fun setLens(index: Int) = setMode(index, 0)
+
+    fun setResolution(index: Int) = setMode(_uiState.value.lensIndex, index)
+
+    private fun setMode(lensIndex: Int, sizeIndex: Int) {
+        val s = _uiState.value
+        if (s.recording || s.busy) return
+        if (lensIndex == s.lensIndex && sizeIndex == s.sizeIndex) return
+        if (!controller.selectMode(lensIndex, sizeIndex)) return
+        _uiState.update { coerceToMode(it.copy(lensIndex = lensIndex, sizeIndex = sizeIndex)) }
+        // The lensIndex/sizeIndex change re-keys the preview SurfaceView; its
+        // surfaceCreated calls openCamera, which reopens on the new mode.
+    }
+
+    /** Clamps fps and shutter to what the (just-selected) mode supports. */
+    private fun coerceToMode(state: RecordUiState): RecordUiState {
+        val opts = fpsOptions()
+        val fps = if (state.fps in opts) state.fps
+        else (opts.lastOrNull { it <= state.fps } ?: opts.first())
+        val stops = shutterStops(fps)
+        return state.copy(
+            fps = fps,
+            shutterIndex = state.shutterIndex.coerceIn(0, (stops.size - 1).coerceAtLeast(0)),
+            previewReady = false,
+        )
     }
 
     private fun exposureNsFor(state: RecordUiState): Long {
@@ -334,7 +392,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private const val TAG = "RecordViewModel"
         val ALL_SHUTTER_DENOMS = listOf(24, 48, 60, 120, 240, 500, 1000)
-        val FPS_OPTIONS = listOf(24, 30)
+        val FPS_OPTIONS = listOf(24, 30, 48, 60)
     }
 }
 
