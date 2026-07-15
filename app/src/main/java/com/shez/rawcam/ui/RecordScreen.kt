@@ -370,7 +370,11 @@ private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): 
     val perSecond = frameBytes * fps
     if (perSecond <= 0) return "—"
     val seconds = freeBytes / perSecond
-    return if (seconds >= 6000) "99+ min" else "~${seconds / 60} min"
+    return when {
+        seconds >= 6000 -> "99+ min"
+        seconds >= 120 -> "~${seconds / 60} min"
+        else -> "~$seconds s"
+    }
 }
 
 private enum class Param { ISO, SHUTTER, FOCUS }
