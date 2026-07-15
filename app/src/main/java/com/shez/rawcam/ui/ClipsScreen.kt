@@ -3,6 +3,7 @@ package com.shez.rawcam.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -87,7 +88,8 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
  * in the background is reflected without user action.
  */
 @Composable
-fun ClipsScreen() {
+fun ClipsScreen(onBack: () -> Unit = {}) {
+    BackHandler(onBack = onBack)
     val context = LocalContext.current
     var refreshTick by remember { mutableStateOf(0) }
     var clips by remember { mutableStateOf(loadClips(context)) }
@@ -135,7 +137,10 @@ fun ClipsScreen() {
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Clips", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("←") }
+            Text("Clips", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+        }
         androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
         if (clips.isEmpty()) {
             Text("No clips recorded yet.")

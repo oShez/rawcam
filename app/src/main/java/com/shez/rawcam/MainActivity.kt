@@ -3,12 +3,9 @@ package com.shez.rawcam
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -17,8 +14,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelProvider
 import com.shez.rawcam.ui.ClipsScreen
+import com.shez.rawcam.ui.RawCamTheme
 import com.shez.rawcam.ui.RecordScreen
 import com.shez.rawcam.ui.RecordViewModel
+
+private enum class Screen { Record, Clips }
 
 class MainActivity : ComponentActivity() {
 
@@ -29,21 +29,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var tab by remember { mutableStateOf(0) }
-            // Leaving the Record tab disposes its SurfaceView; mid-recording that
-            // abandons the session's preview target and silently stalls the RAW
-            // stream (the timer keeps counting, no frames land). Lock the tab
-            // until the recording (or an in-flight start/stop) is done.
-            val recState by viewModel.uiState.collectAsState()
-            val tabsLocked = recState.recording || recState.busy
-            Column(Modifier.fillMaxSize()) {
-                TabRow(selectedTabIndex = tab, modifier = Modifier.statusBarsPadding()) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Record") })
-                    Tab(selected = tab == 1, enabled = !tabsLocked, onClick = { tab = 1 },
-                        text = { Text("Clips") })
-                }
-                Column(Modifier.weight(1f)) {
-                    if (tab == 0) RecordScreen(viewModel) else ClipsScreen()
+            RawCamTheme {
+                var screen by remember { mutableStateOf(Screen.Record) }
+                // Leaving the Record screen disposes its SurfaceView; mid-recording
+                // that abandons the session's preview target and silently stalls the
+                // RAW stream (the timer keeps counting, no frames land). Lock
+                // navigation until the recording (or an in-flight start/stop) is done.
+                val recState by viewModel.uiState.collectAsState()
+                val locked = recState.recording || recState.busy
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    when (screen) {
+                        Screen.Record -> RecordScreen(
+                            viewModel = viewModel,
+                            clipsEnabled = !locked,
+                            onOpenClips = { if (!locked) screen = Screen.Clips },
+                        )
+                        Screen.Clips -> ClipsScreen(onBack = { screen = Screen.Record })
+                    }
                 }
             }
         }

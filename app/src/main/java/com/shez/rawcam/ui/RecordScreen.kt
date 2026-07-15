@@ -339,7 +339,11 @@ private fun isoFromT(t: Float, range: ClosedRange<Int>): Int {
 }
 
 @Composable
-fun RecordScreen(viewModel: RecordViewModel = viewModel()) {
+fun RecordScreen(
+    viewModel: RecordViewModel = viewModel(),
+    clipsEnabled: Boolean = true,
+    onOpenClips: () -> Unit = {},
+) {
     val context = LocalContext.current
     var hasPermission by remember { mutableStateOf(hasCameraPermission(context)) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -420,6 +424,13 @@ fun RecordScreen(viewModel: RecordViewModel = viewModel()) {
         ) {
             Text(if (benchRunning) "…" else "B", color = Color.White.copy(alpha = 0.6f))
         }
+
+        // Temporary CLIPS button (Task 2 restyles it into the corner controls).
+        TextButton(
+            enabled = clipsEnabled,
+            onClick = onOpenClips,
+            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+        ) { Text("CLIPS", color = Color.White.copy(alpha = 0.6f)) }
 
         // Right rail: record/stop, timer, drop counter.
         Column(
