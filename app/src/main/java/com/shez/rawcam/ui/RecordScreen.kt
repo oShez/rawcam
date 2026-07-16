@@ -268,7 +268,8 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     fun meterAt(nx: Float, ny: Float) {
         val s = _uiState.value
         if (s.recording || s.metering || !s.previewReady) return
-        _uiState.update { it.copy(metering = true, meterPoint = Offset(nx, ny)) }
+        val p = Offset(nx, ny)
+        _uiState.update { it.copy(metering = true, meterPoint = p) }
         cameraOps.launch {
             controller.meterAt(nx, ny) { m ->
                 viewModelScope.launch {
@@ -283,7 +284,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     _uiState.update { it.copy(metering = false) }
                     delay(600)   // leave the reticle briefly, then clear it
-                    _uiState.update { it.copy(meterPoint = null) }
+                    // Only clear the reticle if it still belongs to THIS tap and isn't
+                    // mid-convergence for a newer tap -- a stale timer from a fast
+                    // re-tap must never clear a newer tap's live reticle.
+                    _uiState.update { if (it.meterPoint == p && !it.metering) it.copy(meterPoint = null) else it }
                 }
             }
         }
@@ -566,50 +570,61 @@ fun RecordScreen(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .pointerInput(state.previewReady, state.recording) {
-                detectTapGestures { offset ->
-                    if (state.previewReady && !state.recording) {
-                        viewModel.meterAt(offset.x / size.width.toFloat(), offset.y / size.height.toFloat())
-                    }
-                }
-            }
     ) {
         // Letterboxed preview at the sensor's true aspect ratio; the side gutters
         // that creates host the status/action rails. Keyed on the selected mode:
         // changing lens or resolution recreates the SurfaceView, and the fresh
         // surfaceCreated -> openCamera reopens the camera with the new physical
         // lens and spec (same path as returning from background).
-        key(state.lensIndex, state.sizeIndex) {
-            AndroidView(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxHeight()
-                    .aspectRatio(spec.width.toFloat() / spec.height.toFloat()),
-                factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(object : SurfaceHolder.Callback {
-                            override fun surfaceCreated(holder: SurfaceHolder) {
-                                viewModel.openCamera(holder.surface)
-                            }
-                            override fun surfaceChanged(
-                                holder: SurfaceHolder, format: Int, width: Int, height: Int,
-                            ) {}
-                            override fun surfaceDestroyed(holder: SurfaceHolder) {}
-                        })
+        //
+        // This Box matches the SurfaceView's visible bounds exactly (same
+        // .align/.fillMaxHeight/.aspectRatio chain as the AndroidView below), so
+        // the tap gesture and reticle normalize/draw against the actual preview
+        // rect rather than the full-bleed outer Box. Taps landing in the side
+        // gutters (which host the control rails) fall outside this Box and never
+        // reach detectTapGestures -- no metering is triggered, which is intended.
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxHeight()
+                .aspectRatio(spec.width.toFloat() / spec.height.toFloat())
+                .pointerInput(state.previewReady, state.recording) {
+                    detectTapGestures { offset ->
+                        if (state.previewReady && !state.recording) {
+                            viewModel.meterAt(offset.x / size.width.toFloat(), offset.y / size.height.toFloat())
+                        }
                     }
-                },
-            )
-        }
+                }
+        ) {
+            key(state.lensIndex, state.sizeIndex) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        SurfaceView(ctx).apply {
+                            holder.addCallback(object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: SurfaceHolder) {
+                                    viewModel.openCamera(holder.surface)
+                                }
+                                override fun surfaceChanged(
+                                    holder: SurfaceHolder, format: Int, width: Int, height: Int,
+                                ) {}
+                                override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                            })
+                        }
+                    },
+                )
+            }
 
-        // Tap-to-meter reticle: grey while converging, green briefly after, at the
-        // normalized tap point mapped back into this Box's pixel dimensions.
-        state.meterPoint?.let { p ->
-            Canvas(Modifier.fillMaxSize()) {
-                val cx = p.x * size.width
-                val cy = p.y * size.height
-                val r = 36.dp.toPx()
-                val c = if (state.metering) Color(0xFFE0E0E0) else Color(0xFF7CFF7C)
-                drawRect(c, topLeft = Offset(cx - r, cy - r), size = Size(r * 2, r * 2), style = Stroke(width = 3.dp.toPx()))
+            // Tap-to-meter reticle: grey while converging, green briefly after, at the
+            // normalized tap point mapped back into this Box's pixel dimensions.
+            state.meterPoint?.let { p ->
+                Canvas(Modifier.fillMaxSize()) {
+                    val cx = p.x * size.width
+                    val cy = p.y * size.height
+                    val r = 36.dp.toPx()
+                    val c = if (state.metering) Color(0xFFE0E0E0) else Color(0xFF7CFF7C)
+                    drawRect(c, topLeft = Offset(cx - r, cy - r), size = Size(r * 2, r * 2), style = Stroke(width = 3.dp.toPx()))
+                }
             }
         }
 

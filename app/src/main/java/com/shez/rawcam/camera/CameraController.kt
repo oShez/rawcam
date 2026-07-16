@@ -301,9 +301,15 @@ class CameraController(private val context: Context) {
      * callbacks are delivered on [meterHandler] — a separate thread — never on
      * [cameraHandler] itself, since that thread is blocked on [CountDownLatch.await]
      * for the duration.
+     *
+     * If [cameraHandler]'s looper has already quit (e.g. during teardown),
+     * [android.os.Handler.post] returns false without ever running the posted
+     * block, which would otherwise leave the caller's `metering` flag stuck true
+     * forever. In that case [onResult] is invoked with `null` synchronously, on
+     * the caller's own thread, instead of on the camera thread.
      */
     fun meterAt(nx: Float, ny: Float, onResult: (MeteredValues?) -> Unit) {
-        cameraHandler.post {
+        val posted = cameraHandler.post {
             val dev = device
             val s = session
             val preview = previewSurface
@@ -353,6 +359,7 @@ class CameraController(private val context: Context) {
                 onResult(null)
             }
         }
+        if (!posted) onResult(null)
     }
 
     /** Shared AE/AF/AWB auto config + metering region for meterAt's repeating and
