@@ -449,7 +449,7 @@ private val NICE_FOCUS_METERS = listOf(10f, 5f, 3f, 2f, 1f, 0.5f, 0.3f)
 /** Friendly focus-distance stops (infinity first) converted to diopters, clamped so the
  *  macro-end stop is whatever the lens actually supports rather than a fixed distance. */
 private fun focusStops(minFocusDiopters: Float): List<Float> {
-    if (minFocusDiopters <= 0f) return listOf(0f)
+    if (minFocusDiopters <= 0f) return listOf(0f, 0f)
     val within = NICE_FOCUS_METERS.map { 1f / it }.filter { it < minFocusDiopters }
     return (listOf(0f) + within + minFocusDiopters).distinct().sorted()
 }
