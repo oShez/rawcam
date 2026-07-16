@@ -17,9 +17,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,8 +60,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -113,6 +119,8 @@ data class RecordUiState(
     val sizeIndex: Int = 0,
     val kelvin: Int = 5600,
     val tint: Int = 0,
+    val metering: Boolean = false,
+    val meterPoint: androidx.compose.ui.geometry.Offset? = null,
 )
 
 /**
@@ -245,6 +253,55 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     fun setTint(t: Int) {
         _uiState.update { it.copy(tint = t) }
         pushManual()
+    }
+
+    /**
+     * Tap-to-meter: one-shot AE/AF/AWB converge at the normalized preview point
+     * ([nx], [ny]), then snap the result onto the existing manual stops and apply
+     * it through the existing setters (manual == locked; no new persisted lock
+     * state). Disabled while recording, mid-meter, or before the preview is up.
+     * [CameraController.meterAt] posts to the camera thread and always invokes
+     * onResult there (converged values, or null on failure/timeout) after
+     * restoring manual -- the callback hops back via [viewModelScope] to touch
+     * uiState/_events from a normal coroutine context.
+     */
+    fun meterAt(nx: Float, ny: Float) {
+        val s = _uiState.value
+        if (s.recording || s.metering || !s.previewReady) return
+        _uiState.update { it.copy(metering = true, meterPoint = Offset(nx, ny)) }
+        cameraOps.launch {
+            controller.meterAt(nx, ny) { m ->
+                viewModelScope.launch {
+                    if (m != null) {
+                        setIso(nearestIso(m.iso))
+                        setShutterIndex(nearestShutterIndex(m.exposureNs))
+                        setFocus(m.focusDiopters)
+                        setKelvin(m.kelvin)
+                        setTint(m.tint)
+                    } else {
+                        _events.tryEmit("Couldn't meter — try again")
+                    }
+                    _uiState.update { it.copy(metering = false) }
+                    delay(600)   // leave the reticle briefly, then clear it
+                    _uiState.update { it.copy(meterPoint = null) }
+                }
+            }
+        }
+    }
+
+    private fun nearestIso(iso: Int): Int =
+        isoStops(controller.rawSpec.isoRange).minByOrNull { kotlin.math.abs(it - iso) } ?: iso
+
+    private fun nearestShutterIndex(exposureNs: Long): Int {
+        val stops = shutterStops(_uiState.value.fps)      // denominators, e.g. 48 => 1/48s
+        val target = if (exposureNs > 0) (1_000_000_000.0 / exposureNs) else stops.first().toDouble()
+        var best = 0
+        var bestErr = Double.MAX_VALUE
+        stops.forEachIndexed { i, denom ->
+            val err = kotlin.math.abs(denom - target)
+            if (err < bestErr) { bestErr = err; best = i }
+        }
+        return best
     }
 
     fun setFps(fps: Int) {
@@ -505,7 +562,18 @@ fun RecordScreen(
     var benchRunning by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf<Param?>(null) }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(state.previewReady, state.recording) {
+                detectTapGestures { offset ->
+                    if (state.previewReady && !state.recording) {
+                        viewModel.meterAt(offset.x / size.width.toFloat(), offset.y / size.height.toFloat())
+                    }
+                }
+            }
+    ) {
         // Letterboxed preview at the sensor's true aspect ratio; the side gutters
         // that creates host the status/action rails. Keyed on the selected mode:
         // changing lens or resolution recreates the SurfaceView, and the fresh
@@ -531,6 +599,18 @@ fun RecordScreen(
                     }
                 },
             )
+        }
+
+        // Tap-to-meter reticle: grey while converging, green briefly after, at the
+        // normalized tap point mapped back into this Box's pixel dimensions.
+        state.meterPoint?.let { p ->
+            Canvas(Modifier.fillMaxSize()) {
+                val cx = p.x * size.width
+                val cy = p.y * size.height
+                val r = 36.dp.toPx()
+                val c = if (state.metering) Color(0xFFE0E0E0) else Color(0xFF7CFF7C)
+                drawRect(c, topLeft = Offset(cx - r, cy - r), size = Size(r * 2, r * 2), style = Stroke(width = 3.dp.toPx()))
+            }
         }
 
         Box(Modifier.fillMaxSize().systemBarsPadding()) {
