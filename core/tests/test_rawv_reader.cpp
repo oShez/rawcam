@@ -71,6 +71,53 @@ TEST_CASE("open rejects headers whose geometry contradicts frameSizeBytes") {
   CHECK(corruptAndTry([](FileHeader* h) { h->height = 0; }));
   // unknown pack mode
   CHECK(corruptAndTry([](FileHeader* h) { h->packMode = 7; }));
+  // Packed10: pixel count not a multiple of 4 -> unpack10 walks off the tail
+  // group's buffers during export. packed10Size(9)==10 so this passed the old
+  // `frameSizeBytes >= packed10Size` lower bound and reached the unpacker.
+  CHECK(corruptAndTry([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed10;
+    h->width = 3; h->height = 3; h->frameSizeBytes = 10;
+  }));
+  // Packed10: frameSizeBytes must equal packed10Size exactly, not merely exceed
+  // it (packed10Size(8)==10; an over-stated size is a malformed/hostile file).
+  CHECK(corruptAndTry([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed10;
+    h->width = 4; h->height = 2; h->frameSizeBytes = 1000;
+  }));
+  // Raw16: frameSizeBytes above the allocation cap -> multi-GB payload buffer
+  CHECK(corruptAndTry([](FileHeader* h) { h->frameSizeBytes = 0xFFFFFFFFu; }));
+}
+
+TEST_CASE("open accepts valid packed10 and clamps an overstated frameCount") {
+  auto rebuildWith = [](void (*mutate)(FileHeader*)) {
+    writeClip("ok.rawv", 5);
+    int fd = io::openRead("ok.rawv");
+    std::vector<uint8_t> bytes((size_t)io::fileSize(fd));
+    io::readAll(fd, bytes.data(), bytes.size());
+    io::closeFd(fd);
+    mutate(reinterpret_cast<FileHeader*>(bytes.data()));
+    fd = io::openWrite("ok.rawv");
+    io::writeAll(fd, bytes.data(), bytes.size());
+    io::closeFd(fd);
+  };
+
+  // A finalized header that lies about frameCount (999 vs 5 records on disk)
+  // must clamp to what is actually present rather than seeking past EOF.
+  rebuildWith([](FileHeader* h) { h->frameCount = 999; });
+  auto r = RawvReader::open("ok.rawv");
+  REQUIRE(r != nullptr);
+  CHECK(r->frameCount() == 5);
+  std::remove("ok.rawv");
+
+  // A well-formed Packed10 header (w*h % 4 == 0, frameSizeBytes == packed10Size)
+  // is still accepted after the tightening.
+  rebuildWith([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed10;
+    h->width = 4; h->height = 2; h->frameSizeBytes = 10;  // packed10Size(8)
+  });
+  auto r2 = RawvReader::open("ok.rawv");
+  CHECK(r2 != nullptr);
+  std::remove("ok.rawv");
 }
 
 TEST_CASE("truncated file recovers whole frames only") {
