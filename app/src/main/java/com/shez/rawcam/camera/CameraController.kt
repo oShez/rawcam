@@ -70,6 +70,15 @@ class CameraController(private val context: Context) {
         val minFocusDiopters: Float,
     )
 
+    /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
+    data class MeteredValues(
+        val iso: Int,
+        val exposureNs: Long,
+        val focusDiopters: Float,
+        val kelvin: Int,
+        val tint: Int,
+    )
+
     private val cameraManager =
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val cameraId: String
@@ -551,6 +560,34 @@ class CameraController(private val context: Context) {
         return RggbChannelVector(gainR, gainG, gainG, gainB)
     }
 
+    /**
+     * Inverse of gainsFor: map measured AWB per-channel gains back to the nearest
+     * (kelvin, tint) representable by the manual controls. gainsFor maps kelvin to
+     * a neutralizing red/blue gain pair (their ratio is monotonic in kelvin) with
+     * green carrying the tint as tintFactor = (1 - tint/100). We pick the kelvin
+     * candidate whose gainsFor(k, 0) red/blue ratio best matches the measured one,
+     * then recover tint from the measured green gain relative to the red/blue
+     * average (the neutral reference), snapped to the nearest tint candidate.
+     */
+    fun gainsToKelvinTint(gains: RggbChannelVector): Pair<Int, Int> {
+        val gR = gains.red.coerceAtLeast(1e-3f)
+        val gG = ((gains.greenEven + gains.greenOdd) / 2f).coerceAtLeast(1e-3f)
+        val gB = gains.blue.coerceAtLeast(1e-3f)
+        val targetLogRatio = ln(gR / gB)
+        var bestK = KELVIN_CANDIDATES.first()
+        var bestErr = Float.MAX_VALUE
+        for (k in KELVIN_CANDIDATES) {
+            val g = gainsFor(k, 0)
+            val err = abs(ln(g.red / g.blue) - targetLogRatio)
+            if (err < bestErr) { bestErr = err; bestK = k }
+        }
+        val refGreen = (gR + gB) / 2f
+        val tintFactor = (gG / refGreen).coerceIn(0.3f, 2f)
+        val rawTint = ((1f - tintFactor) * 100f).roundToInt()
+        val bestT = TINT_CANDIDATES.minByOrNull { abs(it - rawTint) } ?: 0
+        return bestK to bestT
+    }
+
     private fun applyManual(b: CaptureRequest.Builder, withFrameDuration: Boolean) {
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
@@ -595,6 +632,10 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
+        // Mirror of RecordScreen.KELVIN_STOPS / TINT_STOPS. gainsToKelvinTint returns
+        // values from these sets so the metered result lands exactly on a slider tick.
+        private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
+        private val TINT_CANDIDATES = (-50..50 step 5).toList()
         // Identity 3x3 (row-major rationals num/den): color correction here is
         // gains-only, no cross-channel matrix warp.
         private val IDENTITY_TRANSFORM = ColorSpaceTransform(
