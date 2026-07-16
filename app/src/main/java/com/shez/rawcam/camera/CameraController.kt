@@ -579,17 +579,13 @@ class CameraController(private val context: Context) {
             val isoOut = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: iso
             val expOut = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
             val focusOut = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
-            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
-            val wbR: Float
-            val wbG: Float
-            val wbB: Float
-            if (gains != null) {
-                wbR = safeInv(gains.red)
-                wbG = safeInv((gains.greenEven + gains.greenOdd) / 2f)
-                wbB = safeInv(gains.blue)
-            } else {
-                wbR = 1f; wbG = 1f; wbB = 1f
-            }
+            // COLOR_CORRECTION_GAINS is not reliably echoed back in the result on this
+            // device/config (observed null during recording); gainsFor(kelvin, tint) is
+            // the exact value applyManual set on the request, so it's a faithful fallback.
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: gainsFor(kelvin, tint)
+            val wbR = safeInv(gains.red)
+            val wbG = safeInv((gains.greenEven + gains.greenOdd) / 2f)
+            val wbB = safeInv(gains.blue)
             NativeBridge.nativePushFrameMeta(ts, isoOut, expOut, focusOut, wbR, wbG, wbB)
         }
     }
