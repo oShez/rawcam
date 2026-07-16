@@ -566,8 +566,8 @@ class CameraController(private val context: Context) {
      * a neutralizing red/blue gain pair (their ratio is monotonic in kelvin) with
      * green carrying the tint as tintFactor = (1 - tint/100). We pick the kelvin
      * candidate whose gainsFor(k, 0) red/blue ratio best matches the measured one,
-     * then recover tint from the measured green gain relative to the red/blue
-     * average (the neutral reference), snapped to the nearest tint candidate.
+     * then recover tint from the measured green gain directly (gainG = 1 - tint/100),
+     * snapped to the nearest tint candidate.
      */
     fun gainsToKelvinTint(gains: RggbChannelVector): Pair<Int, Int> {
         val gR = gains.red.coerceAtLeast(1e-3f)
@@ -581,8 +581,7 @@ class CameraController(private val context: Context) {
             val err = abs(ln(g.red / g.blue) - targetLogRatio)
             if (err < bestErr) { bestErr = err; bestK = k }
         }
-        val refGreen = (gR + gB) / 2f
-        val tintFactor = (gG / refGreen).coerceIn(0.3f, 2f)
+        val tintFactor = gG.coerceIn(0.3f, 2f)
         val rawTint = ((1f - tintFactor) * 100f).roundToInt()
         val bestT = TINT_CANDIDATES.minByOrNull { abs(it - rawTint) } ?: 0
         return bestK to bestT
