@@ -3,6 +3,7 @@ package com.shez.rawcam.camera
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Rect
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -12,11 +13,13 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.shez.rawcam.NativeBridge
@@ -25,6 +28,7 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import android.hardware.camera2.params.ColorSpaceTransform
@@ -67,7 +71,7 @@ class CameraController(private val context: Context) {
         val fovMetric: Float, val sizes: List<LensSize>,
         val cfa: Int, val whiteLevel: Int, val blackLevel: IntArray,
         val colorMatrix1: FloatArray, val isoRange: ClosedRange<Int>,
-        val minFocusDiopters: Float,
+        val minFocusDiopters: Float, val activeArraySize: Rect,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -96,12 +100,28 @@ class CameraController(private val context: Context) {
     /** Physical camera id every session's OutputConfigurations are tagged with. */
     @Volatile private var activePhysicalId: String? = null
 
+    /** Active-array size (sensor pixel bounds) of the active lens; used by [meterAt]
+     * to map a normalized tap point into a metering region. Cached from the same
+     * per-lens [CameraCharacteristics] already fetched in [enumerateLenses] — never
+     * refetched on the open/select hot path. */
+    @Volatile private var activeArraySize: Rect? = null
+
     /** Directory Task 11 should place clip files in (created eagerly). */
     val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
 
     private val cameraThread = HandlerThread("camera").apply { start() }
     private val cameraHandler = Handler(cameraThread.looper)
     private val cameraExecutor = Executor { cameraHandler.post(it) }
+
+    /**
+     * Dedicated callback thread for [meterAt]'s capture callbacks. meterAt blocks
+     * [cameraHandler] on a latch while convergence proceeds, so those callbacks
+     * must land elsewhere or they'd queue behind the blocked thread and never run
+     * (permanent 1.8s timeout, every time). Lazily started on first use (from
+     * [cameraHandler] only), quit alongside the camera thread in [close].
+     */
+    private var meterCallbackThread: HandlerThread? = null
+    private var meterCallbackHandler: Handler? = null
 
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -139,6 +159,7 @@ class CameraController(private val context: Context) {
         defaultLensIndex = lenses.indexOfFirst { it.label == "1×" }.coerceAtLeast(0)
         activePhysicalId = lenses[defaultLensIndex].physicalId
         rawSpec = specFor(lenses[defaultLensIndex], 0)
+        activeArraySize = lenses[defaultLensIndex].activeArraySize
     }
 
     /**
@@ -186,6 +207,7 @@ class CameraController(private val context: Context) {
         if (sizeIndex !in lens.sizes.indices) return false
         activePhysicalId = lens.physicalId
         rawSpec = specFor(lens, sizeIndex)
+        activeArraySize = lens.activeArraySize
         return true
     }
 
@@ -267,6 +289,148 @@ class CameraController(private val context: Context) {
     }
 
     /**
+     * One-shot hardware-3A meter at a normalized preview point (nx, ny in 0f..1f,
+     * top-left origin, landscape preview orientation). Flips the preview to auto
+     * with a metering region at the point, waits up to ~1500ms for AE/AF/AWB to
+     * settle, reads back the values, restores full manual, and posts the result
+     * (null on not-ready / recording / failure) to [onResult] on the camera thread.
+     *
+     * Runs entirely on [cameraHandler] and blocks it for the duration of the
+     * convergence wait, which is what serializes metering against
+     * [updateManual] / [startRecording] (queued posts wait their turn). Capture
+     * callbacks are delivered on [meterHandler] — a separate thread — never on
+     * [cameraHandler] itself, since that thread is blocked on [CountDownLatch.await]
+     * for the duration.
+     */
+    fun meterAt(nx: Float, ny: Float, onResult: (MeteredValues?) -> Unit) {
+        cameraHandler.post {
+            val dev = device
+            val s = session
+            val preview = previewSurface
+            val arr = activeArraySize
+            if (recording || dev == null || s == null || preview == null || arr == null) {
+                onResult(null); return@post
+            }
+            try {
+                val region = meteringRectFor(nx, ny, arr)
+                val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(preview)
+                    configureAutoMetering(this, region)
+                }.build()
+
+                val deadline = SystemClock.elapsedRealtime() + 1500L
+                val done = CountDownLatch(1)
+                val last = AtomicReference<TotalCaptureResult>()
+                val cb = object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult,
+                    ) {
+                        last.set(result)
+                        if (settled(result) || SystemClock.elapsedRealtime() >= deadline) {
+                            done.countDown()
+                        }
+                    }
+                }
+                s.setRepeatingRequest(req, cb, meterHandler())
+                // Same configuration as the repeating request (modes + regions),
+                // plus the AF trigger key -- a bare trigger-only request would flip
+                // control modes for one frame instead of nudging the AF search.
+                val trigger = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(preview)
+                    configureAutoMetering(this, region)
+                    set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+                }.build()
+                s.capture(trigger, null, meterHandler())
+
+                done.await(1800, TimeUnit.MILLISECONDS)
+                val result = last.get()
+                val out = if (result != null && usableAe(result)) readMetered(result) else null
+                restoreManualPreview() // always restore before returning
+                onResult(out)
+            } catch (e: Exception) {
+                Log.e(TAG, "meterAt failed", e)
+                restoreManualPreview()
+                onResult(null)
+            }
+        }
+    }
+
+    /** Shared AE/AF/AWB auto config + metering region for meterAt's repeating and
+     * trigger requests -- keeps both requests in lockstep. */
+    private fun configureAutoMetering(b: CaptureRequest.Builder, region: MeteringRectangle) {
+        b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+        b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
+        b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+        b.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
+        b.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
+    }
+
+    private fun settled(r: TotalCaptureResult): Boolean {
+        val ae = r.get(CaptureResult.CONTROL_AE_STATE)
+        val af = r.get(CaptureResult.CONTROL_AF_STATE)
+        val awb = r.get(CaptureResult.CONTROL_AWB_STATE)
+        val aeOk = ae == null || ae == CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+            ae == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED || ae == CaptureResult.CONTROL_AE_STATE_LOCKED
+        val afOk = af == null || af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+            af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED ||
+            af == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED
+        val awbOk = awb == null || awb == CaptureResult.CONTROL_AWB_STATE_CONVERGED ||
+            awb == CaptureResult.CONTROL_AWB_STATE_LOCKED
+        return aeOk && afOk && awbOk
+    }
+
+    private fun usableAe(r: TotalCaptureResult): Boolean {
+        val ae = r.get(CaptureResult.CONTROL_AE_STATE)
+        return ae == null || ae != CaptureResult.CONTROL_AE_STATE_INACTIVE
+    }
+
+    private fun readMetered(r: TotalCaptureResult): MeteredValues {
+        val isoOut = r.get(CaptureResult.SENSOR_SENSITIVITY) ?: iso
+        val expOut = r.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
+        val focusOut = r.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
+        val gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS)
+        val (k, t) = if (gains != null) gainsToKelvinTint(gains) else (kelvin to tint)
+        return MeteredValues(isoOut, expOut, focusOut, k, t)
+    }
+
+    /** Re-arms the manual preview repeating request, reusing the same helper the
+     * rest of the controller uses to (re)arm preview -- never throws. */
+    private fun restoreManualPreview() {
+        val s = session ?: return
+        try {
+            setRepeatingPreview(s)
+        } catch (e: Exception) {
+            Log.e(TAG, "restoreManualPreview failed", e)
+        }
+    }
+
+    private fun meteringRectFor(nx: Float, ny: Float, arr: Rect): MeteringRectangle {
+        // Preview is locked landscape and fills the active array; map normalized
+        // (nx, ny) directly into active-array pixels. A ~10% box is the metered area.
+        val cx = (arr.left + nx.coerceIn(0f, 1f) * arr.width()).toInt()
+        val cy = (arr.top + ny.coerceIn(0f, 1f) * arr.height()).toInt()
+        val halfW = (arr.width() * 0.05f).toInt().coerceAtLeast(1)
+        val halfH = (arr.height() * 0.05f).toInt().coerceAtLeast(1)
+        val left = (cx - halfW).coerceIn(arr.left, arr.right - 1)
+        val top = (cy - halfH).coerceIn(arr.top, arr.bottom - 1)
+        val right = (cx + halfW).coerceIn(left + 1, arr.right)
+        val bottom = (cy + halfH).coerceIn(top + 1, arr.bottom)
+        return MeteringRectangle(left, top, right - left, bottom - top, MeteringRectangle.METERING_WEIGHT_MAX)
+    }
+
+    /** Lazily starts a dedicated thread for meterAt's capture callbacks -- must
+     * never be [cameraHandler], which is blocked on the convergence latch while
+     * these callbacks need to run. Only called from [cameraHandler], so no
+     * synchronization is needed around the fields it touches. */
+    private fun meterHandler(): Handler {
+        meterCallbackHandler?.let { return it }
+        val t = HandlerThread("camera-meter").apply { start() }
+        meterCallbackThread = t
+        return Handler(t.looper).also { meterCallbackHandler = it }
+    }
+
+    /**
      * Stops recording and returns [framesWritten, framesDropped] from the native
      * layer. `[0, N]` means the writer failed outright (e.g. could not create the
      * file or the disk filled) — treat as a failed clip.
@@ -332,6 +496,9 @@ class CameraController(private val context: Context) {
             session = null
             device?.close()
             device = null
+            meterCallbackThread?.quitSafely()
+            meterCallbackThread = null
+            meterCallbackHandler = null
         }
         cameraThread.quitSafely()
     }
@@ -391,6 +558,7 @@ class CameraController(private val context: Context) {
         val blackPattern = ch.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN) ?: return null
         val xform = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
         val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
+        val activeArray = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
         val sorted = rawSizes.sortedByDescending { it.width.toLong() * it.height }
         val maxArea = sorted.first().width.toLong() * sorted.first().height
         val sizes = sorted.map { s ->
@@ -414,6 +582,7 @@ class CameraController(private val context: Context) {
             colorMatrix1 = FloatArray(9) { i -> xform.getElement(i % 3, i / 3).toFloat() },
             isoRange = sensRange.lower..sensRange.upper,
             minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+            activeArraySize = activeArray,
         )
     }
 
