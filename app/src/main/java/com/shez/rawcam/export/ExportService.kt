@@ -7,25 +7,38 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 import com.shez.rawcam.NativeBridge
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
 
 /**
  * Foreground service that runs [NativeBridge.nativeExportClip] on a background
  * thread and surfaces progress via a persistent notification.
  *
+ * Exports are serialized on [exportExecutor], a single-thread executor: ClipsScreen
+ * only disables the Export button per-clip, so tapping Export on two different clips
+ * back to back is possible, and [cancelled] / [NOTIFICATION_ID] are single,
+ * service-instance-wide values that are only meaningful for one export at a time. A
+ * second Export request while one is running queues behind it instead of racing it on
+ * a separate ad-hoc thread (the previous behavior, which let two exports share --
+ * and clobber -- the same cancel flag and notification).
+ *
  * Cancel = stop the service (user action, or the system reclaiming it): [onDestroy]
  * flips the volatile [cancelled] flag, and the very next progress callback --
- * invoked synchronously from the native export loop, on this same worker thread --
- * returns false, which unwinds exportClip() cleanly (the current frame's DNG is
- * already on disk; later frames are not written).
+ * invoked synchronously from the native export loop, on the executor's worker thread
+ * -- returns false, which unwinds exportClip() cleanly (the current frame's DNG is
+ * already on disk; later frames are not written). Any export still queued behind the
+ * one that was running is abandoned along with the service instance; the next Export
+ * tap starts a fresh instance with [cancelled] reset to false.
  */
 class ExportService : Service() {
 
     private val cancelled = AtomicBoolean(false)
+    private val exportExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,7 +55,7 @@ class ExportService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification(clipName, 0, 0))
         status[clipName] = ExportStatus.RUNNING
 
-        thread(name = "export-$clipName") {
+        exportExecutor.execute {
             File(outDir).mkdirs()
             val ok = try {
                 NativeBridge.nativeExportClip(rawvPath, outDir) { done, total ->
@@ -50,6 +63,7 @@ class ExportService : Service() {
                     !cancelled.get()
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "export failed", e)
                 false
             }
             status[clipName] = when {
@@ -64,6 +78,7 @@ class ExportService : Service() {
 
     override fun onDestroy() {
         cancelled.set(true)
+        exportExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -98,6 +113,7 @@ class ExportService : Service() {
         const val EXTRA_RAWV_PATH = "rawvPath"
         const val EXTRA_OUT_DIR = "outDir"
         const val EXTRA_CLIP_NAME = "clipName"
+        private const val TAG = "ExportService"
         private const val CHANNEL_ID = "export"
         private const val NOTIFICATION_ID = 1001
 

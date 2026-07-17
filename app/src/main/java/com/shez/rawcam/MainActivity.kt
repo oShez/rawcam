@@ -17,6 +17,8 @@ import com.shez.rawcam.ui.ClipsScreen
 import com.shez.rawcam.ui.RawCamTheme
 import com.shez.rawcam.ui.RecordScreen
 import com.shez.rawcam.ui.RecordViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 private enum class Screen { Record, Clips }
 
@@ -35,8 +37,16 @@ class MainActivity : ComponentActivity() {
                 // that abandons the session's preview target and silently stalls the
                 // RAW stream (the timer keeps counting, no frames land). Lock
                 // navigation until the recording (or an in-flight start/stop) is done.
-                val recState by viewModel.uiState.collectAsState()
-                val locked = recState.recording || recState.busy
+                //
+                // Mapped + distinctUntilChanged rather than collectAsState() on the
+                // whole uiState: that state ticks every 0.5-1s while recording
+                // (elapsedSeconds/written/dropped), which would otherwise recompose
+                // this whole Composable -- reallocating onOpenClips and forcing
+                // RecordScreen to recompose -- on every tick even though `locked`
+                // itself changes rarely.
+                val locked by remember(viewModel) {
+                    viewModel.uiState.map { it.recording || it.busy }.distinctUntilChanged()
+                }.collectAsState(initial = false)
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     when (screen) {
                         Screen.Record -> RecordScreen(

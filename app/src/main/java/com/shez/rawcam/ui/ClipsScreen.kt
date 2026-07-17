@@ -35,6 +35,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,10 +44,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.export.ExportService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -122,6 +127,7 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
 fun ClipsScreen(onBack: () -> Unit = {}) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var refreshTick by remember { mutableStateOf(0) }
     var clips by remember { mutableStateOf<List<ClipEntry>>(emptyList()) }
     var freeBytes by remember { mutableStateOf(0L) }
@@ -154,10 +160,17 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
         freeBytes = loaded.first
         clips = loaded.second
     }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(2000)
-            refreshTick++
+    // Lifecycle-gated: without this, the loop (and the StatFs + dir listing +
+    // nativeClipInfo scan it triggers via refreshTick) would keep running every 2s
+    // while the app is backgrounded. repeatOnLifecycle cancels the block below STARTED
+    // and restarts it when the screen returns to the foreground.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                delay(2000)
+                refreshTick++
+            }
         }
     }
 
@@ -168,9 +181,11 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
             text = { Text("This permanently deletes ${toDelete.name}. This cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    toDelete.delete()
                     pendingDelete = null
-                    refreshTick++
+                    scope.launch {
+                        withContext(Dispatchers.IO) { toDelete.delete() }
+                        refreshTick++
+                    }
                 }) { Text("Delete") }
             },
             dismissButton = {

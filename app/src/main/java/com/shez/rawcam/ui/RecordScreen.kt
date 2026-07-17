@@ -74,6 +74,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
@@ -183,18 +186,24 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
         }
-        // Free-space poll for the "space remaining" readout; runs for the whole
-        // viewmodel lifetime so the value is honest both idle and mid-recording.
-        viewModelScope.launch {
-            while (isActive) {
-                val free = withContext(Dispatchers.IO) {
-                    try { StatFs(controller.clipsDir.absolutePath).availableBytes }
-                    catch (e: Exception) { 0L }
-                }
-                _uiState.update { it.copy(freeSpaceBytes = free) }
-                delay(2000)
-            }
+        // Free-space poll for the "space remaining" readout is driven from the
+        // composable (see RecordScreen's repeatOnLifecycle block calling
+        // refreshFreeSpace()) rather than looping here for the whole viewmodel
+        // lifetime -- the ViewModel has no Lifecycle of its own to gate on (and
+        // shouldn't be handed the Activity's, which would break its
+        // configuration-change independence), so pausing this StatFs + uiState
+        // poll while backgrounded is delegated to the UI side instead.
+    }
+
+    /** One StatFs (IO) read of [CameraController.clipsDir]'s free space, published
+     * into uiState. Called repeatedly by RecordScreen's lifecycle-gated poll so
+     * this doesn't run while the app is backgrounded. */
+    suspend fun refreshFreeSpace() {
+        val free = withContext(Dispatchers.IO) {
+            try { StatFs(controller.clipsDir.absolutePath).availableBytes }
+            catch (e: Exception) { 0L }
         }
+        _uiState.update { it.copy(freeSpaceBytes = free) }
     }
 
     /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
@@ -434,7 +443,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun startPolling() {
         pollJob?.cancel()
-        pollJob = viewModelScope.launch {
+        // Dispatchers.Default, not Main: nativeGetStats() is a JNI call, and
+        // _uiState.update is a thread-safe StateFlow write, so there's no reason to
+        // tie up the UI dispatcher for this every 500ms while recording.
+        pollJob = viewModelScope.launch(Dispatchers.Default) {
             while (isActive) {
                 delay(500)
                 val stats = NativeBridge.nativeGetStats()
@@ -585,6 +597,20 @@ fun RecordScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(viewModel) {
         viewModel.events.collect { msg -> snackbarHostState.showSnackbar(msg) }
+    }
+
+    // Free-space poll lives here (not in the viewmodel) so it's lifecycle-gated:
+    // repeatOnLifecycle cancels the loop below STARTED (backgrounded) and restarts
+    // it on return to the foreground, instead of spinning a StatFs + uiState.update
+    // every 2s regardless of visibility.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                viewModel.refreshFreeSpace()
+                delay(2000)
+            }
+        }
     }
 
     val spec = state.rawSpec

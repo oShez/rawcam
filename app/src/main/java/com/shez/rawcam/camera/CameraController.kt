@@ -132,10 +132,18 @@ class CameraController(private val context: Context) {
     private var meterCallbackThread: HandlerThread? = null
     private var meterCallbackHandler: Handler? = null
 
-    private var device: CameraDevice? = null
-    private var session: CameraCaptureSession? = null
-    private var previewSurface: Surface? = null
-    private var rawSurface: Surface? = null
+    // device/previewSurface/rawSurface are read directly (no Handler.post barrier) from
+    // caller threads -- e.g. startRecording's `previewSurface ?: return false` and
+    // `device == null` checks run on cameraOps, not the camera thread -- while written
+    // from camera-thread callbacks (onOpened/onDisconnected/onError) or, for
+    // rawSurface, from startRecording/stopRecording themselves on cameraOps. session is
+    // written only from the camera thread but is included for the same defensive
+    // reason. @Volatile makes those writes visible without relying on incidental
+    // happens-before through unrelated Handler posts.
+    @Volatile private var device: CameraDevice? = null
+    @Volatile private var session: CameraCaptureSession? = null
+    @Volatile private var previewSurface: Surface? = null
+    @Volatile private var rawSurface: Surface? = null
 
     @Volatile private var recording = false
     @Volatile private var manualSet = false
@@ -149,13 +157,19 @@ class CameraController(private val context: Context) {
     @Volatile private var idleLatch: CountDownLatch? = null
 
     /**
-     * Monotonic session generation, bumped by every createSession call. Only
-     * accessed on the camera thread (all createSession calls and session state
-     * callbacks run there). A late onConfigured from a superseded
-     * createCaptureSession must not clobber the current session reference; it
-     * compares its captured generation and closes itself instead.
+     * Monotonic session generation, bumped by every createSession call. Verified:
+     * every createSession() call site (openAndPreview's onOpened, and the two
+     * cameraHandler.post{} blocks in startRecording/stopRecording) and every reader
+     * (onConfigured/onConfigureFailed/onReady, delivered via [cameraExecutor], itself
+     * a cameraHandler.post wrapper) executes exclusively on the camera thread -- so
+     * `++sessionGeneration` has a single writer thread and @Volatile below is a
+     * defensive addition, not a correctness requirement today; it does NOT make `++`
+     * atomic, which is fine only because no second writer thread exists. A late
+     * onConfigured from a superseded createCaptureSession must not clobber the
+     * current session reference; it compares its captured generation and closes
+     * itself instead.
      */
-    private var sessionGeneration = 0
+    @Volatile private var sessionGeneration = 0
 
     /**
      * Enumerates the logical camera's RAW-capable back lenses and populates [lenses],
