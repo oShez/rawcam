@@ -101,8 +101,12 @@ import kotlin.math.roundToInt
 /** UI state for [RecordScreen]. Sliders store the raw value the user picked; the
  * viewmodel derives exposureNs from [shutterIndex] against the fps-filtered stop list.
  * [busy] is true while an async start/stop transition is in flight; the record button
- * is disabled during it (debounce). */
+ * is disabled during it (debounce). [rawSpec] and [lenses] are null/empty until
+ * camera enumeration (off-main, see [CameraController.initialize]) completes and
+ * publishes them here -- the composable renders a loading placeholder until then. */
 data class RecordUiState(
+    val rawSpec: CameraController.RawSpec? = null,
+    val lenses: List<CameraController.LensInfo> = emptyList(),
     val previewReady: Boolean = false,
     val recording: Boolean = false,
     val busy: Boolean = false,
@@ -137,21 +141,14 @@ data class RecordUiState(
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RecordViewModel(application: Application) : AndroidViewModel(application) {
 
+    // Cheap: no camera binder IPC happens until initialize() runs (below, off-main).
     val controller = CameraController(application)
 
     private val cameraOps = CoroutineScope(
         SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
     )
 
-    private val initialFps =
-        FPS_OPTIONS.firstOrNull { it <= controller.rawSpec.maxFps } ?: controller.rawSpec.maxFps
-
-    private val _uiState = MutableStateFlow(
-        RecordUiState(
-            iso = controller.rawSpec.isoRange.start, fps = initialFps, shutterIndex = 0,
-            lensIndex = controller.defaultLensIndex, sizeIndex = 0,
-        )
-    )
+    private val _uiState = MutableStateFlow(RecordUiState())
     val uiState: StateFlow<RecordUiState> = _uiState.asStateFlow()
 
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
@@ -166,6 +163,26 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     init {
         val pm = application.getSystemService(Context.POWER_SERVICE) as PowerManager
         pm.addThermalStatusListener(application.mainExecutor, thermalListener)
+        // Camera lens enumeration is binder IPC (getCameraCharacteristics per lens +
+        // stream-config queries) -- runs on cameraOps, never the main thread. Queued
+        // first on cameraOps, so every later cameraOps.launch (openCamera, etc.) is
+        // guaranteed to run after this completes. lenses/rawSpec are published into
+        // uiState only once initialize() returns; the composable gates on rawSpec
+        // being non-null and renders nothing controller-derived before that.
+        cameraOps.launch {
+            controller.initialize()
+            val fps = FPS_OPTIONS.firstOrNull { it <= controller.rawSpec.maxFps }
+                ?: controller.rawSpec.maxFps
+            _uiState.update {
+                it.copy(
+                    rawSpec = controller.rawSpec,
+                    lenses = controller.lenses,
+                    iso = controller.rawSpec.isoRange.start,
+                    fps = fps,
+                    lensIndex = controller.defaultLensIndex,
+                )
+            }
+        }
         // Free-space poll for the "space remaining" readout; runs for the whole
         // viewmodel lifetime so the value is honest both idle and mid-recording.
         viewModelScope.launch {
@@ -183,10 +200,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
     fun shutterStops(fps: Int): List<Int> = ALL_SHUTTER_DENOMS.filter { it > fps }
 
-    /** FPS choices valid for the selected lens/size mode. Never empty. */
-    fun fpsOptions(): List<Int> =
-        FPS_OPTIONS.filter { it <= controller.rawSpec.maxFps }
-            .ifEmpty { listOf(controller.rawSpec.maxFps) }
+    /** FPS choices valid for [spec]. Never empty. Takes the mode's spec explicitly
+     * (rather than reading controller.rawSpec) so composable callers can pass
+     * uiState.rawSpec instead of touching the controller directly. */
+    fun fpsOptions(spec: CameraController.RawSpec): List<Int> =
+        FPS_OPTIONS.filter { it <= spec.maxFps }.ifEmpty { listOf(spec.maxFps) }
 
     /**
      * (Re)opens the camera against [surface]. Called from every surfaceCreated -- on
@@ -215,7 +233,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * selected, revert to main lens full-res — the state change re-keys the
      * SurfaceView, which reopens the camera on the safe mode. If the default
      * mode itself failed, just report it (today's behavior). Runs on the camera
-     * thread; StateFlow.update and tryEmit are thread-safe.
+     * thread (posted from onFailed, only reachable once openAndPreview has been
+     * called, which is itself only reachable post-enumeration); StateFlow.update
+     * and tryEmit are thread-safe, and controller.defaultLensIndex is @Volatile so
+     * the value initialize() wrote on cameraOps is visible here.
      */
     private fun handleModeFailure() {
         val s = _uiState.value
@@ -293,6 +314,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Only called from meterAt()'s onResult callback, itself gated on
+     * s.previewReady -- previewReady only ever becomes true from openCamera()'s
+     * onReady, which cannot fire before controller.initialize() has run (cameraOps
+     * is single-lane FIFO, and openCamera() is only invoked once the SurfaceView is
+     * composed, which the UI gates on uiState.rawSpec != null). controller.rawSpec
+     * is guaranteed valid here. */
     private fun nearestIso(iso: Int): Int =
         isoStops(controller.rawSpec.isoRange).minByOrNull { kotlin.math.abs(it - iso) } ?: iso
 
@@ -330,9 +357,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         // surfaceCreated calls openCamera, which reopens on the new mode.
     }
 
-    /** Clamps fps and shutter to what the (just-selected) mode supports. */
+    /** Clamps fps and shutter to what the (just-selected) mode supports. Only ever
+     * called after a successful controller.selectMode (recording/lens-switch paths,
+     * themselves only reachable once the UI is showing lens controls, i.e. after
+     * enumeration) -- controller.rawSpec is guaranteed valid here. */
     private fun coerceToMode(state: RecordUiState): RecordUiState {
-        val opts = fpsOptions()
+        val opts = fpsOptions(controller.rawSpec)
         val fps = if (state.fps in opts) state.fps
         else (opts.lastOrNull { it <= state.fps } ?: opts.first())
         val stops = shutterStops(fps)
@@ -368,6 +398,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val exposureNs = exposureNsFor(s)
         cameraOps.launch {
             try {
+                // Gated above by s.previewReady (captured before this launch), which
+                // cannot be true until controller.initialize() has completed -- see
+                // nearestIso's comment for the full chain. controller.rawSpec is valid.
                 val spec = controller.rawSpec
                 // Packed10 payload record size: (w*h/4)*5 + 64 bytes of FrameMeta.
                 val frameBytes = (spec.width.toLong() * spec.height / 4) * 5 + 64
@@ -554,8 +587,17 @@ fun RecordScreen(
         viewModel.events.collect { msg -> snackbarHostState.showSnackbar(msg) }
     }
 
-    val spec = viewModel.controller.rawSpec
-    val lenses = viewModel.controller.lenses
+    val spec = state.rawSpec
+    if (spec == null) {
+        // Camera enumeration (binder IPC, off-main) hasn't published lenses/rawSpec
+        // into uiState yet. Nothing controller-derived can render safely before
+        // that -- mirrors the previewReady gating idiom below, one step earlier.
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            Text("Loading camera…", color = RawCamColors.Muted, fontSize = 13.sp)
+        }
+        return
+    }
+    val lenses = state.lenses
     val lens = lenses.getOrElse(state.lensIndex) { lenses[0] }
     val sizes = lens.sizes
     val size = sizes.getOrElse(state.sizeIndex) { sizes[0] }
@@ -720,7 +762,7 @@ fun RecordScreen(
                     onClick = { viewModel.toggleRecord() },
                 )
                 FpsToggle(
-                    options = viewModel.fpsOptions(),
+                    options = viewModel.fpsOptions(spec),
                     selected = state.fps,
                     enabled = !state.recording,
                     onSelect = { viewModel.setFps(it) },

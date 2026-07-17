@@ -39,8 +39,11 @@ import kotlin.math.pow
 /**
  * Camera2 controller for RAW video capture with fully manual exposure.
  *
- * Lifecycle: construct (queries [rawSpec]) -> [openAndPreview] -> [startRecording] /
- * [updateManual] / [stopRecording] (repeatable) -> [close].
+ * Lifecycle: construct (cheap, no camera IPC) -> [initialize] (binder IPC; enumerates
+ * lenses and populates [rawSpec] -- MUST run off the main thread, e.g. the caller's
+ * cameraOps dispatcher) -> [openAndPreview] -> [startRecording] / [updateManual] /
+ * [stopRecording] (repeatable) -> [close]. No method below [initialize] in that list
+ * may be called until it has returned.
  *
  * Threading: all Camera2 callbacks run on a dedicated HandlerThread ("camera").
  * [startRecording], [stopRecording] and [close] block briefly on that thread's work,
@@ -85,16 +88,22 @@ class CameraController(private val context: Context) {
 
     private val cameraManager =
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    private val cameraId: String
+    private lateinit var cameraId: String
 
-    /** Selectable back lenses, widest first. At least one entry. */
-    val lenses: List<LensInfo>
+    /** Selectable back lenses, widest first. At least one entry. Populated by
+     * [initialize]; empty until then. */
+    @Volatile var lenses: List<LensInfo> = emptyList()
+        private set
 
-    /** Index in [lenses] of the main (1×) lens — the revert target on mode failure. */
-    val defaultLensIndex: Int
+    /** Index in [lenses] of the main (1×) lens — the revert target on mode failure.
+     * Populated by [initialize]. */
+    @Volatile var defaultLensIndex: Int = 0
+        private set
 
-    /** Snapshot of the selected lens+size mode. Replaced atomically by [selectMode]. */
-    @Volatile var rawSpec: RawSpec
+    /** Snapshot of the selected lens+size mode. Replaced atomically by [selectMode].
+     * Populated by [initialize]; unset (throws on read) until then -- every other
+     * method on this class must not be called before [initialize] returns. */
+    @Volatile lateinit var rawSpec: RawSpec
         private set
 
     /** Physical camera id every session's OutputConfigurations are tagged with. */
@@ -148,7 +157,15 @@ class CameraController(private val context: Context) {
      */
     private var sessionGeneration = 0
 
-    init {
+    /**
+     * Enumerates the logical camera's RAW-capable back lenses and populates [lenses],
+     * [defaultLensIndex], [rawSpec] and the active-lens tracking fields. This is
+     * per-lens [CameraManager.getCameraCharacteristics] binder IPC (plus stream-config
+     * queries) -- it MUST be called off the main thread (the caller's cameraOps
+     * dispatcher or Dispatchers.Default), exactly once, before any other method on
+     * this class. Not called from init{} so construction itself is main-thread-safe.
+     */
+    fun initialize() {
         cameraId = cameraManager.cameraIdList.first { id ->
             val c = cameraManager.getCameraCharacteristics(id)
             c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK &&
