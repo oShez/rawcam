@@ -75,6 +75,13 @@ class CameraController(private val context: Context) {
         val cfa: Int, val whiteLevel: Int, val blackLevel: IntArray,
         val colorMatrix1: FloatArray, val isoRange: ClosedRange<Int>,
         val minFocusDiopters: Float, val activeArraySize: Rect,
+        /** DNG-style second calibration illuminant (nullable -- some sensors only
+         * expose one). Row-major 3x3, same convention as [colorMatrix1]: CIE
+         * XYZ -> sensor space under [illuminant2]. */
+        val colorMatrix2: FloatArray?,
+        /** DNG/EXIF reference-illuminant codes for [colorMatrix1] / [colorMatrix2];
+         * mapped to a CCT by [illuminantCct]. Null when the characteristic is absent. */
+        val illuminant1: Int?, val illuminant2: Int?,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -84,6 +91,21 @@ class CameraController(private val context: Context) {
         val focusDiopters: Float,
         val kelvin: Int,
         val tint: Int,
+        /** Raw COLOR_CORRECTION_GAINS from the converged AWB result, passed through
+         * untouched so a caller can apply it exactly instead of the lossy
+         * kelvin/tint snap. Null only if the result carried no gains. */
+        val wbGains: RggbChannelVector?,
+    )
+
+    /**
+     * DNG-style sensor WB calibration for [gainsFor]: two color matrices (CIE
+     * XYZ -> sensor space) under two reference illuminants, and each
+     * illuminant's CCT. [matrix2]/[cct2] fall back to [matrix1] alone when the
+     * sensor exposes only one illuminant (see [interpolatedColorMatrix]).
+     */
+    private data class WbCalib(
+        val matrix1: FloatArray, val cct1: Int,
+        val matrix2: FloatArray?, val cct2: Int,
     )
 
     private val cameraManager =
@@ -153,6 +175,19 @@ class CameraController(private val context: Context) {
     @Volatile private var focusDiopters = 0f
     @Volatile private var kelvin = 5600
     @Volatile private var tint = 0
+
+    /** Sensor WB calibration for the active lens; populated by [initialize] and
+     * [selectMode] on the same off-main thread that already writes [rawSpec] --
+     * mirrors that field's lateinit + @Volatile pattern (not read before those
+     * complete). */
+    @Volatile private lateinit var wbCalib: WbCalib
+
+    /** Exact metered WB gains, applied verbatim by [applyManual] and the
+     * capture-callback DNG-metadata fallback in place of [gainsFor]'s
+     * kelvin/tint model. Set by [setWbOverride] (tap-to-meter); cleared by
+     * [updateManual] / [startRecording] when the user moves a WB slider
+     * (kelvin or tint actually changes). Null = no override, use the model. */
+    @Volatile private var wbOverride: RggbChannelVector? = null
     /** Set by stopRecording(); counted down by the session's onReady (idle) callback. */
     @Volatile private var idleLatch: CountDownLatch? = null
 
@@ -191,6 +226,18 @@ class CameraController(private val context: Context) {
         activePhysicalId = lenses[defaultLensIndex].physicalId
         rawSpec = specFor(lenses[defaultLensIndex], 0)
         activeArraySize = lenses[defaultLensIndex].activeArraySize
+        wbCalib = wbCalibFor(lenses[defaultLensIndex])
+        // Permanent cheap sanity line for field debugging: catches a matrix-direction
+        // or model regression immediately in logcat without needing a unit test.
+        val g2000 = gainsFor(2000, 0)
+        val g5600 = gainsFor(5600, 0)
+        val g10000 = gainsFor(10000, 0)
+        Log.i(
+            TAG,
+            "WB gains sanity 2000K=(${g2000.red},${g2000.greenEven},${g2000.blue}) " +
+                "5600K=(${g5600.red},${g5600.greenEven},${g5600.blue}) " +
+                "10000K=(${g10000.red},${g10000.greenEven},${g10000.blue})",
+        )
     }
 
     /**
@@ -239,6 +286,7 @@ class CameraController(private val context: Context) {
         activePhysicalId = lens.physicalId
         rawSpec = specFor(lens, sizeIndex)
         activeArraySize = lens.activeArraySize
+        wbCalib = wbCalibFor(lens)
         return true
     }
 
@@ -267,6 +315,10 @@ class CameraController(private val context: Context) {
         this.iso = iso.coerceIn(spec.isoRange)
         this.exposureNs = clampExposure(exposureNs, fps)
         this.focusDiopters = focusDiopters
+        // Compare BEFORE assigning: a real WB-slider change invalidates any metered
+        // override; startRecording called with the SAME kelvin/tint (the normal
+        // meter -> record path) must NOT clear it.
+        if (kelvin != this.kelvin || tint != this.tint) wbOverride = null
         this.kelvin = kelvin
         this.tint = tint
         manualSet = true
@@ -304,6 +356,10 @@ class CameraController(private val context: Context) {
         this.iso = iso.coerceIn(rawSpec.isoRange)
         this.exposureNs = if (recording) clampExposure(exposureNs, recordFps) else exposureNs
         this.focusDiopters = focusDiopters
+        // ISO/shutter/focus pushes call this with the SAME kelvin/tint (must not
+        // clear); an actual WB-slider move passes a changed value (must clear the
+        // metered override so the model takes back over).
+        if (kelvin != this.kelvin || tint != this.tint) wbOverride = null
         this.kelvin = kelvin
         this.tint = tint
         manualSet = true
@@ -315,6 +371,24 @@ class CameraController(private val context: Context) {
                 // CameraAccessException, closed-session IllegalStateException, or
                 // abandoned-surface IllegalArgumentException; never fatal here.
                 Log.e(TAG, "updateManual failed", e)
+            }
+        }
+    }
+
+    /**
+     * Sets (or clears, with null) the exact metered WB-gains override -- see
+     * [wbOverride]. Re-arms the repeating request immediately, the same way
+     * [updateManual] does, so the override takes visible effect on the very next
+     * frame instead of waiting for some other manual value to change.
+     */
+    fun setWbOverride(gains: RggbChannelVector?) {
+        wbOverride = gains
+        cameraHandler.post {
+            val s = session ?: return@post
+            try {
+                if (recording) setRepeatingRecord(s) else setRepeatingPreview(s)
+            } catch (e: Exception) {
+                Log.e(TAG, "setWbOverride failed", e)
             }
         }
     }
@@ -429,7 +503,7 @@ class CameraController(private val context: Context) {
         val focusOut = r.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
         val gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS)
         val (k, t) = if (gains != null) gainsToKelvinTint(gains) else (kelvin to tint)
-        return MeteredValues(isoOut, expOut, focusOut, k, t)
+        return MeteredValues(isoOut, expOut, focusOut, k, t, gains)
     }
 
     /** Re-arms the manual preview repeating request, reusing the same helper the
@@ -595,6 +669,14 @@ class CameraController(private val context: Context) {
         val whiteLevel = ch.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: return null
         val blackPattern = ch.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN) ?: return null
         val xform = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
+        // Second calibration illuminant/matrix, and both illuminant codes: all
+        // nullable (not every sensor exposes a second calibration point) -- consumed
+        // by gainsFor's DNG-style interpolation, never gate lens enumeration.
+        val xform2 = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)
+        // SDK type is Key<Byte> despite the DNG/EXIF codes being small ints; widen so
+        // LensInfo/illuminantCct can work with plain Int like every other code path.
+        val illum1 = ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)?.toInt()
+        val illum2 = ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)?.toInt()
         val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
         val activeArray = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
         val sorted = rawSizes.sortedByDescending { it.width.toLong() * it.height }
@@ -621,6 +703,9 @@ class CameraController(private val context: Context) {
             isoRange = sensRange.lower..sensRange.upper,
             minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
             activeArraySize = activeArray,
+            colorMatrix2 = xform2?.let { t -> FloatArray(9) { i -> t.getElement(i % 3, i / 3).toFloat() } },
+            illuminant1 = illum1,
+            illuminant2 = illum2,
         )
     }
 
@@ -727,59 +812,120 @@ class CameraController(private val context: Context) {
         s.setRepeatingRequest(req, captureCallback, cameraHandler)
     }
 
+    /** DNG/EXIF reference-illuminant code -> CCT (Kelvin). Table values from the
+     * DNG/EXIF LightSource enumeration; unlisted/unknown codes return null so the
+     * caller can apply its own default (see [wbCalibFor]). */
+    private fun illuminantCct(code: Int?): Int? = when (code) {
+        17 -> 2856 // Standard A
+        21 -> 6504 // D65
+        23 -> 5003 // D50
+        20 -> 5503 // D55
+        22 -> 7504 // D75
+        1 -> 5503  // Daylight
+        2 -> 4230  // Fluorescent
+        3 -> 2856  // Tungsten
+        else -> null
+    }
+
+    /** Builds the active lens's [WbCalib]: illuminant codes resolved to CCTs
+     * (defaulting illuminant1 -> 2856K, illuminant2 -> 6504K when absent/unknown --
+     * the DNG spec's own conventional default pair). */
+    private fun wbCalibFor(lens: LensInfo): WbCalib = WbCalib(
+        matrix1 = lens.colorMatrix1,
+        cct1 = illuminantCct(lens.illuminant1) ?: 2856,
+        matrix2 = lens.colorMatrix2,
+        cct2 = illuminantCct(lens.illuminant2) ?: 6504,
+    )
+
     /**
-     * Approximate blackbody color temperature -> RGB (0..255), the well-known
-     * Tanner Helland curve fit (public domain, valid 1000K-40000K; our UI
-     * range is 2000K-10000K, safely inside it). This is "the color of light
-     * at this temperature" -- gainsFor inverts it to get the gains that
-     * cancel that cast.
+     * Kelvin -> CIE 1931 xy chromaticity of the Planckian locus: Kim et al.'s cubic
+     * approximation (valid 1667K-25000K; our UI range 2000K-10000K is safely
+     * inside it).
      */
-    private fun kelvinRgb(kelvinValue: Int): Triple<Float, Float, Float> {
-        val temp = kelvinValue / 100.0
-        val red = if (temp <= 66.0) 255.0
-        else (329.698727446 * (temp - 60.0).pow(-0.1332047592)).coerceIn(0.0, 255.0)
-        val green = if (temp <= 66.0) {
-            (99.4708025861 * ln(temp) - 161.1195681661).coerceIn(0.0, 255.0)
+    private fun kelvinToXy(kelvinValue: Int): Pair<Double, Double> {
+        val t = kelvinValue.toDouble()
+        val x = if (t <= 4000.0) {
+            -0.2661239e9 / t.pow(3) - 0.2343589e6 / t.pow(2) + 0.8776956e3 / t + 0.179910
         } else {
-            (288.1221695283 * (temp - 60.0).pow(-0.0755148492)).coerceIn(0.0, 255.0)
+            -3.0258469e9 / t.pow(3) + 2.1070379e6 / t.pow(2) + 0.2226347e3 / t + 0.240390
         }
-        val blue = when {
-            temp >= 66.0 -> 255.0
-            temp <= 19.0 -> 0.0
-            else -> (138.5177312231 * ln(temp - 10.0) - 305.0447927307).coerceIn(0.0, 255.0)
+        val y = when {
+            t <= 2222.0 -> -1.1063814 * x.pow(3) - 1.34811020 * x.pow(2) + 2.18555832 * x - 0.20219683
+            t <= 4000.0 -> -0.9549476 * x.pow(3) - 1.37418593 * x.pow(2) + 2.09137015 * x - 0.16748867
+            else -> 3.0817580 * x.pow(3) - 5.87338670 * x.pow(2) + 3.75112997 * x - 0.37001483
         }
-        return Triple(red.toFloat(), green.toFloat(), blue.toFloat())
+        return x to y
     }
 
     /**
-     * Kelvin/tint -> per-channel gains that cancel the color temperature's
-     * cast, normalized so green stays the reference channel (gain 1 before
-     * tint). Tint biases green relative to red/blue: positive = more
-     * magenta (green reduced), negative = more green (green raised).
+     * DNG-convention color-matrix interpolation by inverse CCT between the two
+     * calibration illuminants. Falls back to matrix1 alone when there's no second
+     * illuminant or the two CCTs coincide (would divide by zero otherwise).
+     */
+    private fun interpolatedColorMatrix(calib: WbCalib, kelvinValue: Int): FloatArray {
+        val cm2 = calib.matrix2
+        if (cm2 == null || calib.cct1 == calib.cct2) return calib.matrix1
+        val invK = 1.0 / kelvinValue
+        val invK1 = 1.0 / calib.cct1
+        val invK2 = 1.0 / calib.cct2
+        val w = ((invK - invK2) / (invK1 - invK2)).coerceIn(0.0, 1.0)
+        return FloatArray(9) { i -> (w * calib.matrix1[i] + (1.0 - w) * cm2[i]).toFloat() }
+    }
+
+    /**
+     * Kelvin/tint -> per-channel gains that cancel the sensor's *own* calibrated
+     * response to that color temperature (DNG-style), not a sensor-agnostic
+     * blackbody-light model. Steps (see wb-fix-brief.md for the full derivation):
+     * kelvin -> CIE xy -> XYZ; interpolate the sensor's two calibration matrices
+     * (XYZ -> sensor space) by inverse CCT; multiply through to get the sensor's
+     * native (R, G, B) response to a white patch under that illuminant --
+     * green-normalizing that response is exactly the gain that neutralizes it.
+     * Tint biases green relative to red/blue: positive = more magenta (green
+     * reduced), negative = more green (green raised). gainR/gainB are NOT floored
+     * at 1.0 (that floor was the root cause of the old model's green-tint bug);
+     * instead the whole vector is scaled up together, after tint is folded in, so
+     * gains stay >=1 (required by many HALs) without disturbing the R:G:B ratio.
      */
     private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
-        val (r, g, b) = kelvinRgb(kelvinValue)
-        val gRef = g.coerceAtLeast(1f)
-        val gainR = (gRef / r.coerceAtLeast(1f)).coerceAtLeast(1f)
-        val gainB = (gRef / b.coerceAtLeast(1f)).coerceAtLeast(1f)
-        val tintFactor = (1.0 - tintValue / 100.0).toFloat().coerceIn(0.3f, 2f)
-        val gainG = tintFactor
-        return RggbChannelVector(gainR, gainG, gainG, gainB)
+        val calib = wbCalib
+        val (x, y) = kelvinToXy(kelvinValue)
+        val safeY = if (abs(y) < 1e-9) 1e-9 else y
+        val xyzX = x / safeY
+        val xyzY = 1.0
+        val xyzZ = (1.0 - x - safeY) / safeY
+        val cm = interpolatedColorMatrix(calib, kelvinValue)
+        // cm is row-major [R row, G row, B row] x [X, Y, Z] -- same convention as
+        // colorMatrix1's extraction (index i -> row i/3, column i%3).
+        val nR = (cm[0] * xyzX + cm[1] * xyzY + cm[2] * xyzZ).coerceAtLeast(1e-4)
+        val nG = (cm[3] * xyzX + cm[4] * xyzY + cm[5] * xyzZ).coerceAtLeast(1e-4)
+        val nB = (cm[6] * xyzX + cm[7] * xyzY + cm[8] * xyzZ).coerceAtLeast(1e-4)
+        val tintFactor = (1.0 - tintValue / 100.0).coerceIn(0.3, 2.0)
+        var gainR = (nG / nR).coerceIn(1e-2, 8.0)
+        var gainB = (nG / nB).coerceIn(1e-2, 8.0)
+        var gainG = tintFactor
+        val minGain = minOf(gainR, gainG, gainB)
+        if (minGain < 1.0) {
+            val scale = 1.0 / minGain
+            gainR *= scale; gainG *= scale; gainB *= scale
+        }
+        return RggbChannelVector(gainR.toFloat(), gainG.toFloat(), gainG.toFloat(), gainB.toFloat())
     }
 
     /**
      * Inverse of gainsFor: map measured AWB per-channel gains back to the nearest
-     * (kelvin, tint) representable by the manual controls. gainsFor maps kelvin to
-     * a neutralizing red/blue gain pair (their ratio is monotonic in kelvin) with
-     * green carrying the tint as tintFactor = (1 - tint/100). We pick the kelvin
-     * candidate whose gainsFor(k, 0) red/blue ratio best matches the measured one,
-     * then recover tint from the measured green gain directly (gainG = 1 - tint/100),
-     * snapped to the nearest tint candidate.
+     * (kelvin, tint) representable by the manual controls. With the calibrated
+     * model, ln(gainR/gainB) is monotonic in kelvin over the candidate range and
+     * invariant to the uniform >=1 normalization gainsFor applies (a common scale
+     * factor cancels in the ratio) -- so matching purely on that log-ratio against
+     * gainsFor(k, 0) for each kelvin candidate exactly reproduces the kelvin that
+     * generated the gains. Tint is recovered by comparing the measured green gain
+     * against the model's green at the matched kelvin (same normalization on both
+     * sides, so this also round-trips exactly for gains produced by gainsFor).
      */
     fun gainsToKelvinTint(gains: RggbChannelVector): Pair<Int, Int> {
-        val gR = gains.red.coerceAtLeast(1e-3f)
-        val gG = ((gains.greenEven + gains.greenOdd) / 2f).coerceAtLeast(1e-3f)
-        val gB = gains.blue.coerceAtLeast(1e-3f)
+        val gR = gains.red.coerceAtLeast(1e-6f)
+        val gG = ((gains.greenEven + gains.greenOdd) / 2f).coerceAtLeast(1e-6f)
+        val gB = gains.blue.coerceAtLeast(1e-6f)
         val targetLogRatio = ln(gR / gB)
         var bestK = KELVIN_CANDIDATES.first()
         var bestErr = Float.MAX_VALUE
@@ -788,8 +934,9 @@ class CameraController(private val context: Context) {
             val err = abs(ln(g.red / g.blue) - targetLogRatio)
             if (err < bestErr) { bestErr = err; bestK = k }
         }
-        val tintFactor = gG.coerceIn(0.3f, 2f)
-        val rawTint = ((1f - tintFactor) * 100f).roundToInt()
+        val gGModel = gainsFor(bestK, 0).greenEven.coerceAtLeast(1e-6f)
+        val tintFactorMeasured = (gG / gGModel).coerceIn(0.3f, 2f)
+        val rawTint = ((1f - tintFactorMeasured) * 100f).roundToInt()
         val bestT = TINT_CANDIDATES.minByOrNull { abs(it - rawTint) } ?: 0
         return bestK to bestT
     }
@@ -805,7 +952,7 @@ class CameraController(private val context: Context) {
         b.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDiopters)
         b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
         b.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
-        b.set(CaptureRequest.COLOR_CORRECTION_GAINS, gainsFor(kelvin, tint))
+        b.set(CaptureRequest.COLOR_CORRECTION_GAINS, wbOverride ?: gainsFor(kelvin, tint))
         b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, IDENTITY_TRANSFORM)
     }
 
@@ -823,9 +970,9 @@ class CameraController(private val context: Context) {
             val expOut = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
             val focusOut = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
             // COLOR_CORRECTION_GAINS is not reliably echoed back in the result on this
-            // device/config (observed null during recording); gainsFor(kelvin, tint) is
-            // the exact value applyManual set on the request, so it's a faithful fallback.
-            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: gainsFor(kelvin, tint)
+            // device/config (observed null during recording); wbOverride ?: gainsFor(...)
+            // is the exact value applyManual set on the request, so it's a faithful fallback.
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: (wbOverride ?: gainsFor(kelvin, tint))
             val wbR = safeInv(gains.red)
             val wbG = safeInv((gains.greenEven + gains.greenOdd) / 2f)
             val wbB = safeInv(gains.blue)

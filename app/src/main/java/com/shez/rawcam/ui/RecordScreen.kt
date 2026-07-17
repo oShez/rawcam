@@ -304,11 +304,28 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             controller.meterAt(nx, ny) { m ->
                 viewModelScope.launch {
                     if (m != null) {
-                        setIso(nearestIso(m.iso))
-                        setShutterIndex(nearestShutterIndex(m.exposureNs))
-                        setFocus(m.focusDiopters)
-                        setKelvin(m.kelvin)
-                        setTint(m.tint)
+                        // Batched into ONE uiState update + ONE controller push (was
+                        // five setIso/setShutterIndex/setFocus/setKelvin/setTint calls,
+                        // each its own update+pushManual). Order matters for the WB
+                        // override (CameraController.wbOverride): pushManual() below
+                        // calls controller.updateManual(..., kelvin=m.kelvin,
+                        // tint=m.tint) -- since that's the SAME kelvin/tint this
+                        // uiState.update just set, updateManual's clear-on-change check
+                        // does not fire. setWbOverride() runs AFTER, so it's the last
+                        // (and effective) word on this frame's WB gains regardless, and
+                        // its own post re-arms the repeating request a second time with
+                        // the exact metered gains applied.
+                        _uiState.update {
+                            it.copy(
+                                iso = nearestIso(m.iso),
+                                shutterIndex = nearestShutterIndex(m.exposureNs),
+                                focusDiopters = m.focusDiopters,
+                                kelvin = m.kelvin,
+                                tint = m.tint,
+                            )
+                        }
+                        pushManual()
+                        controller.setWbOverride(m.wbGains)
                     } else {
                         _events.tryEmit("Couldn't meter — try again")
                     }
@@ -658,7 +675,12 @@ fun RecordScreen(
                 .aspectRatio(spec.width.toFloat() / spec.height.toFloat())
                 .pointerInput(state.previewReady, state.recording) {
                     detectTapGestures { offset ->
-                        if (state.previewReady && !state.recording) {
+                        // A tap while a slider panel is open is a dismissal, not a
+                        // meter request -- close the panel and do NOT re-meter (that
+                        // would silently overwrite whatever the user just hand-set).
+                        if (expanded != null) {
+                            expanded = null
+                        } else if (state.previewReady && !state.recording) {
                             viewModel.meterAt(offset.x / size.width.toFloat(), offset.y / size.height.toFloat())
                         }
                     }
