@@ -5,7 +5,13 @@ originating conversation. Everything here is either committed to git or noted
 below. Read this + the two plan/spec files + `.superpowers/sdd/progress.md`
 (git-ignored scratch) to pick up.
 
-## 1. Tap-to-Meter Auto — READY TO EXECUTE
+## 1. Tap-to-Meter Auto — DONE (2026-07-17)
+
+Executed via subagent-driven-development, commits 2d20ff1..eb050d8 on main.
+Final review: ready to merge, on-device verified. Details in
+`.superpowers/sdd/progress.md`. Original item kept below for reference.
+
+## 1 (original). Tap-to-Meter Auto — READY TO EXECUTE
 
 - Spec: `docs/superpowers/specs/2026-07-16-tap-to-meter-auto-design.md` (commit 0d2ea48)
 - Plan: `docs/superpowers/plans/2026-07-16-tap-to-meter-auto.md` (commit 8a4b339), 3 tasks
@@ -17,7 +23,14 @@ below. Read this + the two plan/spec files + `.superpowers/sdd/progress.md`
   tool (`exec-out screencap -p > file`), NOT PowerShell (binary redirect
   corrupts PNGs). Use `MSYS_NO_PATHCONV=1` for adb shell paths.
 
-## 2. Security fix — COMMITTED, HOST TESTS UNVERIFIED
+## 2. Security fix — VERIFIED (2026-07-17)
+
+Host ctest ran green: 6/6 passed (test_dng_writer, test_export, test_pack10,
+test_rawv_layout, test_rawv_reader with the new hardening cases, test_rawv_writer),
+built with SDK CMake 3.22.1 + Ninja + MinGW via PowerShell. The g++ wedge in
+item 4 did not reoccur. Original item kept below for reference.
+
+## 2 (original). Security fix — COMMITTED, HOST TESTS UNVERIFIED
 
 - Commit 727d5dd: hardened `core/src/rawv_reader.cpp` `headerSane` against a
   reachable heap overflow in `unpack10` (crafted `.rawv` with `width*height`
@@ -82,7 +95,10 @@ ClipsScreen, ExportService, MainActivity, NativeBridge, Theme). Ranked:
 Categories found clean: camera session/resource teardown ordering, coroutine
 cancellation, StateFlow mutation (all via `.update{ copy }`).
 
-## 4. Host C++ toolchain wedge (environment, not code)
+## 4. Host C++ toolchain wedge — RESOLVED (2026-07-17): full rebuild + ctest
+ran clean via PowerShell with no Defender intervention. Original notes below.
+
+## 4 (original). Host C++ toolchain wedge (environment, not code)
 
 Mid-session the msys2 host g++ began failing to build even a trivial program:
 `cc1plus` exits 1 with zero diagnostic (driver `--version` and the cc1plus
