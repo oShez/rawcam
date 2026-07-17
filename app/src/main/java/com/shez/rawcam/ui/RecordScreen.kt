@@ -229,6 +229,17 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.openAndPreview(surface, onFailed = { handleModeFailure() }) {
                     _uiState.update { it.copy(previewReady = true) }
                     pushManual()
+                    // First preview-ready of this process: auto-meter the center once so
+                    // launch shows a correctly white-balanced image (and seeds
+                    // CameraController's anchor) instead of the calibrated model's
+                    // possibly-placeholder-matrix output persisting until the user's
+                    // first manual tap. didAutoMeter is a plain (non-Volatile) field --
+                    // fine because onReady always runs on the single camera thread (see
+                    // CameraController's class kdoc), never concurrently with itself.
+                    if (!didAutoMeter) {
+                        didAutoMeter = true
+                        meterAt(0.5f, 0.5f, quiet = true)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "openAndPreview failed", e)
@@ -236,6 +247,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
+
+    /** Guards the one-shot startup auto-meter in [openCamera] -- true after the first
+     * preview-ready of this process, for the lifetime of this ViewModel (i.e. once
+     * per process for all practical purposes: this VM instance survives
+     * configuration changes but not process death). Deliberately never reset by
+     * lens/mode switches, so a re-open never re-triggers it. */
+    private var didAutoMeter = false
 
     /**
      * Preview session failed to configure. If a non-default lens/size mode is
@@ -293,9 +311,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * [CameraController.meterAt] posts to the camera thread and always invokes
      * onResult there (converged values, or null on failure/timeout) after
      * restoring manual -- the callback hops back via [viewModelScope] to touch
-     * uiState/_events from a normal coroutine context.
+     * uiState/_events from a normal coroutine context. [quiet] suppresses the
+     * failure snackbar (the reticle still shows) -- for the automatic startup
+     * meter in [openCamera], where a failure isn't a user action to explain.
      */
-    fun meterAt(nx: Float, ny: Float) {
+    fun meterAt(nx: Float, ny: Float, quiet: Boolean = false) {
+        Log.i(TAG, "meterAt nx=$nx ny=$ny quiet=$quiet")
         val s = _uiState.value
         if (s.recording || s.metering || !s.previewReady) return
         val p = Offset(nx, ny)
@@ -306,13 +327,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     if (m != null) {
                         // Batched into ONE uiState update + ONE controller push (was
                         // five setIso/setShutterIndex/setFocus/setKelvin/setTint calls,
-                        // each its own update+pushManual). Order matters for the WB
-                        // override (CameraController.wbOverride): pushManual() below
-                        // calls controller.updateManual(..., kelvin=m.kelvin,
-                        // tint=m.tint) -- since that's the SAME kelvin/tint this
-                        // uiState.update just set, updateManual's clear-on-change check
-                        // does not fire. setWbOverride() runs AFTER, so it's the last
-                        // (and effective) word on this frame's WB gains regardless, and
+                        // each its own update+pushManual). Ordering note (WB override,
+                        // CameraController.wbOverride): pushManual() below calls
+                        // controller.updateManual(..., kelvin=m.kelvin, tint=m.tint) --
+                        // the controller's OWN stored kelvin/tint are still whatever they
+                        // were before this meter (not necessarily equal to m.kelvin/
+                        // m.tint), so updateManual's clear-on-change check typically DOES
+                        // fire and clears wbOverride here. That's fine: setWbOverride()
+                        // runs immediately after and is the last (and effective) word on
+                        // this frame's WB gains regardless of whether the clear fired --
                         // its own post re-arms the repeating request a second time with
                         // the exact metered gains applied.
                         _uiState.update {
@@ -326,7 +349,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         pushManual()
                         controller.setWbOverride(m.wbGains)
-                    } else {
+                    } else if (!quiet) {
                         _events.tryEmit("Couldn't meter — try again")
                     }
                     _uiState.update { it.copy(metering = false) }

@@ -188,6 +188,19 @@ class CameraController(private val context: Context) {
      * [updateManual] / [startRecording] when the user moves a WB slider
      * (kelvin or tint actually changes). Null = no override, use the model. */
     @Volatile private var wbOverride: RggbChannelVector? = null
+
+    /** Real measured AWB gains from the most recent successful meter, and the
+     * kelvin [gainsToKelvinTint] matched them to (against the anchor state
+     * BEFORE this one) -- see [gainsFor]'s kdoc. This is what lets the slider
+     * model track this device's *actual* sensor response instead of a static
+     * calibration matrix that may be a placeholder (observed on a Pixel 7 Pro:
+     * SENSOR_COLOR_TRANSFORM2 was the textbook XYZ->sRGB matrix, not a real
+     * per-unit calibration). Null until the first successful meter of this
+     * process; [gainsFor] substitutes DEFAULT_ANCHOR_* in that case. Written
+     * only from [readMetered], on the camera thread, same as every other field
+     * gainsFor reads. */
+    @Volatile private var anchorGains: RggbChannelVector? = null
+    @Volatile private var anchorKelvin: Int = 5600
     /** Set by stopRecording(); counted down by the session's onReady (idle) callback. */
     @Volatile private var idleLatch: CountDownLatch? = null
 
@@ -503,6 +516,14 @@ class CameraController(private val context: Context) {
         val focusOut = r.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
         val gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS)
         val (k, t) = if (gains != null) gainsToKelvinTint(gains) else (kelvin to tint)
+        if (gains != null) {
+            // Anchor the calibrated model's SHAPE to this real measurement. `k` was
+            // just matched against the OLD anchor (gainsToKelvinTint/gainsFor above
+            // read anchorGains/anchorKelvin before this assignment) -- update the
+            // anchor only now, so the stored kelvin is never matched against itself.
+            anchorGains = gains
+            anchorKelvin = k
+        }
         return MeteredValues(isoOut, expOut, focusOut, k, t, gains)
     }
 
@@ -873,20 +894,18 @@ class CameraController(private val context: Context) {
     }
 
     /**
-     * Kelvin/tint -> per-channel gains that cancel the sensor's *own* calibrated
-     * response to that color temperature (DNG-style), not a sensor-agnostic
-     * blackbody-light model. Steps (see wb-fix-brief.md for the full derivation):
-     * kelvin -> CIE xy -> XYZ; interpolate the sensor's two calibration matrices
-     * (XYZ -> sensor space) by inverse CCT; multiply through to get the sensor's
-     * native (R, G, B) response to a white patch under that illuminant --
-     * green-normalizing that response is exactly the gain that neutralizes it.
-     * Tint biases green relative to red/blue: positive = more magenta (green
-     * reduced), negative = more green (green raised). gainR/gainB are NOT floored
-     * at 1.0 (that floor was the root cause of the old model's green-tint bug);
-     * instead the whole vector is scaled up together, after tint is folded in, so
-     * gains stay >=1 (required by many HALs) without disturbing the R:G:B ratio.
+     * DNG-calibrated model gains at tint=0, BEFORE the >=1 renormalization --
+     * the *shape* of the kelvin -> gains curve (kelvin -> CIE xy -> XYZ ->
+     * multiply by the sensor's interpolated calibration matrix -> green-
+     * normalize). This is deliberately NOT the final gains: [gainsFor] uses the
+     * RATIO of this curve at two kelvins to carry a real measurement (the
+     * anchor) across the kelvin range, because on at least one real device
+     * (Pixel 7 Pro) the static SENSOR_COLOR_TRANSFORM1/2 calibration matrices
+     * are placeholders (textbook XYZ->sRGB, not a per-unit calibration) and
+     * this curve's absolute LEVEL cannot be trusted -- only its shape (how
+     * gains change as kelvin moves) is assumed meaningful.
      */
-    private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
+    private fun modelGainsRaw(kelvinValue: Int): Pair<Double, Double> {
         val calib = wbCalib
         val (x, y) = kelvinToXy(kelvinValue)
         val safeY = if (abs(y) < 1e-9) 1e-9 else y
@@ -899,10 +918,37 @@ class CameraController(private val context: Context) {
         val nR = (cm[0] * xyzX + cm[1] * xyzY + cm[2] * xyzZ).coerceAtLeast(1e-4)
         val nG = (cm[3] * xyzX + cm[4] * xyzY + cm[5] * xyzZ).coerceAtLeast(1e-4)
         val nB = (cm[6] * xyzX + cm[7] * xyzY + cm[8] * xyzZ).coerceAtLeast(1e-4)
+        val modelR = (nG / nR).coerceIn(1e-2, 8.0)
+        val modelB = (nG / nB).coerceIn(1e-2, 8.0)
+        return modelR to modelB
+    }
+
+    /**
+     * Kelvin/tint -> per-channel gains that cancel the sensor's *own* response
+     * to that color temperature -- anchored to a real measurement rather than
+     * trusting the calibrated model's absolute level (see [modelGainsRaw]'s
+     * kdoc for why). `raw = anchor (.) (model(kelvin) / model(anchorKelvin))`
+     * channel-wise: the anchor (real AWB gains from the most recent successful
+     * [meterAt], or a DEFAULT_ANCHOR_* seed before the first one) supplies the
+     * absolute level; the calibrated model only supplies the *relative* shape
+     * of how gains should move away from the anchor's kelvin. Tint is applied
+     * multiplicatively to the (already anchor-scaled) green channel, then the
+     * whole vector is renormalized so gains stay >=1 (required by many HALs)
+     * without disturbing the R:G:B ratio -- unchanged from the prior model.
+     */
+    private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
+        val anchor = anchorGains
+        val aKelvin = anchorKelvin
+        val (modelR, modelB) = modelGainsRaw(kelvinValue)
+        val (anchorModelR, anchorModelB) = modelGainsRaw(aKelvin)
+        val anchorR = anchor?.red?.toDouble() ?: DEFAULT_ANCHOR_R
+        val anchorG = anchor?.let { ((it.greenEven + it.greenOdd) / 2f).toDouble() } ?: DEFAULT_ANCHOR_G
+        val anchorB = anchor?.blue?.toDouble() ?: DEFAULT_ANCHOR_B
+
         val tintFactor = (1.0 - tintValue / 100.0).coerceIn(0.3, 2.0)
-        var gainR = (nG / nR).coerceIn(1e-2, 8.0)
-        var gainB = (nG / nB).coerceIn(1e-2, 8.0)
-        var gainG = tintFactor
+        var gainR = (anchorR * (modelR / anchorModelR)).coerceIn(1e-2, 8.0)
+        var gainB = (anchorB * (modelB / anchorModelB)).coerceIn(1e-2, 8.0)
+        var gainG = anchorG * tintFactor
         val minGain = minOf(gainR, gainG, gainB)
         if (minGain < 1.0) {
             val scale = 1.0 / minGain
@@ -913,14 +959,24 @@ class CameraController(private val context: Context) {
 
     /**
      * Inverse of gainsFor: map measured AWB per-channel gains back to the nearest
-     * (kelvin, tint) representable by the manual controls. With the calibrated
-     * model, ln(gainR/gainB) is monotonic in kelvin over the candidate range and
-     * invariant to the uniform >=1 normalization gainsFor applies (a common scale
-     * factor cancels in the ratio) -- so matching purely on that log-ratio against
-     * gainsFor(k, 0) for each kelvin candidate exactly reproduces the kelvin that
-     * generated the gains. Tint is recovered by comparing the measured green gain
-     * against the model's green at the matched kelvin (same normalization on both
-     * sides, so this also round-trips exactly for gains produced by gainsFor).
+     * (kelvin, tint) representable by the manual controls. Matching is purely on
+     * ln(gainR/gainB) against gainsFor(k, 0) for each kelvin candidate, for two
+     * reasons that both survive a fixed anchor state: (1) it's invariant to the
+     * uniform >=1 renormalization gainsFor applies (a common scale factor cancels
+     * in the ratio); (2) away from the [1e-2, 8] per-channel clamp, the anchor
+     * only adds a constant offset to the unanchored model's own log-ratio, so
+     * whatever monotonicity that curve has is preserved. (On real hardware the
+     * clamp CAN saturate at the extreme low-kelvin end -- confirmed on this
+     * Pixel 7 Pro's actual calibration matrix, see wb-fix-report.md's "Fix
+     * cycle" section -- which breaks the *exact* constant-offset property at
+     * that point; monotonicity across the full candidate set held in every
+     * case checked there, which is what this match actually depends on.) Since
+     * gainsFor(k, 0) is deterministic for a fixed anchor, feeding it its own
+     * output back in reproduces the generating k exactly regardless of any
+     * clamp. Tint is recovered by comparing the measured green gain against the
+     * model's green at the matched kelvin (same normalization AND same anchor
+     * state on both sides, so this also round-trips exactly for gains produced
+     * by gainsFor(k, 0)).
      */
     fun gainsToKelvinTint(gains: RggbChannelVector): Pair<Int, Int> {
         val gR = gains.red.coerceAtLeast(1e-6f)
@@ -989,6 +1045,16 @@ class CameraController(private val context: Context) {
         // values from these sets so the metered result lands exactly on a slider tick.
         private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
         private val TINT_CANDIDATES = (-50..50 step 5).toList()
+        // Seed anchor for gainsFor before the first successful meterAt of this process
+        // (see anchorGains's kdoc): a typical green-dominant phone-sensor neutral at
+        // 5600K (anchorKelvin's own default). Better than trusting a possibly-
+        // placeholder calibration matrix's absolute level on unknown hardware, and
+        // roughly harmless (close to gainsFor's old floor-1 behavior) on honest
+        // hardware -- gets replaced by real numbers the moment any meter succeeds,
+        // including the automatic startup one (RecordViewModel.didAutoMeter).
+        private const val DEFAULT_ANCHOR_R = 2.0
+        private const val DEFAULT_ANCHOR_G = 1.0
+        private const val DEFAULT_ANCHOR_B = 1.7
         // Identity 3x3 (row-major rationals num/den): color correction here is
         // gains-only, no cross-channel matrix warp.
         private val IDENTITY_TRANSFORM = ColorSpaceTransform(
