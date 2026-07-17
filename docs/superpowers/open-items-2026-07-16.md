@@ -43,7 +43,18 @@ item 4 did not reoccur. Original item kept below for reference.
   -> expect 6/6, with new `test_rawv_reader` cases (1x1 OOB trigger, non-x4 and
   exact-size rejections, alloc cap, valid-packed10 acceptance, frameCount clamp).
 
-## 3. Kotlin app-layer audit — 9 FINDINGS, NOT YET FIXED
+## 3. Kotlin app-layer audit — FIXED (2026-07-17)
+
+All 9 findings fixed via subagent-driven-development, commits a01d3cf (Task A:
+CRITICAL async enumeration + LOW uiState fold) and 8070d2a (Task B: remaining
+7 findings) on main. Per-task reviews and final whole-range review
+(f9663a5..8070d2a): READY TO MERGE, 0 Critical/Important. Details, finding→
+commit map, and deferred post-merge tidy items (loading-placeholder error
+state + non-RAW-hardware error surfacing, NonCancellable delete hardening,
+QUEUED export status, mkdirs off constructor) in `.superpowers/sdd/progress.md`.
+Original item kept below for reference.
+
+## 3 (original). Kotlin app-layer audit — 9 FINDINGS, NOT YET FIXED
 
 From a review of the Kotlin/Compose layer (RecordScreen, CameraController,
 ClipsScreen, ExportService, MainActivity, NativeBridge, Theme). Ranked:
