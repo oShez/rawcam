@@ -972,8 +972,12 @@ class CameraController(private val context: Context) {
      * that point; monotonicity across the full candidate set held in every
      * case checked there, which is what this match actually depends on.) Since
      * gainsFor(k, 0) is deterministic for a fixed anchor, feeding it its own
-     * output back in reproduces the generating k exactly regardless of any
-     * clamp. Tint is recovered by comparing the measured green gain against the
+     * output back in reproduces the generating k exactly PROVIDED the clamp has
+     * not collapsed two candidates onto the same log-ratio (a saturated channel
+     * at adjacent low-kelvin candidates can do that for a large enough anchor;
+     * the strict < in the loop would then keep the lower candidate). On this
+     * hardware the candidate set stays injective, so round-trip is exact.
+     * Tint is recovered by comparing the measured green gain against the
      * model's green at the matched kelvin (same normalization AND same anchor
      * state on both sides, so this also round-trips exactly for gains produced
      * by gainsFor(k, 0)).
