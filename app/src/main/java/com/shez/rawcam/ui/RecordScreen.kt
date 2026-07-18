@@ -4,6 +4,10 @@ import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.PowerManager
 import android.os.StatFs
 import android.util.Log
@@ -48,10 +52,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -88,6 +95,7 @@ import com.shez.rawcam.settings.MeterRegion
 import com.shez.rawcam.settings.MeterScope
 import com.shez.rawcam.settings.Settings
 import com.shez.rawcam.settings.SettingsRepository
+import com.shez.rawcam.settings.ShutterDisplay
 import com.shez.rawcam.settings.StartupMeter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +117,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** UI state for [RecordScreen]. Sliders store the raw value the user picked; the
@@ -838,6 +847,23 @@ private fun focusLabel(diopters: Float): String {
     return if (meters >= 1f) "%.0fm".format(meters) else "%.0fcm".format(meters * 100f)
 }
 
+/** Shutter-speed label per [Settings.shutterDisplay]: a plain fraction of a second
+ *  ("1/48"), or the film/video shutter angle in degrees derived from [fps] and [denom]
+ *  ("180°" for 24fps at 1/48s: `360 * 24 / 48 = 180`). Storage stays the shutter
+ *  denominator throughout -- this is display-only, applied at the two read sites (the
+ *  SHUTTER chip and the shutter panel's slider labels). */
+private fun shutterLabel(denom: Int, fps: Int, mode: ShutterDisplay) = when (mode) {
+    ShutterDisplay.FRACTION -> "1/$denom"
+    ShutterDisplay.ANGLE -> "${(360f * fps / denom).roundToInt()}°"
+}
+
+/** Single call-site wrapper around the [Offset] factory function -- the grid overlay's
+ *  DrawScope block below constructs several Offsets from plain (non-constant) Float
+ *  pairs in the same lexical block; routing them all through one named call site here
+ *  avoids a resolution issue where repeated inline `Offset(x, y)` construction sites in
+ *  the same block were only correctly resolving on the first occurrence. */
+private fun gridPoint(x: Float, y: Float): Offset = Offset(x, y)
+
 // internal (not private): reused by SettingsScreen.kt's SliderRow for the
 // default-white-balance / default-tint settings, which use the same stop lists.
 internal val KELVIN_STOPS = listOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
@@ -964,6 +990,37 @@ fun RecordScreen(
                 )
             }
 
+            // Rule-of-thirds grid: composed above the SurfaceView, below the reticle,
+            // and OUTSIDE the pointerInput chain (a bare Canvas has no pointerInput of
+            // its own), so it never intercepts the tap-to-meter gesture attached to the
+            // enclosing Box above -- purely a paint layer.
+            if (state.settings.gridEnabled) {
+                Canvas(Modifier.fillMaxSize()) {
+                    // Explicit `this.size` (not bare `size`) -- this composable's outer
+                    // scope has its own local `size` (the selected LensSize, Int pixel
+                    // dimensions of the sensor mode) which otherwise shadows this
+                    // DrawScope's own `size: Size` (Float, the Canvas's actual layout
+                    // pixel dimensions -- what the grid must be measured against).
+                    val c = Color.White.copy(alpha = 0.30f)
+                    val strokeWidth = 1.dp.toPx()
+                    val w = this.size.width
+                    val h = this.size.height
+                    for (f in listOf(1f / 3f, 2f / 3f)) {
+                        val x = w * f
+                        val y = h * f
+                        drawLine(c, gridPoint(x, 0f), gridPoint(x, h), strokeWidth)
+                        drawLine(c, gridPoint(0f, y), gridPoint(w, y), strokeWidth)
+                    }
+                }
+            }
+
+            // Horizon level: only composed (and its sensor listener only registered)
+            // while the setting is on -- see HorizonLevel's kdoc for the sensor
+            // lifecycle. Non-interactive, same reasoning as the grid above.
+            if (state.settings.levelEnabled) {
+                HorizonLevel(Modifier.align(Alignment.Center))
+            }
+
             // Tap-to-meter reticle: grey while converging, green briefly after, at the
             // normalized tap point mapped back into this Box's pixel dimensions.
             state.meterPoint?.let { p ->
@@ -997,27 +1054,32 @@ fun RecordScreen(
             // compete with the ~376 MB/s capture hot path and force drops. SETTINGS
             // disabled while recording/busy (settingsEnabled, from MainActivity's
             // `locked`) -- leaving Record mid-recording would dispose the SurfaceView
-            // and stall the RAW stream, same reasoning as CLIPS below.
+            // and stall the RAW stream, same reasoning as CLIPS below. BENCH itself is
+            // gated on Settings.showBench -- SETTINGS always renders below it (or alone,
+            // at the same TopStart slot) regardless of that toggle, since it's the only
+            // way back into the settings screen that turned it off.
             Column(modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
-                TextButton(
-                    enabled = !state.recording && !state.busy,
-                    onClick = {
-                        if (benchRunning) return@TextButton
-                        benchRunning = true
-                        scope.launch {
-                            val mbps = withContext(Dispatchers.IO) {
-                                val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
-                                NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                if (state.settings.showBench) {
+                    TextButton(
+                        enabled = !state.recording && !state.busy,
+                        onClick = {
+                            if (benchRunning) return@TextButton
+                            benchRunning = true
+                            scope.launch {
+                                val mbps = withContext(Dispatchers.IO) {
+                                    val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
+                                    NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                                }
+                                benchRunning = false
+                                snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
                             }
-                            benchRunning = false
-                            snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
-                        }
-                    },
-                ) {
-                    Text(
-                        if (benchRunning) "…" else "BENCH",
-                        color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
-                    )
+                        },
+                    ) {
+                        Text(
+                            if (benchRunning) "…" else "BENCH",
+                            color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
+                        )
+                    }
                 }
                 TextButton(
                     enabled = settingsEnabled,
@@ -1043,31 +1105,37 @@ fun RecordScreen(
                 )
             }
 
-            // Left status rail.
-            Column(
-                modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // Left status rail, gated on Settings.showStatsSidebar. The action rails
+            // (right, bottom) and the top gutter buttons don't read anything from this
+            // column, so hiding it is a pure subtraction -- nothing else in the layout
+            // depends on it being present (each surviving element is independently
+            // aligned/positioned against the outer Box, not against this Column).
+            if (state.settings.showStatsSidebar) {
+                Column(
+                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    if (state.recording) RecDot()
-                    Text(
-                        formatTimer(state.elapsedSeconds),
-                        color = RawCamColors.OnSurface, fontSize = 24.sp,
-                        fontFamily = FontFamily.Monospace,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (state.recording) RecDot()
+                        Text(
+                            formatTimer(state.elapsedSeconds),
+                            color = RawCamColors.OnSurface, fontSize = 24.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    StatItem("${state.written}", "frames written")
+                    StatItem(
+                        "${state.dropped}", "dropped",
+                        valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
+                    )
+                    StatItem(
+                        remainingLabel(state.freeSpaceBytes, state.fps, spec.width, spec.height),
+                        "space remaining",
                     )
                 }
-                StatItem("${state.written}", "frames written")
-                StatItem(
-                    "${state.dropped}", "dropped",
-                    valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
-                )
-                StatItem(
-                    remainingLabel(state.freeSpaceBytes, state.fps, spec.width, spec.height),
-                    "space remaining",
-                )
             }
 
             // Right action rail.
@@ -1135,7 +1203,7 @@ fun RecordScreen(
                                     TickedSlider(
                                         stops = shutterStops,
                                         selected = shutterDenom,
-                                        labelFor = { "1/$it" },
+                                        labelFor = { shutterLabel(it, state.fps, state.settings.shutterDisplay) },
                                         onSelect = { viewModel.setShutterIndex(shutterStops.indexOf(it)) },
                                     )
                                 }
@@ -1182,7 +1250,7 @@ fun RecordScreen(
                     ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
                         expanded = if (expanded == Param.ISO) null else Param.ISO
                     }
-                    ParamChip("1/$shutterDenom", expanded == Param.SHUTTER) {
+                    ParamChip(shutterLabel(shutterDenom, state.fps, state.settings.shutterDisplay), expanded == Param.SHUTTER) {
                         expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER
                     }
                     ParamChip("ƒ ${focusLabel(state.focusDiopters)}", expanded == Param.FOCUS) {
@@ -1196,6 +1264,85 @@ fun RecordScreen(
 
             SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
         }
+    }
+}
+
+/**
+ * Horizon-tilt indicator drawn over the preview. Registers a
+ * [Sensor.TYPE_ROTATION_VECTOR] listener at [SensorManager.SENSOR_DELAY_UI] for exactly
+ * as long as this composable stays in composition; the caller (RecordScreen) only
+ * composes it while `state.settings.levelEnabled` is true, so toggling the setting off
+ * -- or leaving the Record screen entirely, which removes this composable from the tree
+ * -- runs [DisposableEffect]'s onDispose and unregisters the listener. Devices with no
+ * rotation-vector sensor (`getDefaultSensor` returns null) register nothing; `roll`
+ * simply stays at its initial 0f and the widget draws a level (green) line rather than
+ * crashing.
+ *
+ * Roll math: [SensorManager.getRotationMatrixFromVector] plus the IDENTITY axis remap
+ * defines "roll" (getOrientation's `values[2]`) as banking around the device's
+ * natural-portrait "up" axis -- correct for a phone lying flat on a table, not for one
+ * held up vertically like a camera pointed at the horizon (that usage is close to the
+ * gimbal-lock edge of the roll/pitch/azimuth decomposition and the axis doesn't mean
+ * "image rotation" there). Remapping coordinates with (AXIS_X, AXIS_Z) substitutes the
+ * screen-normal axis (old Z, pointing out through the lens/screen) in as the roll axis,
+ * which is the standard correction for a vertically-held viewfinder: the resulting roll
+ * is the rotation of the frame around the lens axis -- i.e. "is the horizon level in the
+ * image" -- and that quantity depends only on the physical device housing, not on
+ * Surface.getRotation(), so it is correct for ANY UI orientation including this app's
+ * fixed `landscape` lock (AndroidManifest.xml). That axis substitution IS the
+ * "adjustment for the app's landscape lock" the task calls for; no further per-rotation
+ * multiplier is layered on top; further defense at this device's fixed `landscape`
+ * (not sensorLandscape/reverseLandscape) is that a single physical rotation is used for
+ * the whole app lifetime, so the axis choice above doesn't need to react to runtime
+ * rotation changes the way a compass app's display-rotation remap table would.
+ *
+ * NOT verified on a physical device -- no adb use is permitted in this task.
+ * ON-DEVICE VERIFY: tilt the phone (held landscape, as it's locked) left/right and
+ * confirm the drawn line rotates opposite to the phone (i.e. stays visually level with
+ * the true horizon). If it instead rotates WITH the phone (mirrored), the fix is a
+ * one-line sign flip: negate `roll` right after it's computed below.
+ */
+@Composable
+private fun HorizonLevel(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var roll by remember { mutableFloatStateOf(0f) }
+    DisposableEffect(Unit) {
+        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val rotationMatrix = FloatArray(9)
+                val remapped = FloatArray(9)
+                val orientation = FloatArray(3)
+                SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                SensorManager.remapCoordinateSystem(
+                    rotationMatrix, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped,
+                )
+                SensorManager.getOrientation(remapped, orientation)
+                roll = Math.toDegrees(orientation[2].toDouble()).toFloat()
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        if (sensor != null) {
+            sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        }
+        onDispose {
+            if (sensor != null) sensorManager.unregisterListener(listener)
+        }
+    }
+
+    val lineColor = if (abs(roll) <= 0.5f) Color.Green else Color.White.copy(alpha = 0.6f)
+    Box(modifier, contentAlignment = Alignment.Center) {
+        // Fixed center reference tick -- does not rotate; the moving line below
+        // visually overlaps it exactly when the device is level.
+        Box(Modifier.width(2.dp).height(24.dp).background(Color.White.copy(alpha = 0.6f)))
+        Box(
+            Modifier
+                .width(120.dp)
+                .height(2.dp)
+                .rotate(-roll)
+                .background(lineColor)
+        )
     }
 }
 
