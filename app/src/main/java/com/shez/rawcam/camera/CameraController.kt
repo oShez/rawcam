@@ -158,6 +158,15 @@ class CameraController(private val context: Context) {
      * (re)build, same as iso/exposureNs/focusDiopters/kelvin/tint. */
     @Volatile var oisMode: OisMode = OisMode.AUTO
 
+    /** User's metering-region size (Settings.meterRegion), as a fraction of the
+     * active-array width/height -- SMALL 0.05f / MEDIUM 0.10f / LARGE 0.20f. Read
+     * by [meteringRectFor] (half-width = this / 2) on every [meterAt] call, so a
+     * change only takes effect on the NEXT tap-to-meter -- there is no live
+     * request to re-arm, unlike [oisMode]/manual values. Pushed here unconditionally
+     * by the caller's settings collector reaction, same rationale as [oisMode]'s
+     * kdoc: the first emission must apply a saved non-default region. */
+    @Volatile var meterRegionFraction: Float = 0.10f
+
     /** Directory Task 11 should place clip files in (created eagerly). */
     val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
 
@@ -583,11 +592,14 @@ class CameraController(private val context: Context) {
 
     private fun meteringRectFor(nx: Float, ny: Float, arr: Rect): MeteringRectangle {
         // Preview is locked landscape and fills the active array; map normalized
-        // (nx, ny) directly into active-array pixels. A ~10% box is the metered area.
+        // (nx, ny) directly into active-array pixels. meterRegionFraction is the
+        // metered box's fraction of width/height (Settings.meterRegion); half of
+        // that is the half-width/half-height around the tap point.
         val cx = (arr.left + nx.coerceIn(0f, 1f) * arr.width()).toInt()
         val cy = (arr.top + ny.coerceIn(0f, 1f) * arr.height()).toInt()
-        val halfW = (arr.width() * 0.05f).toInt().coerceAtLeast(1)
-        val halfH = (arr.height() * 0.05f).toInt().coerceAtLeast(1)
+        val halfFrac = meterRegionFraction / 2f
+        val halfW = (arr.width() * halfFrac).toInt().coerceAtLeast(1)
+        val halfH = (arr.height() * halfFrac).toInt().coerceAtLeast(1)
         val left = (cx - halfW).coerceIn(arr.left, arr.right - 1)
         val top = (cy - halfH).coerceIn(arr.top, arr.bottom - 1)
         val right = (cx + halfW).coerceIn(left + 1, arr.right)

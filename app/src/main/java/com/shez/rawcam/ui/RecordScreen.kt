@@ -84,6 +84,8 @@ import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
+import com.shez.rawcam.settings.MeterRegion
+import com.shez.rawcam.settings.MeterScope
 import com.shez.rawcam.settings.Settings
 import com.shez.rawcam.settings.SettingsRepository
 import com.shez.rawcam.settings.StartupMeter
@@ -220,6 +222,17 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.oisMode = s.oisMode
                 if (prev != null && prev.oisMode != s.oisMode) {
                     pushManual()
+                }
+                // Unconditional for the same reason as oisMode above: the FIRST
+                // emission must apply a saved non-default meterRegion, and this is
+                // a cheap volatile write. Unlike oisMode there is no pushManual()
+                // companion -- meterRegionFraction only matters on the next
+                // meterAt() call (it sizes the AE/AWB/AF metering rectangle at tap
+                // time), there is no live repeating-request value to re-arm.
+                controller.meterRegionFraction = when (s.meterRegion) {
+                    MeterRegion.SMALL -> 0.05f
+                    MeterRegion.MEDIUM -> 0.10f
+                    MeterRegion.LARGE -> 0.20f
                 }
                 previous = s
             }
@@ -460,34 +473,58 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     if (m != null) {
                         // Batched into ONE uiState update + ONE controller push (was
                         // five setIso/setShutterIndex/setFocus/setKelvin/setTint calls,
-                        // each its own update+pushManual). Ordering note (WB override,
-                        // CameraController.wbOverride): pushManual() below calls
-                        // controller.updateManual(..., kelvin=m.kelvin, tint=m.tint) --
-                        // the controller's OWN stored kelvin/tint are still whatever they
-                        // were before this meter (not necessarily equal to m.kelvin/
-                        // m.tint), so updateManual's clear-on-change check typically DOES
-                        // fire and clears wbOverride here. That's fine: setWbOverride()
-                        // runs immediately after and is the last (and effective) word on
-                        // this frame's WB gains regardless of whether the clear fired --
-                        // its own post re-arms the repeating request a second time with
-                        // the exact metered gains applied.
-                        _uiState.update {
-                            it.copy(
-                                iso = nearestIso(m.iso),
-                                shutterIndex = nearestShutterIndex(m.exposureNs),
-                                focusDiopters = m.focusDiopters,
-                                kelvin = m.kelvin,
-                                tint = m.tint,
-                            )
+                        // each its own update+pushManual). Branches on Settings.meterScope
+                        // -- EVERYTHING copies all five metered values; EXPOSURE_FOCUS
+                        // copies iso/shutter/focus only (WB untouched); WB_ONLY copies
+                        // kelvin/tint only (iso/shutter/focus untouched). Fields NOT
+                        // copied by a branch simply keep their pre-meter uiState values --
+                        // that's correct: the meter didn't change them, and the later
+                        // persistCaptureState() below snapshots exactly this post-branch
+                        // state, so an EXPOSURE_FOCUS meter persists the OLD kelvin/tint
+                        // (unchanged) alongside the NEW iso/shutter/focus, and a WB_ONLY
+                        // meter persists the OLD iso/shutter/focus alongside NEW kelvin/
+                        // tint. Applies identically to the startup auto-meter in
+                        // openCamera() (same meterAt() call, same onResult callback).
+                        val scope = _uiState.value.settings.meterScope
+                        val newIso = nearestIso(m.iso)
+                        val newShutter = nearestShutterIndex(m.exposureNs)
+                        _uiState.update { cur ->
+                            when (scope) {
+                                MeterScope.EVERYTHING -> cur.copy(
+                                    iso = newIso, shutterIndex = newShutter,
+                                    focusDiopters = m.focusDiopters, kelvin = m.kelvin, tint = m.tint,
+                                )
+                                MeterScope.EXPOSURE_FOCUS -> cur.copy(
+                                    iso = newIso, shutterIndex = newShutter, focusDiopters = m.focusDiopters,
+                                )
+                                MeterScope.WB_ONLY -> cur.copy(kelvin = m.kelvin, tint = m.tint)
+                            }
                         }
+                        // Ordering note (WB override, CameraController.wbOverride):
+                        // pushManual() below calls controller.updateManual(..., kelvin=
+                        // uiState.kelvin, tint=uiState.tint) -- under EVERYTHING/WB_ONLY
+                        // those are the just-applied m.kelvin/m.tint, which typically
+                        // differ from the controller's OWN stored kelvin/tint (whatever
+                        // they were before this meter), so updateManual's clear-on-change
+                        // check typically DOES fire and clears wbOverride here. That's
+                        // fine: setWbOverride(m.wbGains) runs immediately after and is
+                        // the last (and effective) word on this frame's WB gains
+                        // regardless of whether the clear fired -- its own post re-arms
+                        // the repeating request a second time with the exact metered
+                        // gains applied. Under EXPOSURE_FOCUS, uiState.kelvin/tint were
+                        // left unchanged by the branch above, so pushManual() calls
+                        // updateManual with the SAME kelvin/tint the controller already
+                        // has -- the clear-on-change check does NOT fire, wbOverride (and
+                        // the anchor) survive untouched, and setWbOverride is skipped
+                        // below -- applied WB genuinely does not change under this scope.
                         pushManual()
-                        controller.setWbOverride(m.wbGains)
+                        if (scope != MeterScope.EXPOSURE_FOCUS) controller.setWbOverride(m.wbGains)
                         persistCaptureState()
                     } else if (!quiet) {
                         _events.tryEmit("Couldn't meter — try again")
                     }
                     _uiState.update { it.copy(metering = false) }
-                    delay(600)   // leave the reticle briefly, then clear it
+                    delay(_uiState.value.settings.reticleHoldMs.toLong())   // leave the reticle briefly, then clear it
                     // Only clear the reticle if it still belongs to THIS tap and isn't
                     // mid-convergence for a newer tap -- a stale timer from a fast
                     // re-tap must never clear a newer tap's live reticle.
