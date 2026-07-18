@@ -606,8 +606,10 @@ private fun focusLabel(diopters: Float): String {
     return if (meters >= 1f) "%.0fm".format(meters) else "%.0fcm".format(meters * 100f)
 }
 
-private val KELVIN_STOPS = listOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
-private val TINT_STOPS = (-50..50 step 5).toList()
+// internal (not private): reused by SettingsScreen.kt's SliderRow for the
+// default-white-balance / default-tint settings, which use the same stop lists.
+internal val KELVIN_STOPS = listOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
+internal val TINT_STOPS = (-50..50 step 5).toList()
 
 private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB }
 
@@ -616,6 +618,8 @@ fun RecordScreen(
     viewModel: RecordViewModel = viewModel(),
     clipsEnabled: Boolean = true,
     onOpenClips: () -> Unit = {},
+    settingsEnabled: Boolean = true,
+    onOpenSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var hasPermission by remember { mutableStateOf(hasCameraPermission(context)) }
@@ -756,29 +760,42 @@ fun RecordScreen(
                 }
             }
 
-            // Benchmark (Task 8), reachable but out of the way. Disabled while
-            // recording: its ~6 GB write would compete with the ~376 MB/s capture
-            // hot path and force drops.
-            TextButton(
-                enabled = !state.recording && !state.busy,
-                onClick = {
-                    if (benchRunning) return@TextButton
-                    benchRunning = true
-                    scope.launch {
-                        val mbps = withContext(Dispatchers.IO) {
-                            val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
-                            NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+            // Benchmark (Task 8) + Settings entry, reachable but out of the way in the
+            // top-left gutter. BENCH disabled while recording: its ~6 GB write would
+            // compete with the ~376 MB/s capture hot path and force drops. SETTINGS
+            // disabled while recording/busy (settingsEnabled, from MainActivity's
+            // `locked`) -- leaving Record mid-recording would dispose the SurfaceView
+            // and stall the RAW stream, same reasoning as CLIPS below.
+            Column(modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+                TextButton(
+                    enabled = !state.recording && !state.busy,
+                    onClick = {
+                        if (benchRunning) return@TextButton
+                        benchRunning = true
+                        scope.launch {
+                            val mbps = withContext(Dispatchers.IO) {
+                                val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
+                                NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                            }
+                            benchRunning = false
+                            snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
                         }
-                        benchRunning = false
-                        snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
-                    }
-                },
-                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-            ) {
-                Text(
-                    if (benchRunning) "…" else "BENCH",
-                    color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
-                )
+                    },
+                ) {
+                    Text(
+                        if (benchRunning) "…" else "BENCH",
+                        color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
+                    )
+                }
+                TextButton(
+                    enabled = settingsEnabled,
+                    onClick = onOpenSettings,
+                ) {
+                    Text(
+                        "SETTINGS",
+                        color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
+                    )
+                }
             }
 
             TextButton(
@@ -1070,8 +1087,9 @@ private fun ParamLabel(text: String) {
  * endpoint labels give a scale reference, and snapping to [stops] makes it
  * possible to land on exact values. [stops] must have at least 2 entries.
  */
+// internal (not private): reused by SettingsScreen.kt's SliderRow.
 @Composable
-private fun <T> TickedSlider(
+internal fun <T> TickedSlider(
     stops: List<T>, selected: T, labelFor: (T) -> String,
     enabled: Boolean = true, onSelect: (T) -> Unit,
 ) {

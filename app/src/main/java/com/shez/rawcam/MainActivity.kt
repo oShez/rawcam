@@ -13,14 +13,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelProvider
+import com.shez.rawcam.settings.SettingsRepository
 import com.shez.rawcam.ui.ClipsScreen
 import com.shez.rawcam.ui.RawCamTheme
 import com.shez.rawcam.ui.RecordScreen
 import com.shez.rawcam.ui.RecordViewModel
+import com.shez.rawcam.ui.SettingsScreen
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
-private enum class Screen { Record, Clips }
+private enum class Screen { Record, Clips, Settings }
 
 class MainActivity : ComponentActivity() {
 
@@ -30,6 +32,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SettingsRepository.init(applicationContext)
         setContent {
             RawCamTheme {
                 var screen by remember { mutableStateOf(Screen.Record) }
@@ -53,8 +56,11 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             clipsEnabled = !locked,
                             onOpenClips = { if (!locked) screen = Screen.Clips },
+                            settingsEnabled = !locked,
+                            onOpenSettings = { if (!locked) screen = Screen.Settings },
                         )
                         Screen.Clips -> ClipsScreen(onBack = { screen = Screen.Record })
+                        Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Record })
                     }
                 }
             }
