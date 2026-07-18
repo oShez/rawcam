@@ -23,6 +23,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.settings.OisMode
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
@@ -82,6 +83,11 @@ class CameraController(private val context: Context) {
         /** DNG/EXIF reference-illuminant codes for [colorMatrix1] / [colorMatrix2];
          * mapped to a CCT by [illuminantCct]. Null when the characteristic is absent. */
         val illuminant1: Int?, val illuminant2: Int?,
+        /** CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION modes this
+         * lens supports (e.g. OIS_MODE_OFF/ON). Null on a sensor that doesn't expose
+         * the characteristic at all -- distinct from an array containing only OFF,
+         * which is common and means "no OIS hardware but the key exists". */
+        val availableOisModes: IntArray?,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -136,6 +142,21 @@ class CameraController(private val context: Context) {
      * per-lens [CameraCharacteristics] already fetched in [enumerateLenses] — never
      * refetched on the open/select hot path. */
     @Volatile private var activeArraySize: Rect? = null
+
+    /** Active lens's supported OIS modes ([LensInfo.availableOisModes]), tracked
+     * alongside [activeArraySize] with the same lifecycle (set in [initialize] and
+     * [selectMode], read by [applyManual] to gate [oisMode] ON/OFF requests against
+     * what the hardware actually supports). Null means the characteristic itself
+     * was absent -- no OIS key is ever set in that case, regardless of [oisMode]. */
+    @Volatile private var activeOisModes: IntArray? = null
+
+    /** User's OIS preference (Settings.oisMode), pushed here by the caller's settings
+     * collector reaction. AUTO leaves the HAL default (no key set) since Camera2 does
+     * not expose a "let the driver decide" OIS mode of its own -- omitting the key is
+     * the closest equivalent, matching AE/AF/AWB's own auto-vs-manual convention
+     * elsewhere in this controller. Read by [applyManual] on every repeating-request
+     * (re)build, same as iso/exposureNs/focusDiopters/kelvin/tint. */
+    @Volatile var oisMode: OisMode = OisMode.AUTO
 
     /** Directory Task 11 should place clip files in (created eagerly). */
     val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
@@ -239,6 +260,7 @@ class CameraController(private val context: Context) {
         activePhysicalId = lenses[defaultLensIndex].physicalId
         rawSpec = specFor(lenses[defaultLensIndex], 0)
         activeArraySize = lenses[defaultLensIndex].activeArraySize
+        activeOisModes = lenses[defaultLensIndex].availableOisModes
         wbCalib = wbCalibFor(lenses[defaultLensIndex])
         // Permanent cheap sanity line for field debugging: catches a matrix-direction
         // or model regression immediately in logcat without needing a unit test.
@@ -299,6 +321,7 @@ class CameraController(private val context: Context) {
         activePhysicalId = lens.physicalId
         rawSpec = specFor(lens, sizeIndex)
         activeArraySize = lens.activeArraySize
+        activeOisModes = lens.availableOisModes
         wbCalib = wbCalibFor(lens)
         return true
     }
@@ -720,6 +743,7 @@ class CameraController(private val context: Context) {
         val illum2 = ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)?.toInt()
         val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
         val activeArray = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
+        val oisModes = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
         val sorted = rawSizes.sortedByDescending { it.width.toLong() * it.height }
         val maxArea = sorted.first().width.toLong() * sorted.first().height
         val sizes = sorted.map { s ->
@@ -747,6 +771,7 @@ class CameraController(private val context: Context) {
             colorMatrix2 = xform2?.let { t -> FloatArray(9) { i -> t.getElement(i % 3, i / 3).toFloat() } },
             illuminant1 = illum1,
             illuminant2 = illum2,
+            availableOisModes = oisModes,
         )
     }
 
@@ -1030,6 +1055,20 @@ class CameraController(private val context: Context) {
         }
         b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
         b.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDiopters)
+        // AUTO leaves the key unset (HAL default -- see oisMode's kdoc). ON/OFF are
+        // only requested when the active lens's LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION
+        // actually lists the wanted mode; a lens with no OIS hardware (or that lacks the
+        // characteristic entirely, activeOisModes == null) silently keeps the HAL default
+        // instead of setting a key the HAL never advertised support for.
+        when (oisMode) {
+            OisMode.AUTO -> { /* leave HAL default */ }
+            OisMode.ON, OisMode.OFF -> {
+                val want = if (oisMode == OisMode.ON) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                           else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                val modes = activeOisModes
+                if (modes != null && want in modes) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, want)
+            }
+        }
         b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
         b.set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
         b.set(CaptureRequest.COLOR_CORRECTION_GAINS, wbOverride ?: gainsFor(kelvin, tint))

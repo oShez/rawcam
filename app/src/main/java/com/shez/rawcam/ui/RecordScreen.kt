@@ -83,6 +83,7 @@ import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
 import com.shez.rawcam.settings.CaptureState
+import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.Settings
 import com.shez.rawcam.settings.SettingsRepository
 import com.shez.rawcam.settings.StartupMeter
@@ -166,8 +167,19 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private var pollJob: Job? = null
     private var recordStartMs = 0L
+    // Runs on application.mainExecutor (see the addThermalStatusListener call in
+    // init{} below) -- NOT the camera thread. stopRecordingInternal() itself only
+    // touches _uiState/_events directly and launches the actual controller.stopRecording()
+    // call onto cameraOps, so calling it from the main thread here is the same shape as
+    // toggleRecord()'s UI-thread call into stopRecordingInternal.
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
         _uiState.update { it.copy(thermalSevere = status >= PowerManager.THERMAL_STATUS_SEVERE) }
+        if (status >= PowerManager.THERMAL_STATUS_SEVERE &&
+            _uiState.value.settings.thermalAutoStop && _uiState.value.recording
+        ) {
+            _events.tryEmit("Recording stopped: thermal")
+            stopRecordingInternal()
+        }
     }
 
     init {
@@ -180,7 +192,29 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         // persistCaptureState() and the startup-meter gating in openCamera(), both of
         // which read uiState.settings rather than re-querying the repository.
         viewModelScope.launch {
-            SettingsRepository.settings.collect { s -> _uiState.update { it.copy(settings = s) } }
+            // Tracks the previously-emitted Settings (null for the first emission) so
+            // reactions below only fire on an actual CHANGE of the field they care
+            // about, not on every unrelated settings write (DataStore re-emits the
+            // whole record on any single-field edit, e.g. from SettingsScreen).
+            var previous: Settings? = null
+            SettingsRepository.settings.collect { s ->
+                val prev = previous
+                _uiState.update { it.copy(settings = s) }
+                if (prev != null && prev.mainsFreq != s.mainsFreq) {
+                    // The stop list just changed shape (see shutterStops) -- reclamp
+                    // the persisted index into the new list's bounds, then push the
+                    // (possibly unchanged-in-Hz-terms) exposure at that index live.
+                    _uiState.update {
+                        it.copy(shutterIndex = it.shutterIndex.coerceIn(0, shutterStops(it.fps).size - 1))
+                    }
+                    pushManual()
+                }
+                if (prev != null && prev.oisMode != s.oisMode) {
+                    controller.oisMode = s.oisMode
+                    pushManual()
+                }
+                previous = s
+            }
         }
         // Camera lens enumeration is binder IPC (getCameraCharacteristics per lens +
         // stream-config queries) -- runs on cameraOps, never the main thread. Queued
@@ -262,8 +296,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(freeSpaceBytes = free) }
     }
 
-    /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval. */
-    fun shutterStops(fps: Int): List<Int> = ALL_SHUTTER_DENOMS.filter { it > fps }
+    /** Shutter stops valid at [fps]: exposure must stay strictly below the frame interval.
+     * The candidate list itself is biased by [Settings.mainsFreq] -- each list includes
+     * denominators that divide evenly into the mains frequency (and its double), which
+     * keeps exposure an integer multiple of the flicker period and avoids banding under
+     * artificial light; OFF keeps the old flat list. */
+    fun shutterStops(fps: Int): List<Int> = when (_uiState.value.settings.mainsFreq) {
+        MainsFreq.OFF  -> listOf(24, 48, 60, 120, 240, 500, 1000)
+        MainsFreq.HZ50 -> listOf(24, 50, 100, 200, 400, 500, 1000)
+        MainsFreq.HZ60 -> listOf(24, 60, 120, 240, 500, 1000)
+    }.filter { it > fps }
 
     /** FPS choices valid for [spec]. Never empty. Takes the mode's spec explicitly
      * (rather than reading controller.rawSpec) so composable callers can pass
@@ -574,14 +616,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // Packed10 payload record size: (w*h/4)*5 + 64 bytes of FrameMeta.
                 val frameBytes = (spec.width.toLong() * spec.height / 4) * 5 + 64
                 val available = StatFs(controller.clipsDir.absolutePath).availableBytes
-                val required = frameBytes * s.fps * 35L
+                val required = frameBytes * s.fps * s.settings.freeSpaceReserveSeconds.toLong()
                 if (available < required) {
                     val maxSeconds = available / (frameBytes * s.fps)
                     _events.tryEmit("Not enough free space; max ~${maxSeconds}s recordable")
                     return@launch
                 }
                 val name =
-                    "clip_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
+                    "${s.settings.clipPrefix}_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
                 val path = File(controller.clipsDir, name).absolutePath
                 val ok = controller.startRecording(
                     path, s.fps, s.iso, exposureNs, s.focusDiopters, s.kelvin, s.tint,
@@ -612,6 +654,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 val stats = NativeBridge.nativeGetStats()
                 val elapsed = ((System.currentTimeMillis() - recordStartMs) / 1000).toInt()
                 _uiState.update { it.copy(written = stats[0], dropped = stats[1], elapsedSeconds = elapsed) }
+                // Max clip length (0 = off). stopRecordingInternal() itself cancels this
+                // pollJob (see its `pollJob?.cancel()`), so the `break` below is
+                // belt-and-braces against this loop iterating once more before that
+                // cancellation is observed.
+                val limit = _uiState.value.settings.maxClipLengthSeconds
+                if (limit > 0 && elapsed >= limit && _uiState.value.recording) {
+                    _events.tryEmit("Auto-stopped: clip length limit")
+                    stopRecordingInternal()
+                    break
+                }
             }
         }
     }
@@ -674,7 +726,6 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val TAG = "RecordViewModel"
-        val ALL_SHUTTER_DENOMS = listOf(24, 48, 60, 120, 240, 500, 1000)
         val FPS_OPTIONS = listOf(24, 30, 48, 60)
     }
 }
