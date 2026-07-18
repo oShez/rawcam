@@ -89,6 +89,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -179,6 +180,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private var pollJob: Job? = null
     private var recordStartMs = 0L
+    // Filename (with .rawv extension, e.g. "clip_20260719_120000.rawv") of the clip
+    // most recently started -- written once, on cameraOps, where startRecordingInternal
+    // builds the name; read (also on cameraOps) by stopRecordingInternal's successful-
+    // stop completion to auto-export that exact clip. Not @Volatile: both the write and
+    // the read happen on cameraOps, which is single-lane FIFO, so there is no
+    // cross-thread visibility concern (same reasoning as didAutoMeter below).
+    private var lastClipName: String? = null
     // Runs on application.mainExecutor (see the addThermalStatusListener call in
     // init{} below) -- NOT the camera thread. stopRecordingInternal() itself only
     // touches _uiState/_events directly and launches the actual controller.stopRecording()
@@ -243,6 +251,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     MeterRegion.MEDIUM -> 0.10f
                     MeterRegion.LARGE -> 0.20f
                 }
+                // Unconditional for the same reason as oisMode/meterRegionFraction
+                // above: the FIRST emission must apply a saved debugLogging=true, and
+                // this is a cheap @Volatile write with no live request to re-arm.
+                controller.debugLogging = s.debugLogging
                 previous = s
             }
         }
@@ -471,7 +483,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * meter in [openCamera], where a failure isn't a user action to explain.
      */
     fun meterAt(nx: Float, ny: Float, quiet: Boolean = false) {
-        Log.i(TAG, "meterAt nx=$nx ny=$ny quiet=$quiet")
+        if (controller.debugLogging) Log.i(TAG, "meterAt nx=$nx ny=$ny quiet=$quiet")
         val s = _uiState.value
         if (s.recording || s.metering || !s.previewReady) return
         val p = Offset(nx, ny)
@@ -678,6 +690,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val name =
                     "${s.settings.clipPrefix}_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".rawv"
+                lastClipName = name
                 val path = File(controller.clipsDir, name).absolutePath
                 val ok = controller.startRecording(
                     path, s.fps, s.iso, exposureNs, s.focusDiopters, s.kelvin, s.tint,
@@ -752,6 +765,27 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     _events.tryEmit("Recording failed: writer error")
                 } else {
                     _events.tryEmit("${stats[0]} frames, ${stats[1]} dropped")
+                }
+                // Auto-export: only on a genuinely successful stop (stats[0] > 0 --
+                // at least one frame was written), and only reachable through THIS
+                // completion block -- the atomic re-entry guard above (getAndUpdate)
+                // rejects a duplicate/racing stop call before it ever reaches
+                // controller.stopRecording(), so a guard-rejected duplicate can never
+                // double-start an export here. If both autoExport and deleteAfterExport
+                // are on, the clip just recorded is exported and then its source .rawv
+                // is deleted by ExportService once the export completes successfully
+                // (see ExportService.onStartCommand).
+                if (stats[0] > 0) {
+                    val st = _uiState.value.settings
+                    if (st.autoExport) {
+                        lastClipName?.let { name ->
+                            val app = getApplication<Application>()
+                            val rawvPath = File(controller.clipsDir, name).absolutePath
+                            val baseName = name.removeSuffix(".rawv")
+                            val outDir = File(app.getExternalFilesDir(null), "exports/$baseName").absolutePath
+                            ExportService.start(app, rawvPath, outDir, baseName, st.deleteAfterExport)
+                        }
+                    }
                 }
             } finally {
                 _uiState.update { it.copy(busy = false) }

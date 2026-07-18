@@ -46,6 +46,14 @@ class ExportService : Service() {
         val rawvPath = intent?.getStringExtra(EXTRA_RAWV_PATH)
         val outDir = intent?.getStringExtra(EXTRA_OUT_DIR)
         val clipName = intent?.getStringExtra(EXTRA_CLIP_NAME) ?: "clip"
+        // Read per-Intent, not stashed in a service field: exports are serialized on
+        // exportExecutor below, so a second Export tap while one is running queues a
+        // second onStartCommand call (and a second lambda captured here) behind it --
+        // a single mutable service-level flag would be overwritten by the second
+        // call before the first export's lambda got to read it. Capturing deleteAfter
+        // in this call's local val, closed over by this call's own exportExecutor.execute
+        // lambda, keeps it correctly scoped per export.
+        val deleteAfter = intent?.getBooleanExtra(EXTRA_DELETE_AFTER, false) ?: false
         if (rawvPath == null || outDir == null) {
             stopSelf(startId)
             return START_NOT_STICKY
@@ -70,6 +78,18 @@ class ExportService : Service() {
                 ok -> ExportStatus.DONE
                 cancelled.get() -> ExportStatus.CANCELLED
                 else -> ExportStatus.FAILED
+            }
+            // Delete the source .rawv only on a genuine successful, non-cancelled
+            // completion -- never on FAILED or CANCELLED (the clip would otherwise
+            // vanish with no exported DNGs to show for it).
+            if (ok && deleteAfter) {
+                try {
+                    if (!File(rawvPath).delete()) {
+                        Log.e(TAG, "deleteAfter: failed to delete $rawvPath")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "deleteAfter: failed to delete $rawvPath", e)
+                }
             }
             stopSelf(startId)
         }
@@ -113,6 +133,7 @@ class ExportService : Service() {
         const val EXTRA_RAWV_PATH = "rawvPath"
         const val EXTRA_OUT_DIR = "outDir"
         const val EXTRA_CLIP_NAME = "clipName"
+        const val EXTRA_DELETE_AFTER = "deleteAfter"
         private const val TAG = "ExportService"
         private const val CHANNEL_ID = "export"
         private const val NOTIFICATION_ID = 1001
@@ -121,12 +142,16 @@ class ExportService : Service() {
         // to refresh without needing a bound service connection.
         val status = ConcurrentHashMap<String, ExportStatus>()
 
-        fun start(context: Context, rawvPath: String, outDir: String, clipName: String) {
+        fun start(
+            context: Context, rawvPath: String, outDir: String, clipName: String,
+            deleteAfter: Boolean = false,
+        ) {
             status[clipName] = ExportStatus.RUNNING
             val intent = Intent(context, ExportService::class.java).apply {
                 putExtra(EXTRA_RAWV_PATH, rawvPath)
                 putExtra(EXTRA_OUT_DIR, outDir)
                 putExtra(EXTRA_CLIP_NAME, clipName)
+                putExtra(EXTRA_DELETE_AFTER, deleteAfter)
             }
             context.startForegroundService(intent)
         }

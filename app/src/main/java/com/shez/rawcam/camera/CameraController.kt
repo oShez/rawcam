@@ -167,6 +167,14 @@ class CameraController(private val context: Context) {
      * kdoc: the first emission must apply a saved non-default region. */
     @Volatile var meterRegionFraction: Float = 0.10f
 
+    /** User's diagnostic-logging preference (Settings.debugLogging), pushed here
+     * unconditionally by the caller's settings collector reaction -- same rationale
+     * as [oisMode]/[meterRegionFraction]'s kdoc: the first emission must apply a
+     * saved `true`. Gates the per-[meterAt] WB result log below and the meterAt-entry
+     * log in RecordViewModel; the one-time [initialize] sanity log is unconditional
+     * regardless of this flag (spec requirement -- one line per process). */
+    @Volatile var debugLogging: Boolean = false
+
     /** Directory Task 11 should place clip files in (created eagerly). */
     val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
 
@@ -575,6 +583,13 @@ class CameraController(private val context: Context) {
             // anchor only now, so the stored kelvin is never matched against itself.
             anchorGains = gains
             anchorKelvin = k
+        }
+        if (debugLogging) {
+            Log.i(
+                TAG,
+                "meter result iso=$isoOut exp=$expOut focus=$focusOut kelvin=$k tint=$t " +
+                    "gains=$gains",
+            )
         }
         return MeteredValues(isoOut, expOut, focusOut, k, t, gains)
     }

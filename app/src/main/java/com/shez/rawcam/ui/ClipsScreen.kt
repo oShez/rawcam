@@ -49,8 +49,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.export.ExportService
+import com.shez.rawcam.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -133,6 +135,19 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
     var freeBytes by remember { mutableStateOf(0L) }
     var pendingDelete by remember { mutableStateOf<File?>(null) }
 
+    // Off-main delete (existing audit fix, preserved): the file removal itself runs
+    // on Dispatchers.IO, then refreshTick++ triggers the poll loop above to reload
+    // the list. Known pre-existing gap (backlog, not fixed here): if the composable
+    // leaves composition between the delete and the refreshTick++, this scope's
+    // launch is cancelled mid-flight and the list won't reflect the deletion until
+    // the next natural refresh.
+    fun performDelete(clip: File) {
+        scope.launch {
+            withContext(Dispatchers.IO) { clip.delete() }
+            refreshTick++
+        }
+    }
+
     // Export runs as a foreground service with a progress notification (required on
     // API 26+ for any foreground service); on API 33+ actually POSTING it needs the
     // runtime POST_NOTIFICATIONS permission. The service itself still runs and writes
@@ -182,10 +197,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
             confirmButton = {
                 TextButton(onClick = {
                     pendingDelete = null
-                    scope.launch {
-                        withContext(Dispatchers.IO) { toDelete.delete() }
-                        refreshTick++
-                    }
+                    performDelete(toDelete)
                 }) { Text("Delete") }
             },
             dismissButton = {
@@ -215,16 +227,28 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                     ClipCard(
                         clip = clip,
                         onExport = {
-                            val outDir = File(exportsDirOf(context), baseName(clip.file))
-                            ExportService.start(
-                                context,
-                                clip.file.absolutePath,
-                                outDir.absolutePath,
-                                baseName(clip.file),
-                            )
+                            scope.launch {
+                                val deleteAfter = SettingsRepository.settings.first().deleteAfterExport
+                                val outDir = File(exportsDirOf(context), baseName(clip.file))
+                                ExportService.start(
+                                    context,
+                                    clip.file.absolutePath,
+                                    outDir.absolutePath,
+                                    baseName(clip.file),
+                                    deleteAfter,
+                                )
+                            }
                         },
                         onCancel = { ExportService.cancel(context) },
-                        onDelete = { pendingDelete = clip.file },
+                        onDelete = {
+                            scope.launch {
+                                if (SettingsRepository.settings.first().confirmDelete) {
+                                    pendingDelete = clip.file
+                                } else {
+                                    performDelete(clip.file)
+                                }
+                            }
+                        },
                     )
                 }
             }
