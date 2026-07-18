@@ -963,7 +963,7 @@ fun RecordScreen(
     val lenses = state.lenses
     val lens = lenses.getOrElse(state.lensIndex) { lenses[0] }
     val sizes = lens.sizes
-    val size = sizes.getOrElse(state.sizeIndex) { sizes[0] }
+    val selectedSize = sizes.getOrElse(state.sizeIndex) { sizes[0] }
     val shutterStops = viewModel.shutterStops(state.fps)
     val shutterDenom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
     val modeEnabled = !state.recording && !state.busy
@@ -1001,7 +1001,7 @@ fun RecordScreen(
                         if (expanded != null) {
                             expanded = null
                         } else if (state.previewReady && !state.recording) {
-                            viewModel.meterAt(offset.x / size.width.toFloat(), offset.y / size.height.toFloat())
+                            viewModel.meterAt(offset.x / this.size.width.toFloat(), offset.y / this.size.height.toFloat())
                         }
                     }
                 }
@@ -1031,11 +1031,6 @@ fun RecordScreen(
             // enclosing Box above -- purely a paint layer.
             if (state.settings.gridEnabled) {
                 Canvas(Modifier.fillMaxSize()) {
-                    // Explicit `this.size` (not bare `size`) -- this composable's outer
-                    // scope has its own local `size` (the selected LensSize, Int pixel
-                    // dimensions of the sensor mode) which otherwise shadows this
-                    // DrawScope's own `size: Size` (Float, the Canvas's actual layout
-                    // pixel dimensions -- what the grid must be measured against).
                     val c = Color.White.copy(alpha = 0.30f)
                     val strokeWidth = 1.dp.toPx()
                     val w = this.size.width
@@ -1060,8 +1055,8 @@ fun RecordScreen(
             // normalized tap point mapped back into this Box's pixel dimensions.
             state.meterPoint?.let { p ->
                 Canvas(Modifier.fillMaxSize()) {
-                    val cx = p.x * size.width
-                    val cy = p.y * size.height
+                    val cx = p.x * this.size.width
+                    val cy = p.y * this.size.height
                     val r = 36.dp.toPx()
                     val c = if (state.metering) Color(0xFFE0E0E0) else Color(0xFF7CFF7C)
                     drawRect(c, topLeft = Offset(cx - r, cy - r), size = Size(r * 2, r * 2), style = Stroke(width = 3.dp.toPx()))
@@ -1279,7 +1274,7 @@ fun RecordScreen(
                     ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
                         expanded = if (expanded == Param.LENS) null else Param.LENS
                     }
-                    ParamChip(size.label, expanded == Param.RES, enabled = modeEnabled) {
+                    ParamChip(selectedSize.label, expanded == Param.RES, enabled = modeEnabled) {
                         expanded = if (expanded == Param.RES) null else Param.RES
                     }
                     ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
