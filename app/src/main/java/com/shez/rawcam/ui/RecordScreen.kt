@@ -119,6 +119,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.roundToInt
 
 /** UI state for [RecordScreen]. Sliders store the raw value the user picked; the
@@ -1052,7 +1053,7 @@ fun RecordScreen(
             // while the setting is on -- see HorizonLevel's kdoc for the sensor
             // lifecycle. Non-interactive, same reasoning as the grid above.
             if (state.settings.levelEnabled) {
-                HorizonLevel(Modifier.align(Alignment.Center))
+                HorizonLevel(Modifier.align(Alignment.Center), debugLogging = state.settings.debugLogging)
             }
 
             // Tap-to-meter reticle: grey while converging, green briefly after, at the
@@ -1312,32 +1313,35 @@ fun RecordScreen(
  * simply stays at its initial 0f and the widget draws a level (green) line rather than
  * crashing.
  *
- * Roll math: [SensorManager.getRotationMatrixFromVector] plus the IDENTITY axis remap
- * defines "roll" (getOrientation's `values[2]`) as banking around the device's
- * natural-portrait "up" axis -- correct for a phone lying flat on a table, not for one
- * held up vertically like a camera pointed at the horizon (that usage is close to the
- * gimbal-lock edge of the roll/pitch/azimuth decomposition and the axis doesn't mean
- * "image rotation" there). Remapping coordinates with (AXIS_X, AXIS_Z) substitutes the
- * screen-normal axis (old Z, pointing out through the lens/screen) in as the roll axis,
- * which is the standard correction for a vertically-held viewfinder: the resulting roll
- * is the rotation of the frame around the lens axis -- i.e. "is the horizon level in the
- * image" -- and that quantity depends only on the physical device housing, not on
- * Surface.getRotation(), so it is correct for ANY UI orientation including this app's
- * fixed `landscape` lock (AndroidManifest.xml). That axis substitution IS the
- * "adjustment for the app's landscape lock" the task calls for; no further per-rotation
- * multiplier is layered on top; further defense at this device's fixed `landscape`
- * (not sensorLandscape/reverseLandscape) is that a single physical rotation is used for
- * the whole app lifetime, so the axis choice above doesn't need to react to runtime
- * rotation changes the way a compass app's display-rotation remap table would.
- *
- * NOT verified on a physical device -- no adb use is permitted in this task.
- * ON-DEVICE VERIFY: tilt the phone (held landscape, as it's locked) left/right and
- * confirm the drawn line rotates opposite to the phone (i.e. stays visually level with
- * the true horizon). If it instead rotates WITH the phone (mirrored), the fix is a
- * one-line sign flip: negate `roll` right after it's computed below.
+ * Roll math, computed directly from [SensorManager.getRotationMatrixFromVector]'s
+ * device-to-world matrix R rather than through [SensorManager.getOrientation]'s
+ * azimuth/pitch/roll decomposition: column 0 of R (R[0],R[3],R[6]) is the device's
+ * physical +X axis (portrait-natural "right edge") expressed in world coordinates, and
+ * column 1 (R[1],R[4],R[7]) is the device's +Y axis ("top edge"); the world-up unit
+ * vector (0,0,1) projected onto those two columns is (R[6], R[7]) -- "world up",
+ * decomposed into the device's own screen-plane basis. For this app's fixed `landscape`
+ * lock (AndroidManifest.xml; not sensorLandscape/reverseLandscape), holding the device
+ * to view it upright puts portrait-natural physical +X (the right edge) at the top of
+ * the frame and +Y (the top edge) at the frame's right, so "world up" in the *frame's*
+ * basis is (contentRight, contentUp) = (R[7], R[6]); atan2(R[7], R[6]) is 0 exactly
+ * when the frame is level, and its sign is such that the line drawn with
+ * `.rotate(-roll)` below counter-rotates against the physical tilt. EMPIRICALLY
+ * DERIVED end to end, not assumed -- two earlier guesses were each wrong in a
+ * different way and both caught on a physical Pixel 7 Pro rather than shipped: (1) the
+ * original pre-fix getOrientation()-based formula was off by ~90 degrees (line
+ * rendered near-vertical at true level; the `abs(roll) <= 0.5f` green threshold could
+ * never be met); (2) a first rewrite guessed the opposite axis polarity
+ * (contentUp = -R[6]) from first principles and read ~166 degrees during a moderate
+ * intentional tilt (raw capture: R[6]=0.963, R[7]=0.230) -- fixed by deriving the axis
+ * pairing from that raw data instead of a second guess, which gave a correctly-scaled
+ * ~9-degree reading and turned the line green at rest, but still rotated WITH the
+ * phone instead of against it; the sign flip here (R[7] alone, not the axis pairing)
+ * is fix (3), confirmed 2026-07-19 by rolling the device continuously through level in
+ * both directions: the line counter-rotates to stay visually parallel with real-world
+ * horizontals (table/shelf edges) and is green only at true level.
  */
 @Composable
-private fun HorizonLevel(modifier: Modifier = Modifier) {
+private fun HorizonLevel(modifier: Modifier = Modifier, debugLogging: Boolean = false) {
     val context = LocalContext.current
     var roll by remember { mutableFloatStateOf(0f) }
     DisposableEffect(Unit) {
@@ -1345,15 +1349,10 @@ private fun HorizonLevel(modifier: Modifier = Modifier) {
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
-                val rotationMatrix = FloatArray(9)
-                val remapped = FloatArray(9)
-                val orientation = FloatArray(3)
-                SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                SensorManager.remapCoordinateSystem(
-                    rotationMatrix, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped,
-                )
-                SensorManager.getOrientation(remapped, orientation)
-                roll = Math.toDegrees(orientation[2].toDouble()).toFloat()
+                val r = FloatArray(9)
+                SensorManager.getRotationMatrixFromVector(r, event.values)
+                roll = Math.toDegrees(atan2(r[7].toDouble(), r[6].toDouble())).toFloat()
+                if (debugLogging) Log.i("HorizonLevel", "R6=${r[6]} R7=${r[7]} roll=$roll")
             }
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
