@@ -407,6 +407,26 @@ class CameraController(private val context: Context) {
     }
 
     /**
+     * Seeds [anchorGains]/[anchorKelvin] from a persisted [CaptureState] (Settings
+     * restore, RecordViewModel init) instead of a live [readMetered] convergence.
+     * Called before any session exists (during the enumeration coroutine, ahead of
+     * the first [openAndPreview]) so there's no repeating request to re-arm --
+     * unlike [setWbOverride], this never touches [session] or posts to
+     * [cameraHandler]. The next call to [gainsFor] simply picks up the restored
+     * anchor the same as it would a real meter's.
+     */
+    fun restoreWbAnchor(gains: RggbChannelVector, kelvin: Int) {
+        anchorGains = gains
+        anchorKelvin = kelvin
+    }
+
+    /** Current WB anchor (real metered gains + the kelvin they were matched
+     * against), for persisting into [CaptureState]. Null if no meter has
+     * converged yet this process and none was restored. */
+    fun wbAnchorOrNull(): Pair<RggbChannelVector, Int>? =
+        anchorGains?.let { it to anchorKelvin }
+
+    /**
      * One-shot hardware-3A meter at a normalized preview point (nx, ny in 0f..1f,
      * top-left origin, landscape preview orientation). Flips the preview to auto
      * with a metering region at the point, waits up to ~1500ms for AE/AF/AWB to

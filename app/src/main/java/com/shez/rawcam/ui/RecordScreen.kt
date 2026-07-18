@@ -79,8 +79,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import com.shez.rawcam.settings.CaptureState
+import com.shez.rawcam.settings.Settings
+import com.shez.rawcam.settings.SettingsRepository
+import com.shez.rawcam.settings.StartupMeter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -91,6 +96,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -128,6 +134,7 @@ data class RecordUiState(
     val tint: Int = 0,
     val metering: Boolean = false,
     val meterPoint: androidx.compose.ui.geometry.Offset? = null,
+    val settings: Settings = Settings(),
 )
 
 /**
@@ -166,23 +173,72 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     init {
         val pm = application.getSystemService(Context.POWER_SERVICE) as PowerManager
         pm.addThermalStatusListener(application.mainExecutor, thermalListener)
+        // Settings collector: independent of cameraOps, started immediately so
+        // uiState.settings is live (a) for the restore block below (which also reads
+        // SettingsRepository directly, since it needs a one-shot snapshot, not the
+        // live collected value -- see that block's kdoc) and (b) for every setter's
+        // persistCaptureState() and the startup-meter gating in openCamera(), both of
+        // which read uiState.settings rather than re-querying the repository.
+        viewModelScope.launch {
+            SettingsRepository.settings.collect { s -> _uiState.update { it.copy(settings = s) } }
+        }
         // Camera lens enumeration is binder IPC (getCameraCharacteristics per lens +
         // stream-config queries) -- runs on cameraOps, never the main thread. Queued
         // first on cameraOps, so every later cameraOps.launch (openCamera, etc.) is
         // guaranteed to run after this completes. lenses/rawSpec are published into
         // uiState only once initialize() returns; the composable gates on rawSpec
         // being non-null and renders nothing controller-derived before that.
+        //
+        // Restore ordering -- why the saved-state read happens BEFORE
+        // controller.initialize(): `remember`/`saved` come from SettingsRepository
+        // (DataStore, already warm -- SettingsRepository.init() runs from
+        // Activity.onCreate ahead of this ViewModel's construction), which is
+        // independent of and far cheaper than the camera binder IPC below, so
+        // capturing them first takes one consistent snapshot ahead of the slow call
+        // rather than racing a settings write that might land mid-initialize(); it
+        // also means a saved lens/size choice is known before selectMode() is
+        // reachable, letting the restore apply in the same pass instead of a second
+        // mode switch after publish. Every clamp below is then safe by construction:
+        // lensIndex/sizeIndex are checked against controller.lenses (populated by
+        // initialize(), hence read only after it returns), fps against
+        // fpsOptions(rawSpec), shutterIndex by nearest-match against
+        // shutterStops(fps) (coerceAtLeast(0) guards indexOf's -1-not-found case,
+        // which cannot actually trigger since minByOrNull always returns a list
+        // member), iso against rawSpec.isoRange, kelvin/tint snapped to the nearest
+        // fixed stop (always valid even from a stale saved value), and focus coerced
+        // into 0f..max(minFocusDiopters, 0f). A too-large or negative saved
+        // lensIndex/sizeIndex falls back to controller.defaultLensIndex / 0 -- the
+        // same values a fresh install would use -- rather than an out-of-bounds
+        // list read.
         cameraOps.launch {
+            val remember = SettingsRepository.settings.first().rememberLastState
+            val saved = if (remember) SettingsRepository.captureState.first() else null
             controller.initialize()
-            val fps = FPS_OPTIONS.firstOrNull { it <= controller.rawSpec.maxFps }
-                ?: controller.rawSpec.maxFps
+            val s0 = SettingsRepository.settings.first()
+            val lensCount = controller.lenses.size
+            val lensIndex = (saved?.lensIndex ?: s0.defaultLensIndex)
+                .let { if (it in 0 until lensCount) it else controller.defaultLensIndex }
+            val sizeIndex = (saved?.sizeIndex ?: s0.defaultSizeIndex)
+                .let { if (it in controller.lenses[lensIndex].sizes.indices) it else 0 }
+            if (lensIndex != controller.defaultLensIndex || sizeIndex != 0) controller.selectMode(lensIndex, sizeIndex)
+            val fps = (saved?.fps ?: s0.defaultFps)
+                .let { f -> fpsOptions(controller.rawSpec).let { o -> if (f in o) f else o.first() } }
+            val stops = shutterStops(fps)
+            val denom = saved?.shutterDenom ?: s0.defaultShutterDenom
+            val shutterIndex = stops.indexOf(stops.minByOrNull { kotlin.math.abs(it - denom) } ?: stops.first()).coerceAtLeast(0)
+            val iso = (saved?.iso ?: if (s0.defaultIso == 0) controller.rawSpec.isoRange.start else s0.defaultIso)
+                .coerceIn(controller.rawSpec.isoRange)
+            val kelvin = KELVIN_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.kelvin ?: s0.defaultKelvin)) } ?: 5600
+            val tint = TINT_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.tint ?: s0.defaultTint)) } ?: 0
+            val focus = (saved?.focusDiopters ?: 0f).coerceIn(0f, maxOf(controller.rawSpec.minFocusDiopters, 0f))
+            if (saved != null && saved.anchorG > 0f)
+                controller.restoreWbAnchor(RggbChannelVector(saved.anchorR, saved.anchorG, saved.anchorG, saved.anchorB), saved.anchorKelvin)
+            restoredFromSaved = saved != null
             _uiState.update {
                 it.copy(
-                    rawSpec = controller.rawSpec,
-                    lenses = controller.lenses,
-                    iso = controller.rawSpec.isoRange.start,
-                    fps = fps,
-                    lensIndex = controller.defaultLensIndex,
+                    rawSpec = controller.rawSpec, lenses = controller.lenses,
+                    iso = iso, fps = fps, shutterIndex = shutterIndex, lensIndex = lensIndex, sizeIndex = sizeIndex,
+                    kelvin = kelvin, tint = tint, focusDiopters = focus,
                 )
             }
         }
@@ -233,12 +289,25 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     // launch shows a correctly white-balanced image (and seeds
                     // CameraController's anchor) instead of the calibrated model's
                     // possibly-placeholder-matrix output persisting until the user's
-                    // first manual tap. didAutoMeter is a plain (non-Volatile) field --
-                    // fine because onReady always runs on the single camera thread (see
+                    // first manual tap -- subject to the user's startupMeter setting.
+                    // didAutoMeter is a plain (non-Volatile) field -- fine because
+                    // onReady always runs on the single camera thread (see
                     // CameraController's class kdoc), never concurrently with itself.
                     if (!didAutoMeter) {
                         didAutoMeter = true
-                        meterAt(0.5f, 0.5f, quiet = true)
+                        val mode = _uiState.value.settings.startupMeter
+                        val shouldMeter = when (mode) {
+                            StartupMeter.ALWAYS -> true
+                            // restoredFromSaved is @Volatile and written once, on
+                            // cameraOps, by the init{} restore block before this
+                            // onReady can ever fire (openCamera() is itself only
+                            // reachable once the composable observes rawSpec != null,
+                            // which that same block publishes last) -- so the read
+                            // here is always the settled value, never the initial false.
+                            StartupMeter.IF_NO_SAVED -> !restoredFromSaved
+                            StartupMeter.NEVER -> false
+                        }
+                        if (shouldMeter) meterAt(0.5f, 0.5f, quiet = true)
                     }
                 }
             } catch (e: Exception) {
@@ -254,6 +323,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * configuration changes but not process death). Deliberately never reset by
      * lens/mode switches, so a re-open never re-triggers it. */
     private var didAutoMeter = false
+
+    /** True once the init{} restore block has determined a [CaptureState] was
+     * actually applied at launch (vs. falling through to settings defaults because
+     * nothing was saved, or [Settings.rememberLastState] was off). Written exactly
+     * once, on cameraOps, before rawSpec is published (so before openCamera() can
+     * possibly be called -- see openCamera's onReady comment); read on the camera
+     * thread by the [StartupMeter.IF_NO_SAVED] check above. @Volatile makes that
+     * cross-thread read see the write without relying on incidental ordering. */
+    @Volatile private var restoredFromSaved = false
 
     /**
      * Preview session failed to configure. If a non-default lens/size mode is
@@ -281,26 +359,31 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     fun setIso(iso: Int) {
         _uiState.update { it.copy(iso = iso) }
         pushManual()
+        persistCaptureState()
     }
 
     fun setShutterIndex(index: Int) {
         _uiState.update { it.copy(shutterIndex = index) }
         pushManual()
+        persistCaptureState()
     }
 
     fun setFocus(diopters: Float) {
         _uiState.update { it.copy(focusDiopters = diopters) }
         pushManual()
+        persistCaptureState()
     }
 
     fun setKelvin(k: Int) {
         _uiState.update { it.copy(kelvin = k) }
         pushManual()
+        persistCaptureState()
     }
 
     fun setTint(t: Int) {
         _uiState.update { it.copy(tint = t) }
         pushManual()
+        persistCaptureState()
     }
 
     /**
@@ -349,6 +432,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         pushManual()
                         controller.setWbOverride(m.wbGains)
+                        persistCaptureState()
                     } else if (!quiet) {
                         _events.tryEmit("Couldn't meter — try again")
                     }
@@ -389,6 +473,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val stops = shutterStops(fps)
         _uiState.update { it.copy(fps = fps, shutterIndex = it.shutterIndex.coerceIn(0, stops.size - 1)) }
         pushManual()
+        persistCaptureState()
     }
 
     /** Lens change resets the size to the new lens's full resolution. */
@@ -404,6 +489,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { coerceToMode(it.copy(lensIndex = lensIndex, sizeIndex = sizeIndex)) }
         // The lensIndex/sizeIndex change re-keys the preview SurfaceView; its
         // surfaceCreated calls openCamera, which reopens on the new mode.
+        persistCaptureState()
     }
 
     /** Clamps fps and shutter to what the (just-selected) mode supports. Only ever
@@ -432,6 +518,40 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val s = _uiState.value
         if (!s.previewReady) return
         controller.updateManual(s.iso, exposureNsFor(s), s.focusDiopters, s.kelvin, s.tint)
+    }
+
+    private var persistJob: Job? = null
+
+    /**
+     * Debounced write-through of the current manual controls into
+     * [SettingsRepository.saveCaptureState], gated on [Settings.rememberLastState].
+     * Called from every setter that changes a persisted field (setIso,
+     * setShutterIndex, setFocus, setKelvin, setTint, setFps, setMode) and from the
+     * meter-apply block in [meterAt]'s onResult. 500ms debounce (cancel-and-relaunch
+     * on [viewModelScope], same pattern as [pollJob]) coalesces a fast slider drag
+     * into a single DataStore write instead of one per intermediate value.
+     * [CameraController.wbAnchorOrNull] -- not uiState -- is the source for the
+     * saved WB anchor: it's the controller's own real metered-gains state, which is
+     * what a later restore should reproduce, not a derived kelvin/tint slider value.
+     */
+    private fun persistCaptureState() {
+        if (!_uiState.value.settings.rememberLastState) return
+        persistJob?.cancel()
+        persistJob = viewModelScope.launch {
+            delay(500)
+            val s = _uiState.value
+            val stops = shutterStops(s.fps)
+            val anchor = controller.wbAnchorOrNull()
+            SettingsRepository.saveCaptureState(
+                CaptureState(
+                    iso = s.iso, shutterDenom = stops.getOrElse(s.shutterIndex) { stops.last() },
+                    focusDiopters = s.focusDiopters, kelvin = s.kelvin, tint = s.tint, fps = s.fps,
+                    lensIndex = s.lensIndex, sizeIndex = s.sizeIndex,
+                    anchorR = anchor?.first?.red ?: 0f, anchorG = anchor?.first?.greenEven ?: 0f,
+                    anchorB = anchor?.first?.blue ?: 0f, anchorKelvin = anchor?.second ?: 5600,
+                )
+            )
+        }
     }
 
     fun toggleRecord() {
