@@ -98,6 +98,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -209,8 +210,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     pushManual()
                 }
+                // Unconditional on every emission (not just changes): the FIRST
+                // emission carries the loaded persisted oisMode, and a gated write
+                // here would leave controller.oisMode at its AUTO default for the
+                // whole session for a user with a saved ON/OFF preference. This is a
+                // cheap volatile field write, so writing it every time is fine; only
+                // the pushManual() re-arm (which re-posts a repeating request onto
+                // the camera thread) stays gated on an actual change.
+                controller.oisMode = s.oisMode
                 if (prev != null && prev.oisMode != s.oisMode) {
-                    controller.oisMode = s.oisMode
                     pushManual()
                 }
                 previous = s
@@ -669,9 +677,25 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun stopRecordingInternal() {
+        // Atomic re-entry guard: this function has three uncoordinated callers
+        // (toggleRecord on the main thread, thermalListener on mainExecutor, and the
+        // max-length check on the Dispatchers.Default poll loop) that can each fire
+        // while a prior stop is still in flight -- `recording` stays true until the
+        // cameraOps stop task below actually completes, and thermal status escalating
+        // SEVERE -> CRITICAL -> EMERGENCY fires the listener once per transition.
+        // getAndUpdate performs the "recording && !busy" check and the busy=true set
+        // as one atomic StateFlow operation, so two near-simultaneous callers can't
+        // both observe busy==false and both proceed: the loser sees prev.busy == true
+        // (or prev.recording == false) and returns before touching pollJob or
+        // cameraOps. Without this guard, a second controller.stopRecording() call
+        // would queue behind the first (idempotent, returns [0, 0] per its kdoc), and
+        // its completion block would then overwrite the just-written real
+        // written/dropped stats with zeros and emit a misleading "0 frames, 0 dropped"
+        // toast.
+        val prev = _uiState.getAndUpdate { if (it.recording && !it.busy) it.copy(busy = true) else it }
+        if (!prev.recording || prev.busy) return
         pollJob?.cancel()
         pollJob = null
-        _uiState.update { it.copy(busy = true) }
         cameraOps.launch {
             try {
                 val stats = controller.stopRecording()
