@@ -50,7 +50,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1114,12 +1113,16 @@ fun RecordScreen(
             // gated on Settings.showBench -- SETTINGS always renders below it (or alone,
             // at the same TopStart slot) regardless of that toggle, since it's the only
             // way back into the settings screen that turned it off.
-            Column(modifier = Modifier.align(Alignment.TopStart).padding(8.dp)) {
+            Column(
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 if (state.settings.showBench) {
-                    TextButton(
+                    NavButton(
+                        text = if (benchRunning) "…" else "BENCH",
                         enabled = !state.recording && !state.busy,
                         onClick = {
-                            if (benchRunning) return@TextButton
+                            if (benchRunning) return@NavButton
                             benchRunning = true
                             scope.launch {
                                 val mbps = withContext(Dispatchers.IO) {
@@ -1130,41 +1133,17 @@ fun RecordScreen(
                                 snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
                             }
                         },
-                    ) {
-                        Text(
-                            if (benchRunning) "…" else "BENCH",
-                            color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
-                        )
-                    }
-                }
-                TextButton(
-                    enabled = settingsEnabled,
-                    onClick = onOpenSettings,
-                ) {
-                    Text(
-                        "SETTINGS",
-                        color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
                     )
                 }
+                NavButton(text = "SETTINGS", enabled = settingsEnabled, onClick = onOpenSettings)
             }
 
-            Row(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
-                TextButton(enabled = exportsEnabled, onClick = onOpenExports) {
-                    Text(
-                        "EXPORTS",
-                        color = if (exportsEnabled) RawCamColors.OnSurface
-                                else RawCamColors.Muted.copy(alpha = 0.5f),
-                        fontSize = 11.sp, letterSpacing = 1.5.sp,
-                    )
-                }
-                TextButton(enabled = clipsEnabled, onClick = onOpenClips) {
-                    Text(
-                        "CLIPS",
-                        color = if (clipsEnabled) RawCamColors.OnSurface
-                                else RawCamColors.Muted.copy(alpha = 0.5f),
-                        fontSize = 11.sp, letterSpacing = 1.5.sp,
-                    )
-                }
+            Row(
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
+                NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
             }
 
             // Left status rail, gated on Settings.showStatsSidebar. The action rails
@@ -1496,6 +1475,34 @@ private fun OptionPills(
                 )
             }
         }
+    }
+}
+
+/**
+ * Top-corner screen-navigation button (BENCH/SETTINGS/EXPORTS/CLIPS) -- a bordered
+ * pill in the same visual language as [ParamChip] below (which these four buttons
+ * previously did NOT share: they were bare, unbordered [TextButton]s, and BENCH/
+ * SETTINGS hardcoded a literal [RawCamColors.Muted] text color that never actually
+ * dimmed further when disabled, unlike EXPORTS/CLIPS's manual enabled-check --
+ * so of four visually-equivalent nav buttons, two looked permanently washed-out
+ * and gave no visual feedback when locked during a recording). Alpha-on-the-whole-
+ * Surface, not a hardcoded per-branch Text color, so disabled always reads
+ * consistently no matter which button.
+ */
+@Composable
+private fun NavButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Surface(
+        color = Color(0xB80A0B0D),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, RawCamColors.Outline),
+        modifier = Modifier.alpha(if (enabled) 1f else 0.45f),
+    ) {
+        Text(
+            text, color = RawCamColors.OnSurface, fontSize = 11.sp, letterSpacing = 1.5.sp,
+            modifier = Modifier
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
     }
 }
 
