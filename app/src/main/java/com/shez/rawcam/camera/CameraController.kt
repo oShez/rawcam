@@ -729,26 +729,47 @@ class CameraController(private val context: Context) {
     }
 
     /** Mired-linear interpolation (same convention as [interpolatedColorMatrix])
-     * between the two [samplePresetCurve] samples bracketing [kelvinValue];
-     * clamps to the nearest sample outside the sampled range rather than
-     * extrapolating. */
+     * between the two [samplePresetCurve] samples bracketing [kelvinValue].
+     * Outside the sampled range, extrapolates using the FULL span's endpoint-
+     * to-endpoint slope rather than clamping flat -- the UI's kelvin range
+     * (2000K-10000K) reaches past the presets' real span (~2850K-7500K, no
+     * AWB preset lower than INCANDESCENT exists to sample), and clamping left
+     * the low end totally undifferentiated (2000K-2850K all produced the
+     * identical 2850K gains -- "doesn't feel blue enough at 2000K"). The
+     * nearest LOCAL pair (e.g. 2850-3000K) is deliberately NOT used for
+     * extrapolation -- its short span amplifies noise into wild overshoot the
+     * moment the query point is much farther out than the pair's own spacing
+     * (verified: extrapolating 2000K off the 2850-3000K pair alone drives the
+     * ratio negative before the safety clamp saves it). The full span is a
+     * gentler, more stable slope for a modest extrapolation distance. Final
+     * ratios are still hard-clamped to the same [1e-2, 8.0] bound used
+     * everywhere else in this file, so a large extrapolation can't blow up. */
     private fun interpolatePresetCurve(
         curve: List<Triple<Int, Double, Double>>, kelvinValue: Int,
     ): Pair<Double, Double> {
-        val k = kelvinValue.coerceIn(curve.first().first, curve.last().first)
-        var lo = curve.first()
-        var hi = curve.last()
-        for (i in 0 until curve.size - 1) {
-            if (k >= curve[i].first && k <= curve[i + 1].first) {
-                lo = curve[i]; hi = curve[i + 1]; break
+        val first = curve.first()
+        val last = curve.last()
+        var lo = first
+        var hi = last
+        var clampWeight = true
+        if (kelvinValue <= first.first || kelvinValue >= last.first) {
+            clampWeight = false // extrapolate using the full span's slope
+        } else {
+            for (i in 0 until curve.size - 1) {
+                if (kelvinValue >= curve[i].first && kelvinValue <= curve[i + 1].first) {
+                    lo = curve[i]; hi = curve[i + 1]; break
+                }
             }
         }
         if (lo.first == hi.first) return lo.second to lo.third
-        val invK = 1.0 / k
+        val invK = 1.0 / kelvinValue
         val invLo = 1.0 / lo.first
         val invHi = 1.0 / hi.first
-        val w = ((invK - invHi) / (invLo - invHi)).coerceIn(0.0, 1.0)
-        return (w * lo.second + (1 - w) * hi.second) to (w * lo.third + (1 - w) * hi.third)
+        var w = (invK - invHi) / (invLo - invHi)
+        if (clampWeight) w = w.coerceIn(0.0, 1.0)
+        val mr = (w * lo.second + (1 - w) * hi.second).coerceIn(1e-2, 8.0)
+        val mb = (w * lo.third + (1 - w) * hi.third).coerceIn(1e-2, 8.0)
+        return mr to mb
     }
 
     /**
