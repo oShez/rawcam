@@ -239,6 +239,22 @@ class CameraController(private val context: Context) {
      * gainsFor reads. */
     @Volatile private var anchorGains: RggbChannelVector? = null
     @Volatile private var anchorKelvin: Int = 5600
+
+    /** Real hardware AWB-preset curve per physical lens id (""=unknown/null id),
+     * sampled once by [samplePresetCurve]: (nominal kelvin, red/green ratio,
+     * blue/green ratio), sorted by kelvin. Supersedes the calibration-matrix
+     * analytic model in [modelGainsRaw] the moment a lens has been sampled --
+     * see [samplePresetCurve]'s kdoc for why this exists. Empty until then.
+     * Written only from [samplePresetCurve] on the camera thread; entries are
+     * never removed, so switching lenses back and forth re-uses a prior sample. */
+    @Volatile private var presetCurves: Map<String, List<Triple<Int, Double, Double>>> = emptyMap()
+
+    /** Physical lens ids already sampled or attempted this process -- camera-
+     * thread-only (no @Volatile needed, single reader/writer), guards
+     * [samplePresetCurve] against resampling on every reopen (lock/wake,
+     * activity recreation) of a lens already covered. */
+    private val sampledPhysicalIds = HashSet<String>()
+
     /** Set by stopRecording(); counted down by the session's onReady (idle) callback. */
     @Volatile private var idleLatch: CountDownLatch? = null
 
@@ -634,6 +650,108 @@ class CameraController(private val context: Context) {
     }
 
     /**
+     * Samples this device's REAL AWB-preset gains (INCANDESCENT/WARM_FLUORESCENT/
+     * FLUORESCENT/DAYLIGHT/CLOUDY_DAYLIGHT/SHADE -- fixed illuminant corrections
+     * the HAL applies regardless of scene content, unlike AUTO) and stores them
+     * into [presetCurves], keyed by [activePhysicalId]. Root cause this addresses:
+     * [modelGainsRaw]'s calibration-matrix curve is built from
+     * SENSOR_COLOR_TRANSFORM1/2, which on at least this hardware are placeholder
+     * matrices (see that field's kdoc) -- so the *shape* the kelvin/tint slider
+     * moves along was never trustworthy, only the anchor's absolute level was.
+     * These preset modes hand back this vendor's own tuned gains for each named
+     * illuminant, i.e. real hardware data instead of an analytic guess.
+     *
+     * Runs entirely on [cameraHandler] (posted from [createSession]'s onConfigured,
+     * preview sessions only) and blocks it briefly per preset the same way
+     * [meterAt] blocks it during convergence -- this serializes sampling against
+     * any queued meterAt/updateManual so they can never interleave with the
+     * preset sweep. Visibly cycles the preview through each illuminant's color
+     * cast for roughly a second per preset; a one-time cost per physical lens id
+     * per process (see [sampledPhysicalIds]), not repeated on lock/wake or
+     * activity recreation. [restoreManualPreview] undoes the AWB override
+     * regardless of how many presets actually returned usable gains.
+     */
+    private fun samplePresetCurve() {
+        val key = activePhysicalId ?: ""
+        if (key in sampledPhysicalIds) return
+        val dev = device
+        val s = session
+        val preview = previewSurface
+        if (recording || dev == null || s == null || preview == null) return
+        sampledPhysicalIds += key
+        val samples = mutableListOf<Triple<Int, Double, Double>>()
+        for ((mode, kelvinNominal) in PRESET_KELVIN) {
+            try {
+                val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(preview)
+                    set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                    set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.CONTROL_AWB_MODE, mode)
+                }.build()
+                val done = CountDownLatch(1)
+                val last = AtomicReference<TotalCaptureResult>()
+                var count = 0
+                val cb = object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult,
+                    ) {
+                        last.set(result)
+                        count++
+                        if (count >= 3) done.countDown()
+                    }
+                }
+                s.setRepeatingRequest(req, cb, meterHandler())
+                done.await(600, TimeUnit.MILLISECONDS)
+                val gains = last.get()?.get(CaptureResult.COLOR_CORRECTION_GAINS)
+                if (gains != null) {
+                    // Inverted vs. modelGainsRaw's raw-sensor-response nG/nR: these
+                    // ARE the HAL's already-applied correction gains, not a raw
+                    // response this app still needs to invert to get a gain out of.
+                    // redGain/greenGain (not greenGain/redGain) is what tracks the
+                    // same kelvin-increasing direction gainsFor already assumes --
+                    // confirmed on device: greenGain/redGain shipped backwards
+                    // (raising kelvin made the preview bluer instead of warmer).
+                    val g = (gains.greenEven + gains.greenOdd) / 2.0
+                    val mr = (gains.red.toDouble() / g).coerceIn(1e-2, 8.0)
+                    val mb = (gains.blue.toDouble() / g).coerceIn(1e-2, 8.0)
+                    samples += Triple(kelvinNominal, mr, mb)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "preset sample failed mode=$mode kelvin=$kelvinNominal", e)
+            }
+        }
+        restoreManualPreview()
+        if (samples.size >= 2) {
+            val sorted = samples.sortedBy { it.first }
+            presetCurves = presetCurves + (key to sorted)
+            if (debugLogging) Log.i(TAG, "WB preset curve[$key] = $sorted")
+        }
+    }
+
+    /** Mired-linear interpolation (same convention as [interpolatedColorMatrix])
+     * between the two [samplePresetCurve] samples bracketing [kelvinValue];
+     * clamps to the nearest sample outside the sampled range rather than
+     * extrapolating. */
+    private fun interpolatePresetCurve(
+        curve: List<Triple<Int, Double, Double>>, kelvinValue: Int,
+    ): Pair<Double, Double> {
+        val k = kelvinValue.coerceIn(curve.first().first, curve.last().first)
+        var lo = curve.first()
+        var hi = curve.last()
+        for (i in 0 until curve.size - 1) {
+            if (k >= curve[i].first && k <= curve[i + 1].first) {
+                lo = curve[i]; hi = curve[i + 1]; break
+            }
+        }
+        if (lo.first == hi.first) return lo.second to lo.third
+        val invK = 1.0 / k
+        val invLo = 1.0 / lo.first
+        val invHi = 1.0 / hi.first
+        val w = ((invK - invHi) / (invLo - invHi)).coerceIn(0.0, 1.0)
+        return (w * lo.second + (1 - w) * hi.second) to (w * lo.third + (1 - w) * hi.third)
+    }
+
+    /**
      * Stops recording and returns [framesWritten, framesDropped] from the native
      * layer. `[0, N]` means the writer failed outright (e.g. could not create the
      * file or the disk filled) — treat as a failed clip.
@@ -852,6 +970,13 @@ class CameraController(private val context: Context) {
                         try {
                             if (forRecording) setRepeatingRecord(s) else setRepeatingPreview(s)
                             onConfigured()
+                            // Posted rather than called inline so a synchronous
+                            // meterAt from inside onConfigured() (if the caller's
+                            // onReady triggers one) gets first claim on cameraHandler;
+                            // an async startup meter (its own coroutine hop before
+                            // reaching cameraHandler) is not ordered against this
+                            // either way -- see samplePresetCurve's kdoc.
+                            if (!forRecording) cameraHandler.post { samplePresetCurve() }
                         } catch (e: Exception) {
                             // CameraAccessException, or IllegalArgumentException if a
                             // target surface was abandoned mid-flight (activity
@@ -976,8 +1101,17 @@ class CameraController(private val context: Context) {
      * are placeholders (textbook XYZ->sRGB, not a per-unit calibration) and
      * this curve's absolute LEVEL cannot be trusted -- only its shape (how
      * gains change as kelvin moves) is assumed meaningful.
+     *
+     * SUPERSEDED the moment [samplePresetCurve] has real data for the active
+     * lens: real vendor-tuned AWB-preset gains are trustworthy for shape AND
+     * level, so this analytic curve only serves as the fallback shape before
+     * that one-time sample completes (see [presetCurves]'s kdoc for why the
+     * calibration-matrix curve below cannot be trusted on its own).
      */
     private fun modelGainsRaw(kelvinValue: Int): Pair<Double, Double> {
+        presetCurves[activePhysicalId ?: ""]?.let { curve ->
+            if (curve.size >= 2) return interpolatePresetCurve(curve, kelvinValue)
+        }
         val calib = wbCalib
         val (x, y) = kelvinToXy(kelvinValue)
         val safeY = if (abs(y) < 1e-9) 1e-9 else y
@@ -1145,6 +1279,19 @@ class CameraController(private val context: Context) {
         private const val DEFAULT_ANCHOR_R = 2.0
         private const val DEFAULT_ANCHOR_G = 1.0
         private const val DEFAULT_ANCHOR_B = 1.7
+        // Fixed-illuminant AWB presets sampled by samplePresetCurve, with each
+        // preset's conventional correlated color temperature. TWILIGHT deliberately
+        // omitted -- its real CCT isn't standardized/documented per-vendor, unlike
+        // the other six, so including it risked a wrong data point rather than a
+        // usefully wider range.
+        private val PRESET_KELVIN = listOf(
+            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to 2850,
+            CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT to 3000,
+            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to 4200,
+            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to 5500,
+            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to 6500,
+            CameraMetadata.CONTROL_AWB_MODE_SHADE to 7500,
+        )
         // Identity 3x3 (row-major rationals num/den): color correction here is
         // gains-only, no cross-channel matrix warp.
         private val IDENTITY_TRANSFORM = ColorSpaceTransform(
