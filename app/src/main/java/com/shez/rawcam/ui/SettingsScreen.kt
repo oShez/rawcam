@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -342,7 +343,13 @@ private fun SliderRow(
     title: String, stops: List<Int>, selected: Int, labelFor: (Int) -> String, onSelect: (Int) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
-        Text(title, color = RawCamColors.OnSurface, fontSize = 15.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(title, color = RawCamColors.OnSurface, fontSize = 15.sp)
+            Text(
+                labelFor(selected), color = RawCamColors.Muted,
+                fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+            )
+        }
         Spacer(Modifier.height(6.dp))
         TickedSlider(stops = stops, selected = selected, labelFor = labelFor, onSelect = onSelect)
     }
