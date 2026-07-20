@@ -186,7 +186,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     // builds the name; read (also on cameraOps) by stopRecordingInternal's successful-
     // stop completion to auto-export that exact clip. Not @Volatile: both the write and
     // the read happen on cameraOps, which is single-lane FIFO, so there is no
-    // cross-thread visibility concern (same reasoning as didAutoMeter below).
+    // cross-thread visibility concern (same reasoning as autoMeteredLensIndices below).
     private var lastClipName: String? = null
     // Runs on application.mainExecutor (see the addThermalStatusListener call in
     // init{} below) -- NOT the camera thread. stopRecordingInternal() itself only
@@ -311,6 +311,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             if (saved != null && saved.anchorG > 0f)
                 controller.restoreWbAnchor(RggbChannelVector(saved.anchorR, saved.anchorG, saved.anchorG, saved.anchorB), saved.anchorKelvin)
             restoredFromSaved = saved != null
+            restoredLensIndex = lensIndex
             _uiState.update {
                 it.copy(
                     rawSpec = controller.rawSpec, lenses = controller.lenses,
@@ -370,26 +371,40 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.openAndPreview(surface, onFailed = { handleModeFailure() }) {
                     _uiState.update { it.copy(previewReady = true) }
                     pushManual()
-                    // First preview-ready of this process: auto-meter the center once so
-                    // launch shows a correctly white-balanced image (and seeds
-                    // CameraController's anchor) instead of the calibrated model's
-                    // possibly-placeholder-matrix output persisting until the user's
-                    // first manual tap -- subject to the user's startupMeter setting.
-                    // didAutoMeter is a plain (non-Volatile) field -- fine because
-                    // onReady always runs on the single camera thread (see
+                    // First preview-ready of THIS LENS this process: auto-meter the
+                    // center once so it shows a correctly white-balanced image (and
+                    // seeds CameraController's per-lens anchor -- see anchorState's
+                    // kdoc) instead of the calibrated model's possibly-placeholder-
+                    // matrix output persisting until the user's first manual tap --
+                    // subject to the user's startupMeter setting. Keyed per lens
+                    // index (not a single one-shot flag): each physical camera has
+                    // its own sensor with its own absolute color response, so a lens
+                    // switched to mid-session needs its OWN real measurement just as
+                    // much as the very first lens did at launch (bug found alongside
+                    // CameraController.anchorState's fix -- previously this only ever
+                    // fired once per process, so every lens but the first relied on
+                    // DEFAULT_ANCHOR_* forever unless the user happened to re-meter).
+                    // autoMeteredLensIndices is a plain (non-Volatile) field -- fine
+                    // because onReady always runs on the single camera thread (see
                     // CameraController's class kdoc), never concurrently with itself.
-                    if (!didAutoMeter) {
-                        didAutoMeter = true
+                    val lensIdx = _uiState.value.lensIndex
+                    if (lensIdx !in autoMeteredLensIndices) {
+                        autoMeteredLensIndices += lensIdx
                         val mode = _uiState.value.settings.startupMeter
                         val shouldMeter = when (mode) {
                             StartupMeter.ALWAYS -> true
-                            // restoredFromSaved is @Volatile and written once, on
+                            // Only the lens actually restored from saved state (if
+                            // any) honors IF_NO_SAVED's "don't disturb a restored WB"
+                            // intent -- a DIFFERENT lens opened later via a mid-session
+                            // switch has no saved WB of its own to disturb, so it
+                            // always meters under this mode. restoredFromSaved/
+                            // restoredLensIndex are @Volatile and written once, on
                             // cameraOps, by the init{} restore block before this
                             // onReady can ever fire (openCamera() is itself only
                             // reachable once the composable observes rawSpec != null,
                             // which that same block publishes last) -- so the read
-                            // here is always the settled value, never the initial false.
-                            StartupMeter.IF_NO_SAVED -> !restoredFromSaved
+                            // here is always the settled value.
+                            StartupMeter.IF_NO_SAVED -> !(restoredFromSaved && lensIdx == restoredLensIndex)
                             StartupMeter.NEVER -> false
                         }
                         if (shouldMeter) meterAt(0.5f, 0.5f, quiet = true)
@@ -402,12 +417,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /** Guards the one-shot startup auto-meter in [openCamera] -- true after the first
-     * preview-ready of this process, for the lifetime of this ViewModel (i.e. once
-     * per process for all practical purposes: this VM instance survives
-     * configuration changes but not process death). Deliberately never reset by
-     * lens/mode switches, so a re-open never re-triggers it. */
-    private var didAutoMeter = false
+    /** Guards the one-shot-per-lens auto-meter in [openCamera] -- a lens index is
+     * added the first time ITS preview becomes ready this process; re-opening the
+     * SAME lens (backgrounding/returning, orientation change) does not re-trigger
+     * it, but switching to a lens not yet in this set does. Deliberately never
+     * cleared for the lifetime of this ViewModel (survives configuration changes,
+     * not process death) -- a lens only needs its one real anchor measurement
+     * once. */
+    private val autoMeteredLensIndices = HashSet<Int>()
 
     /** True once the init{} restore block has determined a [CaptureState] was
      * actually applied at launch (vs. falling through to settings defaults because
@@ -417,6 +434,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * thread by the [StartupMeter.IF_NO_SAVED] check above. @Volatile makes that
      * cross-thread read see the write without relying on incidental ordering. */
     @Volatile private var restoredFromSaved = false
+
+    /** The lensIndex the init{} restore block actually applied [restoredFromSaved]'s
+     * CaptureState to (or the default lens index when nothing was restored) --
+     * lets [openCamera]'s IF_NO_SAVED check distinguish "the one lens that had a
+     * saved WB" from every other lens, which never had one. Written alongside
+     * [restoredFromSaved], same visibility guarantee. */
+    @Volatile private var restoredLensIndex = 0
 
     /**
      * Preview session failed to configure. If a non-default lens/size mode is

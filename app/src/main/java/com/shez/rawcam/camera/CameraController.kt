@@ -227,18 +227,29 @@ class CameraController(private val context: Context) {
      * (kelvin or tint actually changes). Null = no override, use the model. */
     @Volatile private var wbOverride: RggbChannelVector? = null
 
-    /** Real measured AWB gains from the most recent successful meter, and the
-     * kelvin [gainsToKelvinTint] matched them to (against the anchor state
-     * BEFORE this one) -- see [gainsFor]'s kdoc. This is what lets the slider
-     * model track this device's *actual* sensor response instead of a static
-     * calibration matrix that may be a placeholder (observed on a Pixel 7 Pro:
-     * SENSOR_COLOR_TRANSFORM2 was the textbook XYZ->sRGB matrix, not a real
-     * per-unit calibration). Null until the first successful meter of this
-     * process; [gainsFor] substitutes DEFAULT_ANCHOR_* in that case. Written
-     * only from [readMetered], on the camera thread, same as every other field
-     * gainsFor reads. */
-    @Volatile private var anchorGains: RggbChannelVector? = null
-    @Volatile private var anchorKelvin: Int = 5600
+    /** Real measured AWB gains from the most recent successful meter ON EACH
+     * PHYSICAL LENS (""=unknown/null id), and the kelvin [gainsToKelvinTint]
+     * matched them to (against that lens's own anchor state BEFORE this one) --
+     * see [gainsFor]'s kdoc. This is what lets the slider model track this
+     * device's *actual* sensor response instead of a static calibration matrix
+     * that may be a placeholder (observed on a Pixel 7 Pro: SENSOR_COLOR_TRANSFORM2
+     * was the textbook XYZ->sRGB matrix, not a real per-unit calibration).
+     * Keyed per lens because each physical camera has its own sensor with its
+     * own absolute color response -- a real measurement taken on one lens is
+     * not a valid anchor for a DIFFERENT lens (bug found and fixed 2026-07-21:
+     * this field used to be a single unkeyed value, so switching lenses on this
+     * device's 3 RAW-capable back cameras silently carried the old lens's
+     * absolute gain level onto the new lens's sensor, scaled by the new lens's
+     * own -- correctly per-lens -- [presetCurves] shape, producing an internally
+     * inconsistent result: right shape, wrong level, until the user happened to
+     * change kelvin/tint or re-meter). No entry for a lens until its first
+     * successful meter this process; [gainsFor] substitutes DEFAULT_ANCHOR_* in
+     * that case. Written only from [readMetered] and [restoreWbAnchor]; read
+     * cross-thread by [wbAnchorOrNull] (RecordViewModel.persistCaptureState, not
+     * the camera thread) and [restoreWbAnchor] (RecordViewModel's init restore,
+     * on cameraOps) -- same @Volatile whole-map-replacement (copy-on-write)
+     * pattern as [presetCurves]. */
+    @Volatile private var anchorState: Map<String, Pair<RggbChannelVector, Int>> = emptyMap()
 
     /** Real hardware AWB-preset curve per physical lens id (""=unknown/null id),
      * sampled once by [samplePresetCurve]: (nominal kelvin, red/green ratio,
@@ -351,6 +362,13 @@ class CameraController(private val context: Context) {
         if (recording) return false
         val lens = lenses.getOrNull(lensIndex) ?: return false
         if (sizeIndex !in lens.sizes.indices) return false
+        // Exact metered gains are specific to the sensor they were measured on --
+        // carrying them onto a DIFFERENT physical camera would apply one sensor's
+        // absolute WB correction to a different sensor's raw data (same root cause
+        // as anchorState's kdoc). Gated on an actual physical-camera change, not
+        // sizeIndex alone, so a same-lens resolution switch keeps a still-valid
+        // live meter instead of discarding it for no reason.
+        if (activePhysicalId != lens.physicalId) wbOverride = null
         activePhysicalId = lens.physicalId
         rawSpec = specFor(lens, sizeIndex)
         activeArraySize = lens.activeArraySize
@@ -463,7 +481,7 @@ class CameraController(private val context: Context) {
     }
 
     /**
-     * Seeds [anchorGains]/[anchorKelvin] from a persisted [CaptureState] (Settings
+     * Seeds [anchorState] (for the currently active lens) from a persisted [CaptureState] (Settings
      * restore, RecordViewModel init) instead of a live [readMetered] convergence.
      * Called before any session exists (during the enumeration coroutine, ahead of
      * the first [openAndPreview]) so there's no repeating request to re-arm --
@@ -472,15 +490,14 @@ class CameraController(private val context: Context) {
      * anchor the same as it would a real meter's.
      */
     fun restoreWbAnchor(gains: RggbChannelVector, kelvin: Int) {
-        anchorGains = gains
-        anchorKelvin = kelvin
+        anchorState = anchorState + ((activePhysicalId ?: "") to (gains to kelvin))
     }
 
-    /** Current WB anchor (real metered gains + the kelvin they were matched
-     * against), for persisting into [CaptureState]. Null if no meter has
-     * converged yet this process and none was restored. */
-    fun wbAnchorOrNull(): Pair<RggbChannelVector, Int>? =
-        anchorGains?.let { it to anchorKelvin }
+    /** Current WB anchor for the ACTIVE lens (real metered gains + the kelvin
+     * they were matched against), for persisting into [CaptureState]. Null if
+     * no meter has converged for this lens yet this process and none was
+     * restored. */
+    fun wbAnchorOrNull(): Pair<RggbChannelVector, Int>? = anchorState[activePhysicalId ?: ""]
 
     /**
      * One-shot hardware-3A meter at a normalized preview point (nx, ny in 0f..1f,
@@ -508,6 +525,7 @@ class CameraController(private val context: Context) {
             val s = session
             val preview = previewSurface
             val arr = activeArraySize
+            val meterPhysicalId = activePhysicalId
             if (recording || dev == null || s == null || preview == null || arr == null) {
                 onResult(null); return@post
             }
@@ -544,7 +562,19 @@ class CameraController(private val context: Context) {
 
                 done.await(1800, TimeUnit.MILLISECONDS)
                 val result = last.get()
-                val out = if (result != null && usableAe(result)) readMetered(result) else null
+                // selectMode() runs on the caller's coroutine (cameraOps), not this
+                // thread, and isn't gated on a live meter -- the UI lets a user tap a
+                // different lens chip while this thread was blocked in the await
+                // above. If that happened, `result` (if any) was measured on a sensor
+                // that is no longer the active one: readMetered's anchor write and
+                // gainsToKelvinTint's kelvin/tint match both read activePhysicalId's
+                // CURRENT (post-switch) state, so attributing this measurement to it
+                // now would be exactly the cross-lens contamination anchorState's
+                // fix exists to prevent. Treat it as a plain failed meter instead --
+                // the caller's existing null handling (silent for quiet auto-meters,
+                // a snackbar for a manual tap) already does the right thing.
+                val staleLens = activePhysicalId != meterPhysicalId
+                val out = if (!staleLens && result != null && usableAe(result)) readMetered(result) else null
                 restoreManualPreview() // always restore before returning
                 onResult(out)
             } catch (e: Exception) {
@@ -593,12 +623,12 @@ class CameraController(private val context: Context) {
         val gains = r.get(CaptureResult.COLOR_CORRECTION_GAINS)
         val (k, t) = if (gains != null) gainsToKelvinTint(gains) else (kelvin to tint)
         if (gains != null) {
-            // Anchor the calibrated model's SHAPE to this real measurement. `k` was
-            // just matched against the OLD anchor (gainsToKelvinTint/gainsFor above
-            // read anchorGains/anchorKelvin before this assignment) -- update the
-            // anchor only now, so the stored kelvin is never matched against itself.
-            anchorGains = gains
-            anchorKelvin = k
+            // Anchor the calibrated model's SHAPE to this real measurement, keyed
+            // to the lens it was measured on. `k` was just matched against the OLD
+            // anchor for this lens (gainsToKelvinTint/gainsFor above read
+            // anchorState before this assignment) -- update the anchor only now,
+            // so the stored kelvin is never matched against itself.
+            anchorState = anchorState + ((activePhysicalId ?: "") to (gains to k))
         }
         if (debugLogging) {
             Log.i(
@@ -1164,8 +1194,7 @@ class CameraController(private val context: Context) {
      * without disturbing the R:G:B ratio -- unchanged from the prior model.
      */
     private fun gainsFor(kelvinValue: Int, tintValue: Int): RggbChannelVector {
-        val anchor = anchorGains
-        val aKelvin = anchorKelvin
+        val (anchor, aKelvin) = anchorState[activePhysicalId ?: ""] ?: (null to 5600)
         val (modelR, modelB) = modelGainsRaw(kelvinValue)
         val (anchorModelR, anchorModelB) = modelGainsRaw(aKelvin)
         val anchorR = anchor?.red?.toDouble() ?: DEFAULT_ANCHOR_R
@@ -1290,13 +1319,13 @@ class CameraController(private val context: Context) {
         // values from these sets so the metered result lands exactly on a slider tick.
         private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
         private val TINT_CANDIDATES = (-50..50 step 5).toList()
-        // Seed anchor for gainsFor before the first successful meterAt of this process
-        // (see anchorGains's kdoc): a typical green-dominant phone-sensor neutral at
-        // 5600K (anchorKelvin's own default). Better than trusting a possibly-
+        // Seed anchor for gainsFor before the first successful meterAt of a given lens
+        // (see anchorState's kdoc): a typical green-dominant phone-sensor neutral at
+        // 5600K (gainsFor's own no-anchor-yet default). Better than trusting a possibly-
         // placeholder calibration matrix's absolute level on unknown hardware, and
         // roughly harmless (close to gainsFor's old floor-1 behavior) on honest
         // hardware -- gets replaced by real numbers the moment any meter succeeds,
-        // including the automatic startup one (RecordViewModel.didAutoMeter).
+        // including the automatic per-lens startup meter (RecordViewModel.autoMeteredLensIndices).
         private const val DEFAULT_ANCHOR_R = 2.0
         private const val DEFAULT_ANCHOR_G = 1.0
         private const val DEFAULT_ANCHOR_B = 1.7
