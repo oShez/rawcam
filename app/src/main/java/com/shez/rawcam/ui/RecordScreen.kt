@@ -911,6 +911,8 @@ fun RecordScreen(
     viewModel: RecordViewModel = viewModel(),
     clipsEnabled: Boolean = true,
     onOpenClips: () -> Unit = {},
+    exportsEnabled: Boolean = true,
+    onOpenExports: () -> Unit = {},
     settingsEnabled: Boolean = true,
     onOpenSettings: () -> Unit = {},
 ) {
@@ -1122,17 +1124,23 @@ fun RecordScreen(
                 }
             }
 
-            TextButton(
-                enabled = clipsEnabled,
-                onClick = onOpenClips,
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-            ) {
-                Text(
-                    "CLIPS",
-                    color = if (clipsEnabled) RawCamColors.OnSurface
-                            else RawCamColors.Muted.copy(alpha = 0.5f),
-                    fontSize = 11.sp, letterSpacing = 1.5.sp,
-                )
+            Row(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
+                TextButton(enabled = exportsEnabled, onClick = onOpenExports) {
+                    Text(
+                        "EXPORTS",
+                        color = if (exportsEnabled) RawCamColors.OnSurface
+                                else RawCamColors.Muted.copy(alpha = 0.5f),
+                        fontSize = 11.sp, letterSpacing = 1.5.sp,
+                    )
+                }
+                TextButton(enabled = clipsEnabled, onClick = onOpenClips) {
+                    Text(
+                        "CLIPS",
+                        color = if (clipsEnabled) RawCamColors.OnSurface
+                                else RawCamColors.Muted.copy(alpha = 0.5f),
+                        fontSize = 11.sp, letterSpacing = 1.5.sp,
+                    )
+                }
             }
 
             // Left status rail, gated on Settings.showStatsSidebar. The action rails

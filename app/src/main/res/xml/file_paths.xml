@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Scoped to exports/ only: matches exactly where ExportService writes DNGs
+         (getExternalFilesDir/exports/clipName/*.dng), not the whole external
+         files dir (which also holds clips/ and bench.bin). -->
+    <external-files-path name="exports" path="exports/" />
+</paths>
