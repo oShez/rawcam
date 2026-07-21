@@ -103,6 +103,15 @@ class CameraController(private val context: Context) {
          * Ultra, ids "4"/"5"). [physicalId] is never null when this is true -- it
          * holds the id to open directly, not a tag. See [probeHiddenLenses]. */
         val standalone: Boolean = false,
+        /** 35mm-equivalent focal length in mm, i.e. the number phones are actually
+         * marketed/specced with (e.g. "12mm ultrawide", "23mm main", "75mm 3.2x",
+         * "120mm 5x" on this device) -- NOT [focalMm], which is the lens's real
+         * physical focal length (a few mm on any phone sensor) and reads as
+         * obviously wrong to anyone checking against official specs. Computed in
+         * [buildLensCandidate] from the sensor's own measured physical size
+         * (SENSOR_INFO_PHYSICAL_SIZE), not a looked-up "1/2.51-inch"-style format
+         * table -- exact for this specific lens rather than approximate. */
+        val equivFocalMm: Float,
         /** True for exactly one lens per device: the one [enumerateLenses] matched
          * against the primary logical camera's own advertised focal length, i.e.
          * the "main"/1x lens -- used by [initialize] to pick [defaultLensIndex].
@@ -992,7 +1001,7 @@ class CameraController(private val context: Context) {
         val mainIdx = if (logicalFocal == null) 0
         else deduped.indices.minBy { abs(deduped[it].focalMm - logicalFocal) }
         return deduped.mapIndexed { i, lens ->
-            lens.copy(label = "%.1fmm".format(Locale.US, lens.focalMm), isMain = i == mainIdx)
+            lens.copy(label = "%.0fmm".format(Locale.US, lens.equivFocalMm), isMain = i == mainIdx)
         }
     }
 
@@ -1008,6 +1017,13 @@ class CameraController(private val context: Context) {
             ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
                 ?: return null
         val physSize = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+        // 35mm-equivalent = real focal length * (full-frame diagonal / this sensor's
+        // OWN measured diagonal) -- the standard crop-factor formula, using this
+        // lens's actual physical size rather than a looked-up sensor-format name
+        // (e.g. "1/2.51-inch"), which is only ever approximate.
+        val sensorDiagonalMm =
+            kotlin.math.sqrt(physSize.width.toDouble().pow(2) + physSize.height.toDouble().pow(2))
+        val equivFocal = (focal * (FULL_FRAME_DIAGONAL_MM / sensorDiagonalMm)).toFloat()
         // Camera2 CFA constants share our Cfa enum order: RGGB=0 GRBG=1 GBRG=2 BGGR=3.
         val cfa = ch.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: return null
         val whiteLevel = ch.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: return null
@@ -1038,6 +1054,7 @@ class CameraController(private val context: Context) {
             physicalId = physicalId,
             label = "", // filled by enumerateLenses once the main lens is known
             focalMm = focal,
+            equivFocalMm = equivFocal,
             fovMetric = physSize.width / focal,
             sizes = sizes,
             cfa = cfa,
@@ -1459,6 +1476,10 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
+        // sqrt(36^2 + 24^2) -- full-frame (35mm) sensor diagonal, mm. The reference
+        // every "35mm-equivalent focal length" spec (LensInfo.equivFocalMm) is
+        // quoted against.
+        private const val FULL_FRAME_DIAGONAL_MM = 43.2666564f
         // Upper bound for probeHiddenLenses' scan -- comfortably above the largest
         // camera id any current multi-camera phone has been seen to expose.
         private const val HIDDEN_LENS_PROBE_RANGE = 16
