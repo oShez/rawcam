@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -41,10 +42,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -258,6 +259,40 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 previous = s
             }
         }
+        ensureCameraInitialized()
+        // Free-space poll for the "space remaining" readout is driven from the
+        // composable (see RecordScreen's repeatOnLifecycle block calling
+        // refreshFreeSpace()) rather than looping here for the whole viewmodel
+        // lifetime -- the ViewModel has no Lifecycle of its own to gate on (and
+        // shouldn't be handed the Activity's, which would break its
+        // configuration-change independence), so pausing this StatFs + uiState
+        // poll while backgrounded is delegated to the UI side instead.
+    }
+
+    @Volatile private var cameraInitStarted = false
+
+    /**
+     * Starts camera enumeration/restore exactly once, and only once CAMERA
+     * permission is actually granted. Previously this ran unconditionally from
+     * init{} regardless of permission state -- but [CameraController.initialize]'s
+     * enumerateLenses() reads CameraCharacteristics keys (REQUEST_AVAILABLE_
+     * CAPABILITIES and friends) that Android redacts to null for apps lacking the
+     * CAMERA permission, which made every physical/logical lens candidate fail
+     * `buildLensCandidate`'s null checks and left `deduped` empty -- crashing the
+     * whole process with `check(deduped.isNotEmpty())`'s "no RAW-capable back
+     * lens" IllegalStateException the instant the app launched without the
+     * permission already granted (found 2026-07-21 on-device while verifying the
+     * RecordScreen permission-gate UI, which this crash meant could never actually
+     * be reached). Called from init{} (the common case -- permission already
+     * granted from a prior run) and again from RecordScreen once its runtime
+     * permission request resolves to granted (the fresh-install/just-denied case)
+     * -- the guard makes every call after the first a no-op, so calling from both
+     * places is safe.
+     */
+    fun ensureCameraInitialized() {
+        if (cameraInitStarted) return
+        if (!hasCameraPermission(getApplication())) return
+        cameraInitStarted = true
         // Camera lens enumeration is binder IPC (getCameraCharacteristics per lens +
         // stream-config queries) -- runs on cameraOps, never the main thread. Queued
         // first on cameraOps, so every later cameraOps.launch (openCamera, etc.) is
@@ -319,13 +354,6 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
         }
-        // Free-space poll for the "space remaining" readout is driven from the
-        // composable (see RecordScreen's repeatOnLifecycle block calling
-        // refreshFreeSpace()) rather than looping here for the whole viewmodel
-        // lifetime -- the ViewModel has no Lifecycle of its own to gate on (and
-        // shouldn't be handed the Activity's, which would break its
-        // configuration-change independence), so pausing this StatFs + uiState
-        // poll while backgrounded is delegated to the UI side instead.
     }
 
     /** One StatFs (IO) read of [CameraController.clipsDir]'s free space, published
@@ -943,13 +971,39 @@ fun RecordScreen(
     var hasPermission by remember { mutableStateOf(hasCameraPermission(context)) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasPermission = granted
+        // Covers the fresh-install/just-denied case: the ViewModel's own init{}
+        // call to ensureCameraInitialized() was a no-op without permission (see
+        // its kdoc), so nothing starts camera enumeration until it's retried here.
+        if (granted) viewModel.ensureCameraInitialized()
     }
     LaunchedEffect(Unit) { if (!hasPermission) launcher.launch(Manifest.permission.CAMERA) }
 
     if (!hasPermission) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                Text("Grant camera permission")
+        // Matches the rest of the app's flat bordered-pill / accent-fill language
+        // (NavButton, ShutterButton) instead of a stock M3 Button -- the default
+        // Button pulls in Material's capsule shape and elevation shadow, the only
+        // place in the app that would have looked like generic Material chrome
+        // rather than RawCam's own control-panel look, and it's also the very
+        // first thing a fresh install shows.
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(
+                    "CAMERA ACCESS NEEDED", color = RawCamColors.OnSurface,
+                    fontSize = 15.sp, letterSpacing = 1.5.sp,
+                )
+                Text(
+                    "RawCam needs your camera to show a preview and record RAW video.",
+                    color = RawCamColors.Muted, fontSize = 13.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                )
+                Surface(color = RawCamColors.Accent, shape = RoundedCornerShape(8.dp)) {
+                    Text(
+                        "GRANT ACCESS", color = Color.White, fontSize = 13.sp, letterSpacing = 1.sp,
+                        modifier = Modifier
+                            .clickable { launcher.launch(Manifest.permission.CAMERA) }
+                            .padding(horizontal = 24.dp, vertical = 12.dp),
+                    )
+                }
             }
         }
         return
@@ -1115,7 +1169,7 @@ fun RecordScreen(
             // way back into the settings screen that turned it off.
             Column(
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (state.settings.showBench) {
                     NavButton(
@@ -1140,7 +1194,7 @@ fun RecordScreen(
 
             Row(
                 modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
                 NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
@@ -1499,8 +1553,15 @@ private fun NavButton(text: String, enabled: Boolean = true, onClick: () -> Unit
     ) {
         Text(
             text, color = RawCamColors.OnSurface, fontSize = 11.sp, letterSpacing = 1.5.sp,
+            textAlign = TextAlign.Center,
+            // A fixed floor (sized to fit "SETTINGS", the longest of the four nav
+            // labels) rather than each pill hugging its own text -- BENCH/CLIPS
+            // were visibly narrower than SETTINGS/EXPORTS, so the two stacked/
+            // paired buttons never lined up. All four now share one width, so the
+            // spacing between them reads as even instead of ragged.
             modifier = Modifier
                 .clickable(enabled = enabled, onClick = onClick)
+                .defaultMinSize(minWidth = 96.dp)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
