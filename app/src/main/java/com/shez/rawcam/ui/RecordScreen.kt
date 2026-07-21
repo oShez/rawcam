@@ -705,18 +705,40 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         persistCaptureState()
     }
 
-    /** Clamps fps and shutter to what the (just-selected) mode supports. Only ever
-     * called after a successful controller.selectMode (recording/lens-switch paths,
-     * themselves only reachable once the UI is showing lens controls, i.e. after
-     * enumeration) -- controller.rawSpec is guaranteed valid here. */
+    /** Clamps fps/shutter/iso/focus to what the (just-selected) mode supports, AND
+     * republishes [RecordUiState.rawSpec] itself. Only ever called after a
+     * successful controller.selectMode (recording/lens-switch paths, themselves only
+     * reachable once the UI is showing lens controls, i.e. after enumeration) --
+     * controller.rawSpec is guaranteed valid here.
+     *
+     * [RecordUiState.rawSpec] was previously published exactly once, at ViewModel
+     * init, and never again -- every composable read of it (ISO stops, resolution
+     * list, aspect ratio, min focus) stayed frozen on whichever lens happened to be
+     * restored/default at launch, for the rest of the process, regardless of how
+     * many times the user actually switched lenses afterward. This was invisible
+     * while 0.5x/1x happened to have similar enough specs, but the telephoto
+     * lenses' genuinely different isoRange (e.g. max 1119 vs 3200) made it obvious:
+     * the ISO slider kept showing whatever lens was active at launch, not the one
+     * actually selected. iso/focusDiopters themselves also weren't coerced here at
+     * all (unlike fps/shutter) -- switching to a lens with a lower
+     * isoRange.endInclusive/minFocusDiopters left the UI's numeric value stale too,
+     * even though CameraController.updateManual was already silently clamping the
+     * applied value underneath. Both mirror the same clamp already applied once at
+     * startup restore (see the init{} block's
+     * `.coerceIn(controller.rawSpec.isoRange)` / focus clamp), just re-applied (and,
+     * for rawSpec, re-published) on every mode change too. */
     private fun coerceToMode(state: RecordUiState): RecordUiState {
-        val opts = fpsOptions(controller.rawSpec)
+        val spec = controller.rawSpec
+        val opts = fpsOptions(spec)
         val fps = if (state.fps in opts) state.fps
         else (opts.lastOrNull { it <= state.fps } ?: opts.first())
         val stops = shutterStops(fps)
         return state.copy(
+            rawSpec = spec,
             fps = fps,
             shutterIndex = state.shutterIndex.coerceIn(0, (stops.size - 1).coerceAtLeast(0)),
+            iso = state.iso.coerceIn(spec.isoRange),
+            focusDiopters = state.focusDiopters.coerceIn(0f, maxOf(spec.minFocusDiopters, 0f)),
             previewReady = false,
         )
     }
