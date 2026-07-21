@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -1780,9 +1781,18 @@ internal fun <T> TickedSlider(
                 modifier = Modifier.weight(1f),
                 thumb = { state ->
                     val thumbValue = state.value.roundToInt().coerceIn(0, maxIndex)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        ValueBubble(labelFor(stops.getOrElse(thumbValue) { selected }))
-                        Spacer(Modifier.height(4.dp))
+                    // ValueBubble is positioned via offset (a draw-time shift), NOT stacked
+                    // in a Column above the thumb -- stacking made the thumb SLOT itself
+                    // taller, which the Slider then centered against the track, leaving a
+                    // large dead black gap below the track to keep the taller slot
+                    // symmetric. offset moves the bubble without changing the slot's
+                    // measured size, so the Slider's overall height goes back to exactly
+                    // what a plain thumb needs.
+                    Box(contentAlignment = Alignment.Center) {
+                        ValueBubble(
+                            labelFor(stops.getOrElse(thumbValue) { selected }),
+                            modifier = Modifier.offset(y = (-28).dp),
+                        )
                         SliderDefaults.Thumb(interactionSource = thumbInteraction, enabled = enabled && !locked)
                     }
                 },
@@ -1801,8 +1811,9 @@ internal fun <T> TickedSlider(
  * visible (not just while dragging): the point is a same-glance value readout
  * right where the thumb is, not a drag-only tooltip. */
 @Composable
-private fun ValueBubble(text: String) {
+private fun ValueBubble(text: String, modifier: Modifier = Modifier) {
     Surface(
+        modifier = modifier,
         color = Color(0xE60A0B0D),
         shape = RoundedCornerShape(6.dp),
         border = BorderStroke(1.dp, RawCamColors.Accent),
