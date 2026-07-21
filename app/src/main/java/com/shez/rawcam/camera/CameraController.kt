@@ -103,6 +103,13 @@ class CameraController(private val context: Context) {
          * Ultra, ids "4"/"5"). [physicalId] is never null when this is true -- it
          * holds the id to open directly, not a tag. See [probeHiddenLenses]. */
         val standalone: Boolean = false,
+        /** True for exactly one lens per device: the one [enumerateLenses] matched
+         * against the primary logical camera's own advertised focal length, i.e.
+         * the "main"/1x lens -- used by [initialize] to pick [defaultLensIndex].
+         * Kept separate from [label] (now the lens's real focal length in mm, not
+         * a zoom multiplier) so that display formatting can change freely without
+         * breaking default-lens detection, which used to string-match `label == "1x"`. */
+        val isMain: Boolean = false,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -342,7 +349,7 @@ class CameraController(private val context: Context) {
                     ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW) == true
         }
         lenses = enumerateLenses(cameraManager.getCameraCharacteristics(primaryCameraId))
-        defaultLensIndex = lenses.indexOfFirst { it.label == "1×" }.coerceAtLeast(0)
+        defaultLensIndex = lenses.indexOfFirst { it.isMain }.coerceAtLeast(0)
         applySelectedLens(lenses[defaultLensIndex], 0)
         // Permanent cheap sanity line for field debugging: catches a matrix-direction
         // or model regression immediately in logcat without needing a unit test.
@@ -984,12 +991,8 @@ class CameraController(private val context: Context) {
             logicalCh.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
         val mainIdx = if (logicalFocal == null) 0
         else deduped.indices.minBy { abs(deduped[it].focalMm - logicalFocal) }
-        val mainFov = deduped[mainIdx].fovMetric
-        return deduped.map { lens ->
-            val zoom = mainFov / lens.fovMetric
-            val label =
-                if (zoom < 0.95f) "%.1f×".format(Locale.US, zoom) else "${zoom.roundToInt()}×"
-            lens.copy(label = label)
+        return deduped.mapIndexed { i, lens ->
+            lens.copy(label = "%.1fmm".format(Locale.US, lens.focalMm), isMain = i == mainIdx)
         }
     }
 
