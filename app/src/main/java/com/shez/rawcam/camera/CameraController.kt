@@ -93,6 +93,16 @@ class CameraController(private val context: Context) {
          * the characteristic at all -- distinct from an array containing only OFF,
          * which is common and means "no OIS hardware but the key exists". */
         val availableOisModes: IntArray?,
+        /** True when [physicalId] is NOT a physical child of the primary logical
+         * camera (tagged via OutputConfiguration.setPhysicalCameraId) but a fully
+         * separate camera id that must be opened as its own standalone
+         * [CameraDevice] -- e.g. a telephoto/periscope lens the OS hides from both
+         * CameraManager.cameraIdList and the primary logical camera's
+         * physicalCameraIds, yet which independently reports RAW+MANUAL_SENSOR and
+         * opens successfully on its own (observed: MIUI/HyperOS on a Xiaomi 14
+         * Ultra, ids "4"/"5"). [physicalId] is never null when this is true -- it
+         * holds the id to open directly, not a tag. See [probeHiddenLenses]. */
+        val standalone: Boolean = false,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -121,7 +131,11 @@ class CameraController(private val context: Context) {
 
     private val cameraManager =
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    private lateinit var cameraId: String
+    /** Id of the primary logical camera (the normal back logical camera, e.g. "0")
+     * -- opened for every non-[LensInfo.standalone] lens; physical children are
+     * reached by tagging OutputConfigurations under this same open device, never
+     * by opening their id directly. */
+    private lateinit var primaryCameraId: String
 
     /** Selectable back lenses, widest first. At least one entry. Populated by
      * [initialize]; empty until then. */
@@ -139,8 +153,31 @@ class CameraController(private val context: Context) {
     @Volatile lateinit var rawSpec: RawSpec
         private set
 
-    /** Physical camera id every session's OutputConfigurations are tagged with. */
+    /** Identity key for the active lens -- [LensInfo.physicalId] verbatim, used ONLY
+     * to key per-lens WB state ([anchorState], [presetCurves]) and to detect an
+     * actual lens change in [selectMode]/[meterAt]. NOT used to decide session
+     * tagging or which camera id to open -- see [sessionTagId]/[activeCameraId]. */
     @Volatile private var activePhysicalId: String? = null
+
+    /** Camera id actually passed to [CameraManager.openCamera] for the active lens:
+     * [primaryCameraId] for a physical-child lens (or the single-lens fallback), or
+     * the lens's own id when [LensInfo.standalone]. Set by [applySelectedLens]. */
+    @Volatile private var activeCameraId: String = ""
+
+    /** Id of the [CameraDevice] currently held in [device] (or about to be), so
+     * [openAndPreview] can tell "reopening the same id" (the framework implicitly
+     * disconnects the old device first -- see that function's kdoc) from "crossing
+     * to a genuinely different top-level device" (e.g. into/out of a standalone
+     * lens), which has no such guarantee and needs an explicit close first. */
+    @Volatile private var openDeviceId: String? = null
+
+    /** Physical camera id THIS SESSION's OutputConfigurations are tagged with via
+     * setPhysicalCameraId -- null for the single-lens fallback AND for a standalone
+     * lens ([LensInfo.standalone]): a standalone device's own captures already
+     * target exactly that sensor and must never be tagged. Set by
+     * [applySelectedLens]; distinct from [activePhysicalId], which keeps its
+     * original per-lens-identity meaning regardless of standalone-ness. */
+    @Volatile private var sessionTagId: String? = null
 
     /** Active-array size (sensor pixel bounds) of the active lens; used by [meterAt]
      * to map a normalized tap point into a metering region. Cached from the same
@@ -298,19 +335,15 @@ class CameraController(private val context: Context) {
      * this class. Not called from init{} so construction itself is main-thread-safe.
      */
     fun initialize() {
-        cameraId = cameraManager.cameraIdList.first { id ->
+        primaryCameraId = cameraManager.cameraIdList.first { id ->
             val c = cameraManager.getCameraCharacteristics(id)
             c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK &&
                 c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
                     ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW) == true
         }
-        lenses = enumerateLenses(cameraManager.getCameraCharacteristics(cameraId))
+        lenses = enumerateLenses(cameraManager.getCameraCharacteristics(primaryCameraId))
         defaultLensIndex = lenses.indexOfFirst { it.label == "1×" }.coerceAtLeast(0)
-        activePhysicalId = lenses[defaultLensIndex].physicalId
-        rawSpec = specFor(lenses[defaultLensIndex], 0)
-        activeArraySize = lenses[defaultLensIndex].activeArraySize
-        activeOisModes = lenses[defaultLensIndex].availableOisModes
-        wbCalib = wbCalibFor(lenses[defaultLensIndex])
+        applySelectedLens(lenses[defaultLensIndex], 0)
         // Permanent cheap sanity line for field debugging: catches a matrix-direction
         // or model regression immediately in logcat without needing a unit test.
         val g2000 = gainsFor(2000, 0)
@@ -332,7 +365,26 @@ class CameraController(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun openAndPreview(previewSurface: Surface, onFailed: () -> Unit = {}, onReady: () -> Unit) {
         this.previewSurface = previewSurface
-        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+        val targetId = activeCameraId
+        val prevDevice = device
+        if (prevDevice != null && openDeviceId != targetId) {
+            // Reopening the SAME id lets the framework implicitly disconnect the
+            // previous device for us (see below); crossing to a genuinely different
+            // top-level device -- e.g. switching into or out of a standalone lens,
+            // see LensInfo.standalone -- has no such guarantee, so the old device
+            // must be torn down explicitly first or it would just leak.
+            try {
+                prevDevice.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "close before cross-device reopen failed", e)
+            }
+            device = null
+        }
+        openDeviceId = targetId
+        // Reopening the same camera id from the same process is safe even without
+        // the explicit close above: the framework disconnects the previous device
+        // first.
+        cameraManager.openCamera(targetId, object : CameraDevice.StateCallback() {
             override fun onOpened(cam: CameraDevice) {
                 device = cam
                 createSession(listOf(previewSurface), forRecording = false, onFailed = onFailed) {
@@ -343,13 +395,13 @@ class CameraController(private val context: Context) {
             override fun onDisconnected(cam: CameraDevice) {
                 Log.w(TAG, "camera disconnected")
                 cam.close()
-                device = null
+                if (device === cam) device = null
             }
 
             override fun onError(cam: CameraDevice, error: Int) {
                 Log.e(TAG, "camera error $error")
                 cam.close()
-                device = null
+                if (device === cam) device = null
                 onFailed()
             }
         }, cameraHandler)
@@ -374,12 +426,32 @@ class CameraController(private val context: Context) {
         // sizeIndex alone, so a same-lens resolution switch keeps a still-valid
         // live meter instead of discarding it for no reason.
         if (activePhysicalId != lens.physicalId) wbOverride = null
+        applySelectedLens(lens, sizeIndex)
+        return true
+    }
+
+    /** Shared by [initialize] (default lens) and [selectMode]: publishes every
+     * field keyed off "the active lens", including which camera id the NEXT
+     * [openAndPreview] must open ([activeCameraId]) and whether this session's
+     * OutputConfigurations need physical-id tagging ([sessionTagId]) -- see
+     * [LensInfo.standalone]'s kdoc for why those two diverge from [activePhysicalId]
+     * for a standalone lens. Does not touch the live session; the caller re-keys
+     * the preview SurfaceView, and the resulting surfaceCreated -> openCamera ->
+     * openAndPreview reopens against whatever this just published (same path
+     * documented on [selectMode]). */
+    private fun applySelectedLens(lens: LensInfo, sizeIndex: Int) {
         activePhysicalId = lens.physicalId
         rawSpec = specFor(lens, sizeIndex)
         activeArraySize = lens.activeArraySize
         activeOisModes = lens.availableOisModes
         wbCalib = wbCalibFor(lens)
-        return true
+        if (lens.standalone) {
+            activeCameraId = lens.physicalId!!
+            sessionTagId = null
+        } else {
+            activeCameraId = primaryCameraId
+            sessionTagId = lens.physicalId
+        }
     }
 
     /**
@@ -874,6 +946,7 @@ class CameraController(private val context: Context) {
             session = null
             device?.close()
             device = null
+            openDeviceId = null
             meterCallbackThread?.quitSafely()
             meterCallbackThread = null
             meterCallbackHandler = null
@@ -899,7 +972,9 @@ class CameraController(private val context: Context) {
                 null
             }
         }
-        val deduped = candidates
+        val knownIds = cameraManager.cameraIdList.toSet() + logicalCh.physicalCameraIds.toSet()
+        val hidden = probeHiddenLenses(knownIds)
+        val deduped = (candidates + hidden)
             .groupBy { it.focalMm }
             .map { (_, group) -> group.maxBy { it.sizes.size } }
             .sortedByDescending { it.fovMetric }
@@ -977,6 +1052,36 @@ class CameraController(private val context: Context) {
         )
     }
 
+    /**
+     * Probes camera ids the OS hides from normal discovery -- observed on a Xiaomi
+     * 14 Ultra (MIUI/HyperOS): ids "4"/"5" (3.2x telephoto, 5x periscope) report
+     * full RAW+MANUAL_SENSOR support and open successfully as standalone
+     * [CameraDevice]s, yet appear in neither [CameraManager.cameraIdList] nor the
+     * primary logical camera's physicalCameraIds. [excludeIds] is every id already
+     * known (skip re-probing them). Real-world Camera2 ids are small decimal-string
+     * indices on every device this has been observed on, so this is a generic
+     * bounded scan, not hardcoded to any specific hidden id. An id that doesn't
+     * exist, or is genuinely inaccessible (e.g. this device's ids "7"/"8", a hard
+     * "system only device" CameraAccessException), simply throws and is skipped --
+     * the same tolerance [enumerateLenses] already applies to a failing physical
+     * child.
+     */
+    private fun probeHiddenLenses(excludeIds: Set<String>): List<LensInfo> {
+        val found = mutableListOf<LensInfo>()
+        for (i in 0 until HIDDEN_LENS_PROBE_RANGE) {
+            val id = i.toString()
+            if (id in excludeIds) continue
+            try {
+                val ch = cameraManager.getCameraCharacteristics(id)
+                if (ch.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) continue
+                buildLensCandidate(id, ch)?.let { found += it.copy(standalone = true) }
+            } catch (e: Exception) {
+                Log.d(TAG, "hidden-lens probe: id $id unusable", e)
+            }
+        }
+        return found
+    }
+
     /** "4:3" / "16:9" for full-area sizes, "LOW" for binned (under half the max area). */
     private fun sizeLabel(w: Int, h: Int, maxArea: Long): String {
         if (w.toLong() * h < maxArea / 2) return "LOW"
@@ -1040,7 +1145,7 @@ class CameraController(private val context: Context) {
                 SessionConfiguration.SESSION_REGULAR,
                 surfaces.map { s ->
                     OutputConfiguration(s).apply {
-                        activePhysicalId?.let { setPhysicalCameraId(it) }
+                        sessionTagId?.let { setPhysicalCameraId(it) }
                     }
                 },
                 cameraExecutor,
@@ -1351,6 +1456,9 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
+        // Upper bound for probeHiddenLenses' scan -- comfortably above the largest
+        // camera id any current multi-camera phone has been seen to expose.
+        private const val HIDDEN_LENS_PROBE_RANGE = 16
         // Mirror of RecordScreen.KELVIN_STOPS / TINT_STOPS. gainsToKelvinTint returns
         // values from these sets so the metered result lands exactly on a slider tick.
         private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
