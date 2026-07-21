@@ -70,12 +70,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.ScrollState
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -213,8 +218,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         if (status >= PowerManager.THERMAL_STATUS_SEVERE &&
             _uiState.value.settings.thermalAutoStop && _uiState.value.recording
         ) {
-            _events.tryEmit("Recording stopped: thermal")
-            stopRecordingInternal()
+            if (stopRecordingInternal()) _events.tryEmit("Recording stopped: thermal")
         }
     }
 
@@ -861,15 +865,19 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // cancellation is observed.
                 val limit = _uiState.value.settings.maxClipLengthSeconds
                 if (limit > 0 && elapsed >= limit && _uiState.value.recording) {
-                    _events.tryEmit("Auto-stopped: clip length limit")
-                    stopRecordingInternal()
+                    if (stopRecordingInternal()) _events.tryEmit("Auto-stopped: clip length limit")
                     break
                 }
             }
         }
     }
 
-    private fun stopRecordingInternal() {
+    /** Returns true iff this call actually proceeded to stop the recording (false
+     * when the atomic guard below rejected it as a duplicate/racing call) --
+     * callers use this to decide whether to emit their own "stopped because X"
+     * cause toast, so a guard-rejected duplicate stop no longer emits a second,
+     * misleading cause toast alongside the first stop's real one. */
+    private fun stopRecordingInternal(): Boolean {
         // Atomic re-entry guard: this function has three uncoordinated callers
         // (toggleRecord on the main thread, thermalListener on mainExecutor, and the
         // max-length check on the Dispatchers.Default poll loop) that can each fire
@@ -886,7 +894,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         // written/dropped stats with zeros and emit a misleading "0 frames, 0 dropped"
         // toast.
         val prev = _uiState.getAndUpdate { if (it.recording && !it.busy) it.copy(busy = true) else it }
-        if (!prev.recording || prev.busy) return
+        if (!prev.recording || prev.busy) return false
         pollJob?.cancel()
         pollJob = null
         cameraOps.launch {
@@ -925,6 +933,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { it.copy(busy = false) }
             }
         }
+        return true
     }
 
     /**
@@ -1430,8 +1439,11 @@ fun RecordScreen(
                         }
                     }
                 }
+                val chipScroll = rememberScrollState()
                 Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    modifier = Modifier
+                        .horizontalScroll(chipScroll)
+                        .horizontalFadingEdge(chipScroll),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
@@ -1664,6 +1676,45 @@ private fun NavButton(text: String, enabled: Boolean = true, onClick: () -> Unit
         )
     }
 }
+
+/**
+ * Fades this composable's OWN rendered content to transparent near whichever
+ * scrollable edges of [scrollState] still have more content off-screen --
+ * distinct from a fixed dark-gradient scrim, which would look like a smudge
+ * over this app's chip row (drawn directly atop the live camera preview, with
+ * no background of its own). [BlendMode.DstIn] only multiplies this
+ * modifier's own already-drawn pixels' alpha, so nothing new is painted over
+ * the preview -- the chips themselves simply dissolve toward the edge,
+ * revealing whatever is behind them (as they always would once scrolled
+ * past), which is the same visual language a native scrollable list uses.
+ */
+private fun Modifier.horizontalFadingEdge(scrollState: ScrollState, edge: androidx.compose.ui.unit.Dp = 24.dp) =
+    this
+        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            val edgePx = edge.toPx().coerceAtMost(size.width / 2f)
+            if (scrollState.value > 0) {
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        listOf(Color.Transparent, Color.Black), startX = 0f, endX = edgePx,
+                    ),
+                    size = Size(edgePx, size.height),
+                    blendMode = BlendMode.DstIn,
+                )
+            }
+            if (scrollState.value < scrollState.maxValue) {
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        listOf(Color.Black, Color.Transparent),
+                        startX = size.width - edgePx, endX = size.width,
+                    ),
+                    topLeft = Offset(size.width - edgePx, 0f),
+                    size = Size(edgePx, size.height),
+                    blendMode = BlendMode.DstIn,
+                )
+            }
+        }
 
 @Composable
 private fun ParamChip(text: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit) {

@@ -140,6 +140,12 @@ fun SettingsScreen(onBack: () -> Unit = {}) {
                 selected = settings.defaultLensIndex,
                 onSelect = { v -> apply { it.copy(defaultLensIndex = v) } },
             )
+            EnumRow(
+                title = "Default resolution", subtitle = "Sizes are ranked largest-first per lens",
+                options = listOf(0 to "Full", 1 to "2nd", 2 to "3rd", 3 to "Smallest"),
+                selected = settings.defaultSizeIndex,
+                onSelect = { v -> apply { it.copy(defaultSizeIndex = v) } },
+            )
 
             SectionHeader("REMEMBER")
             ToggleRow(

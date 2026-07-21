@@ -216,6 +216,12 @@ object SettingsRepository {
             val next = updated.copy(
                 clipPrefix = sanitizePrefix(updated.clipPrefix),
                 freeSpaceReserveSeconds = updated.freeSpaceReserveSeconds.coerceIn(5, 120),
+                // Corruption-only guards: the UI always writes one of a fixed set of
+                // stops for these two, but a corrupted DataStore value is otherwise
+                // read back unclamped and could feed an absurd reticle-hold delay or
+                // clip-length limit straight into the recording path.
+                maxClipLengthSeconds = updated.maxClipLengthSeconds.coerceIn(0, 3600),
+                reticleHoldMs = updated.reticleHoldMs.coerceIn(100, 5000),
             )
             prefs[KEY_STARTUP_METER] = next.startupMeter.name
             prefs[KEY_DEFAULT_KELVIN] = next.defaultKelvin
