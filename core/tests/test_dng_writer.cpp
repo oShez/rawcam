@@ -75,5 +75,63 @@ TEST_CASE("dng has required CFA tags and correct pixel strip") {
   uint32_t off = tags.at(273).valueOrOffset;
   uint16_t px5; std::memcpy(&px5, &b[off + 5 * 2], 2);  // row1 col1 => 101
   CHECK(px5 == 101);
+  CHECK(tags.at(50778).valueOrOffset == 21);  // illuminant1 unset -> D65 default
+  CHECK(tags.count(50779) == 0);              // no second illuminant -> no CalibrationIlluminant2
+  CHECK(tags.count(50722) == 0);              // ...and no ColorMatrix2 either
   std::remove("t.dng");
+}
+
+TEST_CASE("dng omits ColorMatrix2/CalibrationIlluminant2 when illuminant2 is unset") {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 2; h.height = 2; h.rowStrideBytes = 4;
+  h.cfa = (uint32_t)Cfa::RGGB; h.whiteLevel = 1023;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.illuminant1 = 17;  // a real, non-D65 illuminant1 must still come through as-is
+  h.illuminant2 = 0;   // sentinel: sensor exposed no second calibration point
+  for (int i = 0; i < 9; i++) h.colorMatrix2[i] = 999.0f;  // must be ignored, not written
+  std::strcpy(h.deviceName, "Single Illuminant Test");
+  FrameMeta m{}; m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  uint8_t src[8] = {};
+
+  REQUIRE(writeDng("single_illum.dng", h, m, src));
+  int fd = io::openRead("single_illum.dng");
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+  auto tags = parseIfd(b);
+
+  CHECK(tags.at(50778).valueOrOffset == 17);  // real illuminant1 passed through
+  CHECK(tags.count(50779) == 0);
+  CHECK(tags.count(50722) == 0);
+  std::remove("single_illum.dng");
+}
+
+TEST_CASE("dng writes ColorMatrix2/CalibrationIlluminant2 when the sensor has two calibration points") {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 2; h.height = 2; h.rowStrideBytes = 4;
+  h.cfa = (uint32_t)Cfa::RGGB; h.whiteLevel = 1023;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.illuminant1 = 21;  // D65
+  h.illuminant2 = 17;  // StandardA
+  h.colorMatrix2[0] = 0.5f; h.colorMatrix2[4] = 0.6f; h.colorMatrix2[8] = 0.7f;
+  std::strcpy(h.deviceName, "Dual Illuminant Test");
+  FrameMeta m{}; m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  uint8_t src[8] = {};
+
+  REQUIRE(writeDng("dual_illum.dng", h, m, src));
+  int fd = io::openRead("dual_illum.dng");
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+  auto tags = parseIfd(b);
+
+  CHECK(tags.at(50778).valueOrOffset == 21);
+  REQUIRE(tags.count(50779) == 1);
+  CHECK(tags.at(50779).valueOrOffset == 17);
+  REQUIRE(tags.count(50722) == 1);  // ColorMatrix2 present
+  std::remove("dual_illum.dng");
 }

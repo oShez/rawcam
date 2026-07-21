@@ -3,6 +3,7 @@
 #include "rawcam/rawv_writer.h"
 #include "rawcam/rawv_reader.h"
 #include "rawcam/file_io.h"
+#include "rawcam/pack10.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -66,6 +67,16 @@ TEST_CASE("open rejects headers whose geometry contradicts frameSizeBytes") {
   CHECK(corruptAndTry([](FileHeader* h) {
     h->packMode = (uint32_t)PackMode::Packed10; h->frameSizeBytes = 4;
   }));
+  // Packed12: frameSizeBytes below packed12Size(w*h)
+  CHECK(corruptAndTry([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed12; h->frameSizeBytes = 4;
+  }));
+  // Packed12: pixel count not a multiple of 2 -> unpack12 walks off the tail
+  // group's buffers during export.
+  CHECK(corruptAndTry([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed12;
+    h->width = 3; h->height = 1; h->frameSizeBytes = (uint32_t)packed12Size(3);
+  }));
   // absurd geometry (multi-GB allocations downstream)
   CHECK(corruptAndTry([](FileHeader* h) { h->width = 1u << 30; }));
   CHECK(corruptAndTry([](FileHeader* h) { h->height = 0; }));
@@ -117,6 +128,15 @@ TEST_CASE("open accepts valid packed10 and clamps an overstated frameCount") {
   });
   auto r2 = RawvReader::open("ok.rawv");
   CHECK(r2 != nullptr);
+  std::remove("ok.rawv");
+
+  // A well-formed Packed12 header (w*h % 2 == 0, frameSizeBytes == packed12Size).
+  rebuildWith([](FileHeader* h) {
+    h->packMode = (uint32_t)PackMode::Packed12;
+    h->width = 4; h->height = 2; h->frameSizeBytes = 12;  // packed12Size(8)
+  });
+  auto r3 = RawvReader::open("ok.rawv");
+  CHECK(r3 != nullptr);
   std::remove("ok.rawv");
 }
 

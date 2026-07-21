@@ -11,6 +11,10 @@ add_library(rawcam_core STATIC
   src/exporter.cpp)
 target_include_directories(rawcam_core PUBLIC include)
 
+# exporter.cpp parallelizes frame export across a std::thread pool.
+find_package(Threads REQUIRED)
+target_link_libraries(rawcam_core PUBLIC Threads::Threads)
+
 if(NOT ANDROID)
   enable_testing()
   file(GLOB TEST_SOURCES tests/*.cpp)

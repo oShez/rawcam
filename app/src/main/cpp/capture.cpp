@@ -89,11 +89,18 @@ void Capture::processImage(AImage* image) {
 
     FileHeader hdr = headerTemplate_;
     hdr.rowStrideBytes = (uint32_t)rowStride_;
-    if ((PackMode)hdr.packMode == PackMode::Packed10) {
-      hdr.frameSizeBytes = (uint32_t)packed10Size((size_t)width_ * (size_t)height_);
-      packBuf_.resize(hdr.frameSizeBytes);
-    } else {
-      hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
+    switch ((PackMode)hdr.packMode) {
+      case PackMode::Packed10:
+        hdr.frameSizeBytes = (uint32_t)packed10Size((size_t)width_ * (size_t)height_);
+        packBuf_.resize(hdr.frameSizeBytes);
+        break;
+      case PackMode::Packed12:
+        hdr.frameSizeBytes = (uint32_t)packed12Size((size_t)width_ * (size_t)height_);
+        packBuf_.resize(hdr.frameSizeBytes);
+        break;
+      case PackMode::Raw16:
+        hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
+        break;
     }
     headerTemplate_ = hdr;
     writer_ = RawvWriter::create(path_, hdr);
@@ -112,15 +119,22 @@ void Capture::processImage(AImage* image) {
   meta.droppedSoFar = (uint32_t)dropped_.load();
 
   bool ok;
-  if ((PackMode)headerTemplate_.packMode == PackMode::Packed10) {
+  const PackMode mode = (PackMode)headerTemplate_.packMode;
+  if (mode == PackMode::Packed10 || mode == PackMode::Packed12) {
     // De-stride while packing: address each row via the original sensor
     // stride, pack exactly `width_` pixels per row into the contiguous
     // preallocated scratch buffer.
-    const size_t packedRowBytes = packed10Size((size_t)width_);
+    const size_t packedRowBytes =
+        mode == PackMode::Packed10 ? packed10Size((size_t)width_) : packed12Size((size_t)width_);
     for (int32_t row = 0; row < height_; row++) {
       const uint16_t* srcRow =
           reinterpret_cast<const uint16_t*>(data + (size_t)row * (size_t)rowStride_);
-      pack10(srcRow, (size_t)width_, packBuf_.data() + (size_t)row * packedRowBytes);
+      uint8_t* dstRow = packBuf_.data() + (size_t)row * packedRowBytes;
+      if (mode == PackMode::Packed10) {
+        pack10(srcRow, (size_t)width_, dstRow);
+      } else {
+        pack12(srcRow, (size_t)width_, dstRow);
+      }
     }
     ok = writer_->writeFrame(meta, packBuf_.data());
   } else {
@@ -159,7 +173,8 @@ void Capture::writerLoop() {
 
 jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int32_t height,
                        int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
-                       const float colorMatrix1[9], int32_t fpsNum, int32_t fpsDen,
+                       const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
+                       const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
                        const std::string& deviceName) {
   if (reader_ != nullptr) return nullptr;  // already recording
 
@@ -191,12 +206,23 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   hdr.width = (uint32_t)width;
   hdr.height = (uint32_t)height;
   hdr.rowStrideBytes = 0;  // filled in on first frame
-  hdr.packMode = (uint32_t)PackMode::Packed10;
+  // Pick the tightest packing that can hold this sensor's actual range without
+  // truncation. Packed10/Packed12 mask to 0x3FF/0xFFF respectively (see
+  // pack10.cpp) -- silently corrupting samples above their range -- so the
+  // choice must be driven by the real white level, not assumed from whatever
+  // device this shipped on first (Packed10 alone was fine on the Pixel 7 Pro's
+  // 10-bit sensor but is NOT safe on hardware with a wider white level).
+  hdr.packMode = (uint32_t)(whiteLevel <= 0x3FF   ? PackMode::Packed10
+                             : whiteLevel <= 0xFFF ? PackMode::Packed12
+                                                    : PackMode::Raw16);
   hdr.cfa = (uint32_t)cfa;
   hdr.whiteLevel = (uint32_t)whiteLevel;
   for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];
   for (int i = 0; i < 9; i++) hdr.colorMatrix1[i] = colorMatrix1[i];
   hdr.asShotNeutral[0] = hdr.asShotNeutral[1] = hdr.asShotNeutral[2] = 0.0f;
+  hdr.illuminant1 = (uint32_t)illuminant1;
+  hdr.illuminant2 = (uint32_t)illuminant2;
+  for (int i = 0; i < 9; i++) hdr.colorMatrix2[i] = colorMatrix2[i];
   hdr.fpsNum = (uint32_t)fpsNum;
   hdr.fpsDen = (uint32_t)fpsDen;
   hdr.frameSizeBytes = 0;  // filled in on first frame

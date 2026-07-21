@@ -65,12 +65,66 @@ static void writePacked10Clip(const char* path, int frames) {
   CHECK(w->finalize());
 }
 
+// Mirrors packed10Header/writePacked10Clip for the Packed12 path.
+static FileHeader packed12Header(uint32_t frameSize) {
+  FileHeader h = packed10Header(frameSize);
+  h.packMode = (uint32_t)PackMode::Packed12;
+  h.whiteLevel = 4095;
+  return h;
+}
+
+static void writePacked12Clip(const char* path, int frames) {
+  const size_t count = 4 * 2;  // width * height
+  const uint32_t packedSize = (uint32_t)packed12Size(count);
+  auto w = RawvWriter::create(path, packed12Header(packedSize));
+  std::vector<uint8_t> packed(packedSize);
+  std::vector<uint16_t> px(count);
+  for (int i = 0; i < frames; i++) {
+    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i;
+    for (size_t p = 0; p < count; p++) px[p] = (uint16_t)((i * 10 + (int)p) & 0xFFF);
+    pack12(px.data(), count, packed.data());
+    CHECK(w->writeFrame(m, packed.data()));
+  }
+  CHECK(w->finalize());
+}
+
+TEST_CASE("exportClip writes one DNG per frame (Packed12 unpack path)") {
+  const char* clipPath = "export_test12.rawv";
+  const char* outDir = "export_test12_out";
+  writePacked12Clip(clipPath, 2);
+  makeDir(outDir);
+
+  bool ok = exportClip(clipPath, outDir, [](uint64_t, uint64_t) { return true; });
+  CHECK(ok);
+
+  for (int i = 0; i < 2; i++) {
+    char name[64];
+    std::snprintf(name, sizeof name, "%s/%06d.dng", outDir, i);
+    int fd = io::openRead(name);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+      CHECK(io::fileSize(fd) > 0);
+      io::closeFd(fd);
+    }
+    std::remove(name);
+  }
+
+  std::remove(clipPath);
+  removeDir(outDir);
+}
+
 TEST_CASE("exportClip writes one DNG per frame (Packed10 unpack path) and reports progress") {
   const char* clipPath = "export_test.rawv";
   const char* outDir = "export_test_out";
   writePacked10Clip(clipPath, 3);
   makeDir(outDir);
 
+  // Frames are processed by a worker pool (see exporter.cpp); progress is
+  // still only ever invoked from the original caller thread (never a worker),
+  // so this callback needs no locking of its own. But because several frames
+  // can finish between wakeups of that reporting thread, a caller may see
+  // fewer than one call per frame -- only strict ordering and the final
+  // (total,total) call are guaranteed, not a 1:1 call-per-frame count.
   std::vector<std::pair<uint64_t, uint64_t>> calls;
   bool ok = exportClip(clipPath, outDir, [&](uint64_t done, uint64_t total) {
     calls.push_back({done, total});
@@ -78,7 +132,8 @@ TEST_CASE("exportClip writes one DNG per frame (Packed10 unpack path) and report
   });
 
   CHECK(ok);
-  REQUIRE(calls.size() == 3);
+  REQUIRE(calls.size() >= 1);
+  for (size_t i = 1; i < calls.size(); i++) CHECK(calls[i].first > calls[i - 1].first);
   CHECK(calls.back().first == 3);
   CHECK(calls.back().second == 3);
 
@@ -107,19 +162,21 @@ TEST_CASE("exportClip stops and returns false when progress callback cancels") {
   int callCount = 0;
   bool ok = exportClip(clipPath, outDir, [&](uint64_t /*done*/, uint64_t /*total*/) {
     callCount++;
-    return false;  // cancel immediately after the first frame
+    return false;  // cancel on the first progress callback
   });
 
+  // With a worker pool, several frames can already be claimed (and finish
+  // writing) before the caller's very first "cancel" is observed, so which
+  // frame files exist afterward is no longer deterministic -- only that the
+  // export overall reports non-completion is guaranteed.
   CHECK_FALSE(ok);
-  CHECK(callCount == 1);
-
-  int fd0 = io::openRead("export_cancel_out/000000.dng");
-  CHECK(fd0 >= 0);
-  if (fd0 >= 0) io::closeFd(fd0);
-  int fd1 = io::openRead("export_cancel_out/000001.dng");
-  CHECK(fd1 < 0);
+  CHECK(callCount >= 1);
 
   std::remove(clipPath);
-  std::remove("export_cancel_out/000000.dng");
+  for (int i = 0; i < 3; i++) {
+    char name[64];
+    std::snprintf(name, sizeof name, "%s/%06d.dng", outDir, i);
+    std::remove(name);
+  }
   removeDir(outDir);
 }

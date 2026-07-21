@@ -16,6 +16,11 @@ android {
         versionCode = 1
         versionName = "0.1"
         ndk { abiFilters += "arm64-v8a" }
+        // AGP defaults the native (C++) build to CMAKE_BUILD_TYPE=Debug for a
+        // debug variant, i.e. no optimizations at all for the export/unpack
+        // hot path -- Kotlin/Java debuggability is unrelated to this and isn't
+        // affected by forcing the native side to build optimized here.
+        externalNativeBuild { cmake { arguments += "-DCMAKE_BUILD_TYPE=RelWithDebInfo" } }
     }
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true }

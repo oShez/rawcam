@@ -5,10 +5,13 @@ object NativeBridge {
     external fun nativeVersion(): String
     external fun nativeBenchmarkWrite(path: String, frameBytes: Int, frames: Int): Double
 
-    // returns a Surface for the Camera2 RAW target, or null
+    // returns a Surface for the Camera2 RAW target, or null. illuminant1/2 are
+    // DNG/EXIF LightSource codes (illuminant2 == 0 means the sensor exposed no
+    // second calibration point, and colorMatrix2 is then ignored).
     external fun nativeStartRecording(path: String, width: Int, height: Int,
         cfa: Int, whiteLevel: Int, blackLevel: IntArray /*4*/,
-        colorMatrix1: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,
+        colorMatrix1: FloatArray /*9*/, illuminant1: Int, illuminant2: Int,
+        colorMatrix2: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,
         deviceName: String): android.view.Surface?
     external fun nativePushFrameMeta(timestampNs: Long, iso: Int, exposureNs: Long,
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)

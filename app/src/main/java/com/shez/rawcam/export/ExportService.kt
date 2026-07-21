@@ -40,6 +40,14 @@ class ExportService : Service() {
     private val cancelled = AtomicBoolean(false)
     private val exportExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+    // notify() is a Binder IPC to system_server that rebuilds a Notification --
+    // calling it on every single exported frame (thousands per clip) made the
+    // notification plumbing a bottleneck in its own right, serialized into the
+    // same loop that's supposed to be writing frames as fast as possible. Only
+    // the thread running exportExecutor's task touches this, so a plain var is
+    // fine -- no cross-thread access.
+    private var lastNotifyElapsedMs = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -67,7 +75,7 @@ class ExportService : Service() {
             File(outDir).mkdirs()
             val ok = try {
                 NativeBridge.nativeExportClip(rawvPath, outDir) { done, total ->
-                    if (!cancelled.get()) updateNotification(clipName, done, total)
+                    if (!cancelled.get()) maybeUpdateNotification(clipName, done, total)
                     !cancelled.get()
                 }
             } catch (e: Exception) {
@@ -127,6 +135,17 @@ class ExportService : Service() {
         mgr.notify(NOTIFICATION_ID, buildNotification(clipName, done, total))
     }
 
+    // Always updates on the final frame (so the notification reaches 100%),
+    // otherwise at most once per NOTIFY_INTERVAL_MS regardless of how many
+    // frames complete in between.
+    private fun maybeUpdateNotification(clipName: String, done: Long, total: Long) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val isFinal = total > 0 && done >= total
+        if (!isFinal && now - lastNotifyElapsedMs < NOTIFY_INTERVAL_MS) return
+        lastNotifyElapsedMs = now
+        updateNotification(clipName, done, total)
+    }
+
     enum class ExportStatus { RUNNING, DONE, FAILED, CANCELLED }
 
     companion object {
@@ -137,6 +156,7 @@ class ExportService : Service() {
         private const val TAG = "ExportService"
         private const val CHANNEL_ID = "export"
         private const val NOTIFICATION_ID = 1001
+        private const val NOTIFY_INTERVAL_MS = 300L
 
         // Keyed by clip name; last-known status per export, polled by ClipsScreen
         // to refresh without needing a bound service connection.

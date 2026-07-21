@@ -59,6 +59,11 @@ class CameraController(private val context: Context) {
         val blackLevel: IntArray, val colorMatrix1: FloatArray,
         val isoRange: ClosedRange<Int>, val maxFps: Int,
         val minFocusDiopters: Float, val deviceName: String,
+        /** DNG/EXIF LightSource codes + second calibration matrix, straight from
+         * the active [LensInfo] -- illuminant2==0 means no second calibration
+         * point (colorMatrix2 is then all-zero and must not be written to the
+         * DNG as if it were real -- see dng_writer.cpp). */
+        val illuminant1: Int, val illuminant2: Int, val colorMatrix2: FloatArray,
     )
 
     /** One selectable RAW output size of a lens. [label] is what the UI shows. */
@@ -393,7 +398,8 @@ class CameraController(private val context: Context) {
         val spec = rawSpec
         val raw = NativeBridge.nativeStartRecording(
             path, spec.width, spec.height, spec.cfa, spec.whiteLevel,
-            spec.blackLevel, spec.colorMatrix1, /* fpsNum = */ fps, /* fpsDen = */ 1,
+            spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
+            spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
             spec.deviceName,
         ) ?: return false
 
@@ -984,12 +990,42 @@ class CameraController(private val context: Context) {
 
     private fun specFor(lens: LensInfo, sizeIndex: Int): RawSpec {
         val size = lens.sizes[sizeIndex]
+        // A genuine second calibration point requires BOTH the matrix and its
+        // illuminant code; a sensor exposing only one of the pair (seen on some
+        // hardware) gets treated as single-illuminant rather than guessing.
+        val hasSecondIlluminant = lens.colorMatrix2 != null && lens.illuminant2 != null
+
+        // DNG readers (Resolve included) conventionally assume CalibrationIlluminant1
+        // is the LOWER color temperature and CalibrationIlluminant2 the HIGHER one --
+        // Adobe's own DNG interpolation code is built around that ordering, even
+        // though the spec doesn't technically mandate it. A sensor's own
+        // SENSOR_REFERENCE_ILLUMINANT1/2 has no such guarantee (this device reports
+        // illuminant1=D65/~6504K and illuminant2=StandardA/~2856K -- backwards from
+        // the convention), so sort by CCT here rather than trusting native order.
+        // gainsFor()'s own interpolation is order-agnostic (symmetric inverse-CCT
+        // ratio), so this reordering only affects what gets written to the DNG.
+        var exportIlluminant1 = lens.illuminant1 ?: 21  // 21 = D65, DNG's implicit default
+        var exportColorMatrix1 = lens.colorMatrix1
+        var exportIlluminant2 = if (hasSecondIlluminant) lens.illuminant2!! else 0
+        var exportColorMatrix2 = if (hasSecondIlluminant) lens.colorMatrix2!! else FloatArray(9)
+        if (hasSecondIlluminant) {
+            val cct1 = illuminantCct(exportIlluminant1) ?: 2856
+            val cct2 = illuminantCct(exportIlluminant2) ?: 6504
+            if (cct1 > cct2) {
+                val ti = exportIlluminant1; exportIlluminant1 = exportIlluminant2; exportIlluminant2 = ti
+                val tm = exportColorMatrix1; exportColorMatrix1 = exportColorMatrix2; exportColorMatrix2 = tm
+            }
+        }
+
         return RawSpec(
             width = size.width, height = size.height, cfa = lens.cfa,
             whiteLevel = lens.whiteLevel, blackLevel = lens.blackLevel,
-            colorMatrix1 = lens.colorMatrix1, isoRange = lens.isoRange,
+            colorMatrix1 = exportColorMatrix1, isoRange = lens.isoRange,
             maxFps = size.maxFps, minFocusDiopters = lens.minFocusDiopters,
             deviceName = Build.MODEL,
+            illuminant1 = exportIlluminant1,
+            illuminant2 = exportIlluminant2,
+            colorMatrix2 = exportColorMatrix2,
         )
     }
 

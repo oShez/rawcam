@@ -30,7 +30,8 @@ class Capture {
   // first delivered frame so the real row stride goes into the file header.
   jobject start(JNIEnv* env, const std::string& path, int32_t width, int32_t height,
                  int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
-                 const float colorMatrix1[9], int32_t fpsNum, int32_t fpsDen,
+                 const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
+                 const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
                  const std::string& deviceName);
 
   // Records per-frame metadata keyed by exact sensor timestamp, for the writer

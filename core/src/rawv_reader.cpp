@@ -28,6 +28,10 @@ bool headerSane(const FileHeader& h) {
       // with the dimension cap, bounds the allocation implicitly.
       return pixels % 4 == 0 &&
              (uint64_t)h.frameSizeBytes == packed10Size(pixels);
+    case PackMode::Packed12:
+      // Same reasoning as Packed10: unpack12 consumes whole 2-pixel groups.
+      return pixels % 2 == 0 &&
+             (uint64_t)h.frameSizeBytes == packed12Size(pixels);
     case PackMode::Raw16:
       return h.rowStrideBytes >= h.width * 2 &&
              (uint64_t)h.frameSizeBytes >= (uint64_t)h.rowStrideBytes * h.height &&

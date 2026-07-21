@@ -102,11 +102,23 @@ class Dng {
 bool writeDng(const std::string& path, const FileHeader& hdr,
               const FrameMeta& meta, const uint8_t* raw16) {
   const uint32_t w = hdr.width, h = hdr.height;
-  // de-stride into contiguous pixels
-  std::vector<uint8_t> pixels((size_t)w * h * 2);
-  for (uint32_t r = 0; r < h; r++)
-    std::memcpy(pixels.data() + (size_t)r * w * 2,
-                raw16 + (size_t)r * hdr.rowStrideBytes, (size_t)w * 2);
+  const size_t pixelBytes = (size_t)w * h * 2;
+  // De-stride into a contiguous buffer only when the source actually has row
+  // padding to strip. The packed10/12 export path (exporter.cpp) already hands
+  // us a stride-free buffer -- rowStrideBytes is synthesized to width*2 for
+  // it precisely because unpack10/unpack12 write contiguously -- so on that
+  // (common) path this would otherwise be a wasted extra full-frame memcpy.
+  std::vector<uint8_t> destrided;
+  const uint8_t* pixels;
+  if (hdr.rowStrideBytes == w * 2) {
+    pixels = raw16;
+  } else {
+    destrided.resize(pixelBytes);
+    for (uint32_t r = 0; r < h; r++)
+      std::memcpy(destrided.data() + (size_t)r * w * 2,
+                  raw16 + (size_t)r * hdr.rowStrideBytes, (size_t)w * 2);
+    pixels = destrided.data();
+  }
 
   static const uint8_t cfaBytes[4][4] = {
       {0, 1, 1, 2}, {1, 0, 2, 1}, {1, 2, 0, 1}, {2, 1, 1, 0}};
@@ -145,8 +157,21 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   float wb[3] = {meta.wbNeutral[0], meta.wbNeutral[1], meta.wbNeutral[2]};
   if (wb[0] == 0 && wb[1] == 0 && wb[2] == 0) { wb[0] = wb[1] = wb[2] = 1.0f; }
   d.addRationals(50728, RATIONAL, wb, 3);
-  d.addShort(50778, 21);
-  return d.write(path, pixels.data(), (uint32_t)pixels.size());
+  d.addShort(50778, (uint16_t)(hdr.illuminant1 != 0 ? hdr.illuminant1 : 21));
+  // Only emit the second calibration point when the sensor actually exposed one
+  // (SENSOR_REFERENCE_ILLUMINANT2/SENSOR_COLOR_TRANSFORM2 both present). A
+  // single-illuminant DNG is valid and expected on those sensors; writing a
+  // fabricated ColorMatrix2 would be worse than omitting it. But when a real
+  // second point exists and is silently dropped, converters must extrapolate
+  // CCT/tint from one calibration point instead of interpolating between two --
+  // this is what made DaVinci Resolve show an implausible CCT and made nudging
+  // WB/tint destabilize the image on hardware with two genuinely different
+  // per-illuminant calibration matrices (observed on the Xiaomi 14 Ultra).
+  if (hdr.illuminant2 != 0) {
+    d.addShort(50779, (uint16_t)hdr.illuminant2);
+    d.addRationals(50722, SRATIONAL, hdr.colorMatrix2, 9);
+  }
+  return d.write(path, pixels, (uint32_t)pixelBytes);
 }
 
 }  // namespace rawcam
