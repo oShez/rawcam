@@ -27,6 +27,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,7 +47,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -58,6 +62,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -108,6 +113,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
@@ -1714,13 +1720,40 @@ private fun LockToggle(locked: Boolean, onClick: () -> Unit) {
  * only way to change a locked value is to unlock it first.
  */
 // internal (not private): reused by SettingsScreen.kt's SliderRow.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun <T> TickedSlider(
     stops: List<T>, selected: T, labelFor: (T) -> String,
     enabled: Boolean = true, locked: Boolean = false, onToggleLock: (() -> Unit)? = null,
     onSelect: (T) -> Unit,
 ) {
+    val maxIndex = (stops.size - 1).coerceAtLeast(0)
     val index = stops.indexOf(selected).coerceAtLeast(0)
+    // SliderState (not the classic value=/onValueChange= Slider) is what's needed to
+    // get a `thumb` slot at all -- the classic overload has no such slot, and the
+    // thumb's exact x-position (needed to place ValueBubble precisely above it,
+    // rather than guessing at Material3's internal thumb-inset math) is only
+    // available this way.
+    val sliderState = remember(maxIndex) {
+        SliderState(value = index.toFloat(), steps = (stops.size - 2).coerceAtLeast(0), valueRange = 0f..maxIndex.toFloat())
+    }
+    // One-way sync IN: keep the slider's position current when `selected` changes
+    // for a reason other than this slider's own drag (tap-to-meter, lens-switch
+    // clamping in coerceToMode, lock toggles reverting a value). Guarded so this
+    // doesn't fight the drag-originated write below.
+    LaunchedEffect(index) {
+        if (sliderState.value != index.toFloat()) sliderState.value = index.toFloat()
+    }
+    // One-way sync OUT: SliderState has no onValueChange callback (unlike the
+    // classic overload this replaced) -- observing .value via snapshotFlow is the
+    // supported way to react live to drag, matching the old live-while-dragging
+    // behavior (not just on release).
+    LaunchedEffect(sliderState, stops) {
+        snapshotFlow { sliderState.value }.collect { v ->
+            val newSelected = stops.getOrNull(v.roundToInt().coerceIn(0, maxIndex)) ?: return@collect
+            if (newSelected != selected) onSelect(newSelected)
+        }
+    }
     Column {
         if (onToggleLock != null) {
             Row(
@@ -1740,18 +1773,44 @@ internal fun <T> TickedSlider(
                 labelFor(stops.first()), color = RawCamColors.Muted,
                 fontSize = 11.sp, fontFamily = FontFamily.Monospace,
             )
+            val thumbInteraction = remember { MutableInteractionSource() }
             Slider(
-                value = index.toFloat(),
-                onValueChange = { v -> onSelect(stops[v.roundToInt().coerceIn(0, stops.size - 1)]) },
-                valueRange = 0f..(stops.size - 1).toFloat(),
-                steps = (stops.size - 2).coerceAtLeast(0),
+                state = sliderState,
                 enabled = enabled && !locked,
                 modifier = Modifier.weight(1f),
+                thumb = { state ->
+                    val thumbValue = state.value.roundToInt().coerceIn(0, maxIndex)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        ValueBubble(labelFor(stops.getOrElse(thumbValue) { selected }))
+                        Spacer(Modifier.height(4.dp))
+                        SliderDefaults.Thumb(interactionSource = thumbInteraction, enabled = enabled && !locked)
+                    }
+                },
             )
             Text(
                 labelFor(stops.last()), color = RawCamColors.Muted,
                 fontSize = 11.sp, fontFamily = FontFamily.Monospace,
             )
         }
+    }
+}
+
+/** Small pill floating above a [TickedSlider]'s thumb showing its exact current
+ * value -- placed in the slider's `thumb` slot so it tracks the real thumb
+ * position exactly (no guessing at Material3's internal thumb-inset math). Always
+ * visible (not just while dragging): the point is a same-glance value readout
+ * right where the thumb is, not a drag-only tooltip. */
+@Composable
+private fun ValueBubble(text: String) {
+    Surface(
+        color = Color(0xE60A0B0D),
+        shape = RoundedCornerShape(6.dp),
+        border = BorderStroke(1.dp, RawCamColors.Accent),
+    ) {
+        Text(
+            text, color = RawCamColors.OnSurface,
+            fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
     }
 }
