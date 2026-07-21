@@ -147,6 +147,14 @@ data class RecordUiState(
     val sizeIndex: Int = 0,
     val kelvin: Int = 5600,
     val tint: Int = 0,
+    // Locking a slider freezes its value: the slider itself is disabled (no manual
+    // drag) and meterAt()'s tap-to-meter result skips that field entirely, whatever
+    // MeterScope is active. Session-only (not persisted via CaptureState).
+    val isoLocked: Boolean = false,
+    val shutterLocked: Boolean = false,
+    val focusLocked: Boolean = false,
+    val kelvinLocked: Boolean = false,
+    val tintLocked: Boolean = false,
     val metering: Boolean = false,
     val meterPoint: androidx.compose.ui.geometry.Offset? = null,
     val settings: Settings = Settings(),
@@ -373,9 +381,21 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * keeps exposure an integer multiple of the flicker period and avoids banding under
      * artificial light; OFF keeps the old flat list. */
     fun shutterStops(fps: Int): List<Int> = when (_uiState.value.settings.mainsFreq) {
-        MainsFreq.OFF  -> listOf(24, 48, 60, 120, 240, 500, 1000)
-        MainsFreq.HZ50 -> listOf(24, 50, 100, 200, 400, 500, 1000)
-        MainsFreq.HZ60 -> listOf(24, 60, 120, 240, 500, 1000)
+        // No flicker constraint -- densified with more standard shutter speeds.
+        MainsFreq.OFF -> listOf(
+            24, 30, 40, 48, 50, 60, 75, 90, 100, 120, 150, 180, 200, 240, 250, 300,
+            350, 400, 500, 600, 750, 800, 1000,
+        )
+        // Every entry below (besides the fixed 24 anchor) stays a clean multiple of
+        // 50 -- more of them than before, but the anti-flicker property from the
+        // original list is preserved exactly, just at finer granularity.
+        MainsFreq.HZ50 -> listOf(
+            24, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000,
+        )
+        // Same idea, multiples of 60.
+        MainsFreq.HZ60 -> listOf(
+            24, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 840, 900, 960, 1000,
+        )
     }.filter { it > fps }
 
     /** FPS choices valid for [spec]. Never empty. Takes the mode's spec explicitly
@@ -493,30 +513,41 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setIso(iso: Int) {
+        if (_uiState.value.isoLocked) return
         _uiState.update { it.copy(iso = iso) }
         pushManual()
         persistCaptureState()
     }
 
     fun setShutterIndex(index: Int) {
+        if (_uiState.value.shutterLocked) return
         _uiState.update { it.copy(shutterIndex = index) }
         pushManual()
         persistCaptureState()
     }
 
     fun setFocus(diopters: Float) {
+        if (_uiState.value.focusLocked) return
         _uiState.update { it.copy(focusDiopters = diopters) }
         pushManual()
         persistCaptureState()
     }
 
     fun setKelvin(k: Int) {
+        if (_uiState.value.kelvinLocked) return
         _uiState.update { it.copy(kelvin = k) }
         pushManual()
         persistCaptureState()
     }
 
+    fun toggleIsoLock() = _uiState.update { it.copy(isoLocked = !it.isoLocked) }
+    fun toggleShutterLock() = _uiState.update { it.copy(shutterLocked = !it.shutterLocked) }
+    fun toggleFocusLock() = _uiState.update { it.copy(focusLocked = !it.focusLocked) }
+    fun toggleKelvinLock() = _uiState.update { it.copy(kelvinLocked = !it.kelvinLocked) }
+    fun toggleTintLock() = _uiState.update { it.copy(tintLocked = !it.tintLocked) }
+
     fun setTint(t: Int) {
+        if (_uiState.value.tintLocked) return
         _uiState.update { it.copy(tint = t) }
         pushManual()
         persistCaptureState()
@@ -561,8 +592,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         val scope = _uiState.value.settings.meterScope
                         val newIso = nearestIso(m.iso)
                         val newShutter = nearestShutterIndex(m.exposureNs)
+                        // wbLocked tracks whether EITHER WB slider was locked at the moment
+                        // the meter converged -- read once before the update so the
+                        // setWbOverride gate below (outside _uiState.update) sees the same
+                        // decision the copy() below made, not a value from a later recompose.
+                        val preLock = _uiState.value
+                        val wbLocked = preLock.kelvinLocked || preLock.tintLocked
                         _uiState.update { cur ->
-                            when (scope) {
+                            val scoped = when (scope) {
                                 MeterScope.EVERYTHING -> cur.copy(
                                     iso = newIso, shutterIndex = newShutter,
                                     focusDiopters = m.focusDiopters, kelvin = m.kelvin, tint = m.tint,
@@ -572,6 +609,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                                 )
                                 MeterScope.WB_ONLY -> cur.copy(kelvin = m.kelvin, tint = m.tint)
                             }
+                            // Locked sliders are immune to tap-to-meter no matter what scope
+                            // is active -- fall back to cur's pre-meter value for anything
+                            // the user has frozen, on top of the scope's own field selection.
+                            scoped.copy(
+                                iso = if (cur.isoLocked) cur.iso else scoped.iso,
+                                shutterIndex = if (cur.shutterLocked) cur.shutterIndex else scoped.shutterIndex,
+                                focusDiopters = if (cur.focusLocked) cur.focusDiopters else scoped.focusDiopters,
+                                kelvin = if (cur.kelvinLocked) cur.kelvin else scoped.kelvin,
+                                tint = if (cur.tintLocked) cur.tint else scoped.tint,
+                            )
                         }
                         // Ordering note (WB override, CameraController.wbOverride):
                         // pushManual() below calls controller.updateManual(..., kelvin=
@@ -590,8 +637,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         // has -- the clear-on-change check does NOT fire, wbOverride (and
                         // the anchor) survive untouched, and setWbOverride is skipped
                         // below -- applied WB genuinely does not change under this scope.
+                        // wbLocked adds one more skip case: setWbOverride applies the raw
+                        // metered gains directly, bypassing the kelvin/tint slider model
+                        // entirely -- if either WB slider is locked, applying it would
+                        // silently shift the recorded white balance even though the slider
+                        // itself didn't move. Deferring to pushManual()'s already-locked-
+                        // aware kelvin/tint is the correct fallback in that case.
                         pushManual()
-                        if (scope != MeterScope.EXPOSURE_FOCUS) controller.setWbOverride(m.wbGains)
+                        if (scope != MeterScope.EXPOSURE_FOCUS && !wbLocked) controller.setWbOverride(m.wbGains)
                         persistCaptureState()
                     } else if (!quiet) {
                         _events.tryEmit("Couldn't meter — try again")
@@ -908,8 +961,13 @@ private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): 
     }
 }
 
-private val NICE_ISO_STOPS =
-    listOf(50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400)
+// Standard 1/3-stop photographic ISO scale (vs the old full-stop-only list) for
+// much finer manual control.
+private val NICE_ISO_STOPS = listOf(
+    50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600,
+    2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600,
+    32000, 40000, 51200, 64000, 80000, 102400,
+)
 
 /** Standard full-stop ISO values within [range], with the range's true endpoints spliced in
  *  so the slider's ends always reach what the lens actually supports. */
@@ -952,8 +1010,9 @@ private fun gridPoint(x: Float, y: Float): Offset = Offset(x, y)
 
 // internal (not private): reused by SettingsScreen.kt's SliderRow for the
 // default-white-balance / default-tint settings, which use the same stop lists.
-internal val KELVIN_STOPS = listOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
-internal val TINT_STOPS = (-50..50 step 5).toList()
+// 100K steps across the full range (vs the old ~10 coarse presets) for finer control.
+internal val KELVIN_STOPS = (2000..10000 step 100).toList()
+internal val TINT_STOPS = (-50..50 step 2).toList()
 
 private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB }
 
@@ -1290,6 +1349,8 @@ fun RecordScreen(
                                         stops = isoStops(spec.isoRange),
                                         selected = state.iso,
                                         labelFor = { "$it" },
+                                        locked = state.isoLocked,
+                                        onToggleLock = { viewModel.toggleIsoLock() },
                                         onSelect = { viewModel.setIso(it) },
                                     )
                                 }
@@ -1299,6 +1360,8 @@ fun RecordScreen(
                                         stops = shutterStops,
                                         selected = shutterDenom,
                                         labelFor = { shutterLabel(it, state.fps, state.settings.shutterDisplay) },
+                                        locked = state.shutterLocked,
+                                        onToggleLock = { viewModel.toggleShutterLock() },
                                         onSelect = { viewModel.setShutterIndex(shutterStops.indexOf(it)) },
                                     )
                                 }
@@ -1309,6 +1372,8 @@ fun RecordScreen(
                                         selected = state.focusDiopters,
                                         labelFor = ::focusLabel,
                                         enabled = spec.minFocusDiopters > 0f,
+                                        locked = state.focusLocked,
+                                        onToggleLock = { viewModel.toggleFocusLock() },
                                         onSelect = { viewModel.setFocus(it) },
                                     )
                                 }
@@ -1318,6 +1383,8 @@ fun RecordScreen(
                                         stops = KELVIN_STOPS,
                                         selected = state.kelvin,
                                         labelFor = { "${it}K" },
+                                        locked = state.kelvinLocked,
+                                        onToggleLock = { viewModel.toggleKelvinLock() },
                                         onSelect = { viewModel.setKelvin(it) },
                                     )
                                     Spacer(Modifier.height(8.dp))
@@ -1325,6 +1392,8 @@ fun RecordScreen(
                                         stops = TINT_STOPS,
                                         selected = state.tint,
                                         labelFor = { if (it > 0) "+$it" else "$it" },
+                                        locked = state.tintLocked,
+                                        onToggleLock = { viewModel.toggleTintLock() },
                                         onSelect = { viewModel.setTint(it) },
                                     )
                                 }
@@ -1589,34 +1658,78 @@ private fun ParamLabel(text: String) {
     Text(text, color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
 }
 
+/** Small bordered pill toggling a slider's lock state -- same visual language as
+ * [ParamChip]/[NavButton] (dark surface, border color carries the state). While
+ * locked the owning [TickedSlider] disables its drag AND meterAt() skips that
+ * field on every tap-to-meter, regardless of MeterScope. */
+@Composable
+private fun LockToggle(locked: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = Color(0xB80A0B0D),
+        shape = CircleShape,
+        border = BorderStroke(1.dp, if (locked) RawCamColors.Accent else RawCamColors.Outline),
+    ) {
+        Text(
+            if (locked) "LOCKED" else "LOCK",
+            color = if (locked) RawCamColors.Accent else RawCamColors.Muted,
+            fontSize = 10.sp, letterSpacing = 1.sp,
+            modifier = Modifier
+                .clickable(onClick = onClick)
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+        )
+    }
+}
+
 /**
  * Discrete slider fixing the two concrete complaints about the old bare sliders:
  * endpoint labels give a scale reference, and snapping to [stops] makes it
  * possible to land on exact values. [stops] must have at least 2 entries.
+ *
+ * [locked]/[onToggleLock] are opt-in (default null skips the lock row entirely,
+ * e.g. SettingsScreen.kt's SliderRow, which has no meter to guard against): when
+ * provided, a [LockToggle] + the current value ([labelFor] of [selected]) render
+ * above the slider itself, and the slider is force-disabled while locked so the
+ * only way to change a locked value is to unlock it first.
  */
 // internal (not private): reused by SettingsScreen.kt's SliderRow.
 @Composable
 internal fun <T> TickedSlider(
     stops: List<T>, selected: T, labelFor: (T) -> String,
-    enabled: Boolean = true, onSelect: (T) -> Unit,
+    enabled: Boolean = true, locked: Boolean = false, onToggleLock: (() -> Unit)? = null,
+    onSelect: (T) -> Unit,
 ) {
     val index = stops.indexOf(selected).coerceAtLeast(0)
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            labelFor(stops.first()), color = RawCamColors.Muted,
-            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-        )
-        Slider(
-            value = index.toFloat(),
-            onValueChange = { v -> onSelect(stops[v.roundToInt().coerceIn(0, stops.size - 1)]) },
-            valueRange = 0f..(stops.size - 1).toFloat(),
-            steps = (stops.size - 2).coerceAtLeast(0),
-            enabled = enabled,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            labelFor(stops.last()), color = RawCamColors.Muted,
-            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-        )
+    Column {
+        if (onToggleLock != null) {
+            Row(
+                Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LockToggle(locked = locked, onClick = onToggleLock)
+                Text(
+                    labelFor(selected), color = RawCamColors.OnSurface,
+                    fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                labelFor(stops.first()), color = RawCamColors.Muted,
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            )
+            Slider(
+                value = index.toFloat(),
+                onValueChange = { v -> onSelect(stops[v.roundToInt().coerceIn(0, stops.size - 1)]) },
+                valueRange = 0f..(stops.size - 1).toFloat(),
+                steps = (stops.size - 2).coerceAtLeast(0),
+                enabled = enabled && !locked,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                labelFor(stops.last()), color = RawCamColors.Muted,
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            )
+        }
     }
 }
