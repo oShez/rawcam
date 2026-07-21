@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -28,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,8 +41,11 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.shez.rawcam.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -96,18 +101,32 @@ private fun shareExport(context: Context, entry: ExportEntry) {
 
 /**
  * Browses exported DNG folders (written by [com.shez.rawcam.export.ExportService] under
- * getExternalFilesDir/exports/<clipName>/) and shares a clip's full DNG set through the
- * system share sheet. Deliberately no delete here -- this is a browse+send surface, not
- * clip management (that stays on ClipsScreen). List refreshes on the same 2s
- * lifecycle-gated poll pattern as ClipsScreen, so an export finishing while this screen
- * is open shows up without user action.
+ * getExternalFilesDir/exports/<clipName>/), shares a clip's full DNG set through the
+ * system share sheet, and deletes an export folder outright (the source .rawv on
+ * ClipsScreen is untouched -- this only removes the exported DNG copy). Delete reuses
+ * the same [com.shez.rawcam.settings.Settings.confirmDelete] gate and confirmation-
+ * dialog pattern as ClipsScreen's clip delete, for one consistent "are you sure" rule
+ * across both screens. List refreshes on the same 2s lifecycle-gated poll pattern as
+ * ClipsScreen, so an export finishing (or a delete) while this screen is open shows up
+ * without user action.
  */
 @Composable
 fun ExportsScreen(onBack: () -> Unit = {}) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var refreshTick by remember { mutableStateOf(0) }
     var exports by remember { mutableStateOf<List<ExportEntry>>(emptyList()) }
+    var pendingDelete by remember { mutableStateOf<File?>(null) }
+
+    // Off-main delete, same pattern as ClipsScreen.performDelete: the directory
+    // removal runs on Dispatchers.IO, then refreshTick++ reloads the list.
+    fun performDelete(dir: File) {
+        scope.launch {
+            withContext(Dispatchers.IO) { dir.deleteRecursively() }
+            refreshTick++
+        }
+    }
 
     LaunchedEffect(refreshTick) {
         exports = withContext(Dispatchers.IO) { loadExports(context) }
@@ -120,6 +139,23 @@ fun ExportsScreen(onBack: () -> Unit = {}) {
                 refreshTick++
             }
         }
+    }
+
+    pendingDelete?.let { toDelete ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete export?") },
+            text = { Text("This permanently deletes the exported DNGs in ${toDelete.name}. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    performDelete(toDelete)
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            },
+        )
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
@@ -135,7 +171,19 @@ fun ExportsScreen(onBack: () -> Unit = {}) {
         } else {
             LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(exports, key = { it.dir.absolutePath }) { entry ->
-                    ExportCard(entry, onShare = { shareExport(context, entry) })
+                    ExportCard(
+                        entry,
+                        onShare = { shareExport(context, entry) },
+                        onDelete = {
+                            scope.launch {
+                                if (SettingsRepository.settings.first().confirmDelete) {
+                                    pendingDelete = entry.dir
+                                } else {
+                                    performDelete(entry.dir)
+                                }
+                            }
+                        },
+                    )
                 }
             }
         }
@@ -143,7 +191,7 @@ fun ExportsScreen(onBack: () -> Unit = {}) {
 }
 
 @Composable
-private fun ExportCard(entry: ExportEntry, onShare: () -> Unit) {
+private fun ExportCard(entry: ExportEntry, onShare: () -> Unit, onDelete: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = RawCamColors.Surface),
         border = BorderStroke(1.dp, RawCamColors.Outline.copy(alpha = 0.5f)),
@@ -161,7 +209,10 @@ private fun ExportCard(entry: ExportEntry, onShare: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(12.dp))
-            Button(onClick = onShare) { Text("Send") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onShare) { Text("Send") }
+                TextButton(onClick = onDelete) { Text("Delete", color = RawCamColors.Muted) }
+            }
         }
     }
 }
