@@ -40,6 +40,13 @@ class ExportService : Service() {
     private val cancelled = AtomicBoolean(false)
     private val exportExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+    // Clip names accepted by onStartCommand whose export task has NOT yet started
+    // running. Needed by onDestroy: shutdownNow() discards queued (never-started)
+    // tasks outright, so without this their status entries would stay RUNNING
+    // forever -- ClipsScreen then shows a permanent "Exporting…" with a Cancel
+    // button that no-ops against the already-dead service instance.
+    private val queuedClips = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
     // notify() is a Binder IPC to system_server that rebuilds a Notification --
     // calling it on every single exported frame (thousands per clip) made the
     // notification plumbing a bottleneck in its own right, serialized into the
@@ -71,7 +78,9 @@ class ExportService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification(clipName, 0, 0))
         status[clipName] = ExportStatus.RUNNING
 
+        queuedClips.add(clipName)
         exportExecutor.execute {
+            queuedClips.remove(clipName) // now running, not queued; onDestroy's sweep must skip it
             File(outDir).mkdirs()
             val ok = try {
                 NativeBridge.nativeExportClip(rawvPath, outDir) { done, total ->
@@ -107,6 +116,15 @@ class ExportService : Service() {
     override fun onDestroy() {
         cancelled.set(true)
         exportExecutor.shutdownNow()
+        // shutdownNow() silently discards tasks still in the executor's queue --
+        // their exports never ran and never will on this instance, so move their
+        // status off RUNNING or ClipsScreen shows "Exporting…" forever. The
+        // currently-running export (already removed from queuedClips) sets its own
+        // CANCELLED via the progress callback observing `cancelled`.
+        while (true) {
+            val name = queuedClips.poll() ?: break
+            status[name] = ExportStatus.CANCELLED
+        }
         super.onDestroy()
     }
 
@@ -166,6 +184,10 @@ class ExportService : Service() {
             context: Context, rawvPath: String, outDir: String, clipName: String,
             deleteAfter: Boolean = false,
         ) {
+            // Bound the process-lifetime status map: finished entries only ever
+            // matter briefly for UI suffixes, so once the map grows past a
+            // handful, evict everything not currently RUNNING.
+            if (status.size > 16) status.entries.removeIf { it.value != ExportStatus.RUNNING }
             status[clipName] = ExportStatus.RUNNING
             val intent = Intent(context, ExportService::class.java).apply {
                 putExtra(EXTRA_RAWV_PATH, rawvPath)

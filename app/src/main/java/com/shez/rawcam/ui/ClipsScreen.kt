@@ -295,9 +295,15 @@ private fun ClipCard(
                         )
                     }
                     clip.exportedFrameCount >= 0 -> {
-                        val (suffix, color) = when (status) {
-                            ExportService.ExportStatus.FAILED -> " (failed)" to RawCamColors.Accent
-                            ExportService.ExportStatus.CANCELLED -> " (cancelled)" to RawCamColors.Muted
+                        // Fewer DNGs on disk than source frames with no live status
+                        // (e.g. the app restarted mid-export, wiping the in-memory
+                        // status map) must not render as a green "Exported" -- flag
+                        // the shortfall so the user knows to re-export.
+                        val partial = clip.frameCount > 0 && clip.exportedFrameCount < clip.frameCount
+                        val (suffix, color) = when {
+                            status == ExportService.ExportStatus.FAILED -> " (failed)" to RawCamColors.Accent
+                            status == ExportService.ExportStatus.CANCELLED -> " (cancelled)" to RawCamColors.Muted
+                            partial -> " (incomplete · ${clip.exportedFrameCount}/${clip.frameCount})" to RawCamColors.Accent
                             else -> "" to RawCamColors.Success
                         }
                         Text(
