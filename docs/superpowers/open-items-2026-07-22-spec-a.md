@@ -93,3 +93,14 @@ a ~400 ms wall-clock budget so a slow vendor HAL cannot stall launch.
 support breaks. Per this project's own hard-won lesson, it is not done until
 verified on the Xiaomi 14 Ultra — not merely built green. Have the device
 connected and unlocked before starting it.
+
+---
+
+## Update 2026-07-23: Tasks 5-6 shipped, device-verified
+
+- `94206dd` Task 5 `Camera2SnapshotSource` (probe 0..31, 400ms budget); `61d9c1d` Task 6 wire-up (~250 lines deleted from CameraController); `194a333` topology fix; `3c07aa9` plan ticks.
+- **The Task 6 gate caught a real regression:** the pure layer accepted the logical camera (id 0) as a lens; dedupe swapped it in for its 23mm child; `sessionTagId="0"` (the id being opened) failed session configuration — black preview, "Camera open failed". Fixed pure-side: `applyTopology()` derives `standalone` relative to the primary logical's children and excludes the container when a child survives; dedupe prefers taggable children. 6 new JVM tests (`LensTopologyTest`), suite now 31/31.
+- On-device (Xiaomi 14 Ultra, release build, `install -r`): exactly 4 chips 12/23/74/117mm in order, launches on 23mm, ids 6/9 (newly accepted by soft-defaulting) dedupe away by focal, switches 23→74→117→12 clean on one PID, record on 74mm standalone: 183 frames / 7.6s / 24fps / 2.68GB, **Exported · 183 DNGs**, crash buffer clean.
+- Pixel 7 Pro regression (the gate's other half) NOT run — device not present. Do it before merging to main.
+- Stale note corrected: the preserved telephoto clip `clip_20260721_220030` no longer exists on-device (verified 2026-07-22); do not go looking for it.
+- NEXT: Task 7 (unsupported-device screen + manifest `required="false"`).
