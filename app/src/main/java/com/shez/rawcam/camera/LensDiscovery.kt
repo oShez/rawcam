@@ -55,7 +55,49 @@ object LensDiscovery {
                 "RAW is advertised but no camera offers a usable RAW image size.", notes,
             )
         }
-        return DeviceProfile.Supported(built, mainIndex = 0, notes = notes)
+        val (lenses, mainIndex) = finishLenses(built, back)
+        return DeviceProfile.Supported(lenses, mainIndex, notes)
+    }
+
+    /**
+     * Dedupe by focal length (one sensor exposed under two ids -- keep the id
+     * offering more sizes), sort widest-first, label, and choose the main lens.
+     *
+     * Main-lens selection must never fail, because isMain drives which lens the
+     * app opens at launch: advertised focal length of the logical camera ->
+     * nearest match; no focal data -> largest active array; still ambiguous ->
+     * index 0. The old code fell through to 0 silently, which on a device
+     * without focal lengths meant launching on the wrong lens.
+     */
+    private fun finishLenses(
+        built: List<LensProfile>, sources: List<CameraSnapshot>,
+    ): Pair<List<LensProfile>, Int> {
+        val deduped = built
+            .groupBy { it.focalMm }
+            .map { (focal, group) -> if (focal == null) group else listOf(group.maxBy { it.sizes.size }) }
+            .flatten()
+            .sortedWith(compareByDescending<LensProfile> { it.fovMetric }.thenBy { it.cameraId })
+
+        val logicalFocal = sources.firstOrNull { it.physicalIds.isNotEmpty() }
+            ?.focalLengthsMm?.firstOrNull()
+        val withFocal = deduped.indices.filter { deduped[it].focalMm != null }
+        val mainIndex = when {
+            logicalFocal != null && withFocal.isNotEmpty() ->
+                withFocal.minBy { Math.abs(deduped[it].focalMm!! - logicalFocal) }
+            withFocal.isNotEmpty() ->
+                withFocal.maxBy { deduped[it].fovMetric.toDouble() }
+            else -> deduped.indices.maxBy {
+                deduped[it].activeArray.width.toLong() * deduped[it].activeArray.height
+            }
+        }
+
+        val labelled = deduped.mapIndexed { i, lens ->
+            val label = lens.equivFocalMm?.let { String.format(java.util.Locale.US, "%.0fmm", it) }
+                ?: lens.focalMm?.let { String.format(java.util.Locale.US, "%.1fmm", it) }
+                ?: "LENS ${i + 1}"
+            lens.copy(label = label, isMain = i == mainIndex)
+        }
+        return labelled to mainIndex
     }
 
     /** Full-frame diagonal, for the 35mm-equivalent crop-factor formula. */
