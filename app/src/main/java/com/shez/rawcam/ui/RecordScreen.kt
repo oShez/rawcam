@@ -101,6 +101,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import com.shez.rawcam.camera.ControlTier
 import com.shez.rawcam.camera.LensProfile
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
@@ -161,6 +162,8 @@ data class RecordUiState(
     val sizeIndex: Int = 0,
     val kelvin: Int = 5600,
     val tint: Int = 0,
+    val controlTier: ControlTier = ControlTier.FULL,
+    val exposureRangeNs: LongRange? = null,
     // Locking a slider freezes its value: the slider itself is disabled (no manual
     // drag) and meterAt()'s tap-to-meter result skips that field entirely, whatever
     // MeterScope is active. Session-only (not persisted via CaptureState).
@@ -367,11 +370,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.restoreWbAnchor(RggbChannelVector(saved.anchorR, saved.anchorG, saved.anchorG, saved.anchorB), saved.anchorKelvin)
             restoredFromSaved = saved != null
             restoredLensIndex = lensIndex
+            val lens = controller.lenses.getOrNull(lensIndex)
             _uiState.update {
                 it.copy(
                     rawSpec = controller.rawSpec, lenses = controller.lenses,
                     iso = iso, fps = fps, shutterIndex = shutterIndex, lensIndex = lensIndex, sizeIndex = sizeIndex,
                     kelvin = kelvin, tint = tint, focusDiopters = focus,
+                    controlTier = lens?.controlTier ?: ControlTier.FULL,
+                    exposureRangeNs = lens?.exposureRangeNs,
                 )
             }
         }
@@ -746,6 +752,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val fps = if (state.fps in opts) state.fps
         else (opts.lastOrNull { it <= state.fps } ?: opts.first())
         val stops = shutterStops(fps)
+        val lens = state.lenses.getOrNull(state.lensIndex)
         return state.copy(
             rawSpec = spec,
             fps = fps,
@@ -753,6 +760,8 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             iso = state.iso.coerceIn(spec.isoRange),
             focusDiopters = state.focusDiopters.coerceIn(0f, maxOf(spec.minFocusDiopters, 0f)),
             previewReady = false,
+            controlTier = lens?.controlTier ?: ControlTier.FULL,
+            exposureRangeNs = lens?.exposureRangeNs,
         )
     }
 
@@ -1179,6 +1188,12 @@ fun RecordScreen(
     val shutterStops = viewModel.shutterStops(state.fps)
     val shutterDenom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
     val modeEnabled = !state.recording && !state.busy
+    // AUTO_ONLY lenses (no MANUAL_SENSOR capability, or no usable ISO range) don't
+    // offer a real manual ISO/shutter/focus control; disabling-because-absent must
+    // read differently from disabling-because-locked (see Task 8 in the plan) --
+    // the sliders below stay disabled and swap their body copy instead of showing
+    // a lock, since there is nothing to unlock.
+    val manualAvailable = state.controlTier == ControlTier.FULL
     val scope = rememberCoroutineScope()
     var benchRunning by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf<Param?>(null) }
@@ -1436,6 +1451,7 @@ fun RecordScreen(
                                         stops = isoStops(spec.isoRange),
                                         selected = state.iso,
                                         labelFor = { "$it" },
+                                        enabled = manualAvailable,
                                         locked = state.isoLocked,
                                         onToggleLock = { viewModel.toggleIsoLock() },
                                         onSelect = { viewModel.setIso(it) },
@@ -1447,6 +1463,7 @@ fun RecordScreen(
                                         stops = shutterStops,
                                         selected = shutterDenom,
                                         labelFor = { shutterLabel(it, state.fps, state.settings.shutterDisplay) },
+                                        enabled = manualAvailable,
                                         locked = state.shutterLocked,
                                         onToggleLock = { viewModel.toggleShutterLock() },
                                         onSelect = { viewModel.setShutterIndex(shutterStops.indexOf(it)) },
@@ -1458,7 +1475,7 @@ fun RecordScreen(
                                         stops = focusStops(spec.minFocusDiopters),
                                         selected = state.focusDiopters,
                                         labelFor = ::focusLabel,
-                                        enabled = spec.minFocusDiopters > 0f,
+                                        enabled = manualAvailable && spec.minFocusDiopters > 0f,
                                         locked = state.focusLocked,
                                         onToggleLock = { viewModel.toggleFocusLock() },
                                         onSelect = { viewModel.setFocus(it) },
@@ -1487,6 +1504,15 @@ fun RecordScreen(
                             }
                         }
                     }
+                }
+                if (!manualAvailable) {
+                    // Absent, not locked: no lock icon here -- this lens never had a
+                    // manual control to unlock, unlike isoLocked/shutterLocked/focusLocked
+                    // above, which freeze a real value the user could still see and set.
+                    Text(
+                        "This lens records RAW with automatic exposure",
+                        color = RawCamColors.Muted, fontSize = 12.sp,
+                    )
                 }
                 val chipScroll = rememberScrollState()
                 Row(
