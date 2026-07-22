@@ -2,7 +2,9 @@
 #include "rawcam/file_io.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace rawcam {
@@ -45,6 +47,10 @@ class Dng {
       r[i * 2 + 1] = 10000;
     }
     entries_.push_back({tag, type, n, defer(r.data(), n * 8), true});
+  }
+  // out-of-line raw byte blob, e.g. an embedded XMP packet
+  void addRaw(uint16_t tag, uint16_t type, const void* data, uint32_t n) {
+    entries_.push_back({tag, type, n, defer(data, n), true});
   }
 
   bool write(const std::string& path, const uint8_t* pixels, uint32_t pixelBytes) {
@@ -170,6 +176,26 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   if (hdr.illuminant2 != 0) {
     d.addShort(50779, (uint16_t)hdr.illuminant2);
     d.addRationals(50722, SRATIONAL, hdr.colorMatrix2, 9);
+  }
+  // XMP packet carrying the real capture frame rate (xmpDM:videoFrameRate),
+  // the standard CinemaDNG convention DaVinci Resolve reads to auto-set an
+  // image sequence's frame rate on import. Without this, Resolve has no way
+  // to know the true fps and falls back to whatever the project/import
+  // dialog defaults to, which silently plays the sequence at the wrong speed
+  // on any mismatch.
+  if (hdr.fpsDen != 0) {
+    char fpsStr[32];
+    std::snprintf(fpsStr, sizeof fpsStr, "%.6f", (double)hdr.fpsNum / hdr.fpsDen);
+    const std::string xmp =
+        "<?xpacket begin=\"\xEF\xBB\xBF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"
+        "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+        "<rdf:Description rdf:about=\"\" "
+        "xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\">"
+        "<xmpDM:videoFrameRate>" + std::string(fpsStr) + "</xmpDM:videoFrameRate>"
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+        "<?xpacket end=\"w\"?>";
+    d.addRaw(700, BYTE, xmp.data(), (uint32_t)xmp.size());
   }
   return d.write(path, pixels, (uint32_t)pixelBytes);
 }

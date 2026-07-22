@@ -135,3 +135,53 @@ TEST_CASE("dng writes ColorMatrix2/CalibrationIlluminant2 when the sensor has tw
   REQUIRE(tags.count(50722) == 1);  // ColorMatrix2 present
   std::remove("dual_illum.dng");
 }
+
+TEST_CASE("dng embeds an XMP videoFrameRate tag derived from fpsNum/fpsDen") {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 2; h.height = 2; h.rowStrideBytes = 4;
+  h.cfa = (uint32_t)Cfa::RGGB; h.whiteLevel = 1023;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.fpsNum = 24000; h.fpsDen = 1001;  // NTSC-style 23.976fps
+  std::strcpy(h.deviceName, "Fps Test");
+  FrameMeta m{}; m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  uint8_t src[8] = {};
+
+  REQUIRE(writeDng("fps.dng", h, m, src));
+  int fd = io::openRead("fps.dng");
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+  auto tags = parseIfd(b);
+
+  REQUIRE(tags.count(700) == 1);  // XMP
+  auto xmpTag = tags.at(700);
+  std::string xmp(reinterpret_cast<const char*>(&b[xmpTag.valueOrOffset]), xmpTag.count);
+  CHECK(xmp.find("xmpDM:videoFrameRate") != std::string::npos);
+  CHECK(xmp.find("23.976024") != std::string::npos);
+  std::remove("fps.dng");
+}
+
+TEST_CASE("dng omits the XMP tag when fpsDen is zero (no known frame rate)") {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 2; h.height = 2; h.rowStrideBytes = 4;
+  h.cfa = (uint32_t)Cfa::RGGB; h.whiteLevel = 1023;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.fpsNum = 0; h.fpsDen = 0;
+  std::strcpy(h.deviceName, "No Fps Test");
+  FrameMeta m{}; m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  uint8_t src[8] = {};
+
+  REQUIRE(writeDng("no_fps.dng", h, m, src));
+  int fd = io::openRead("no_fps.dng");
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+  auto tags = parseIfd(b);
+
+  CHECK(tags.count(700) == 0);
+  std::remove("no_fps.dng");
+}
