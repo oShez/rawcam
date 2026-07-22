@@ -8,3 +8,5 @@ local.properties
 core/build/
 .cxx/
 testfootage/
+keystore.properties
+release-keystore.jks
