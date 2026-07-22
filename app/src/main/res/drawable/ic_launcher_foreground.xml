@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Aperture/iris mark: two overlapping equilateral triangles, even-odd fill
+         so the overlap becomes a hexagonal opening (a diaphragm silhouette). -->
+    <path
+        android:fillColor="#E5484D"
+        android:fillType="evenOdd"
+        android:pathData="M54,26 L78.25,68 L29.75,68 Z M54,82 L29.75,40 L78.25,40 Z" />
+</vector>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Same iris mark as ic_launcher_foreground; opaque single-color shape for
+         Android 13+ themed icons, which the OS re-tints to match the wallpaper theme. -->
+    <path
+        android:fillColor="#FF000000"
+        android:fillType="evenOdd"
+        android:pathData="M54,26 L78.25,68 L29.75,68 Z M54,82 L29.75,40 L78.25,40 Z" />
+</vector>
