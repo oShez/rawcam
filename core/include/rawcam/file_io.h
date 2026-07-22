@@ -1,4 +1,5 @@
 #pragma once
+#include <cerrno>
 #include <cstdint>
 #include <cstddef>
 #ifdef _WIN32
@@ -34,6 +35,7 @@ inline bool writeAll(int fd, const void* buf, size_t n) {
     int w = _write(fd, p, (unsigned)(n > 1u << 30 ? 1u << 30 : n));
 #else
     ssize_t w = ::write(fd, p, n);
+    if (w < 0 && errno == EINTR) continue;  // signal-interrupted, not a failure
 #endif
     if (w <= 0) return false;
     p += w; n -= (size_t)w;
@@ -47,6 +49,7 @@ inline bool readAll(int fd, void* buf, size_t n) {
     int r = _read(fd, p, (unsigned)(n > 1u << 30 ? 1u << 30 : n));
 #else
     ssize_t r = ::read(fd, p, n);
+    if (r < 0 && errno == EINTR) continue;  // signal-interrupted, not a failure
 #endif
     if (r <= 0) return false;
     p += r; n -= (size_t)r;

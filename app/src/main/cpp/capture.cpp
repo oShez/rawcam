@@ -212,9 +212,16 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   // choice must be driven by the real white level, not assumed from whatever
   // device this shipped on first (Packed10 alone was fine on the Pixel 7 Pro's
   // 10-bit sensor but is NOT safe on hardware with a wider white level).
-  hdr.packMode = (uint32_t)(whiteLevel <= 0x3FF   ? PackMode::Packed10
-                             : whiteLevel <= 0xFFF ? PackMode::Packed12
-                                                    : PackMode::Raw16);
+  // Packing is additionally gated on the width dividing evenly into the pack
+  // group (4 px/5B for Packed10, 2 px/3B for Packed12): pack10/pack12 step in
+  // whole groups per ROW with no remainder handling, and RawvReader::headerSane
+  // rejects a non-divisible pixel count outright -- so a non-conforming width
+  // would record a file that looks successful but can never be exported.
+  // Raw16 is exact for any width; losing the pack ratio beats losing the clip.
+  const bool w4 = width % 4 == 0, w2 = width % 2 == 0;
+  hdr.packMode = (uint32_t)(whiteLevel <= 0x3FF && w4   ? PackMode::Packed10
+                             : whiteLevel <= 0xFFF && w2 ? PackMode::Packed12
+                                                          : PackMode::Raw16);
   hdr.cfa = (uint32_t)cfa;
   hdr.whiteLevel = (uint32_t)whiteLevel;
   for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];

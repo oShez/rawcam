@@ -65,8 +65,12 @@ class Dng {
       if (e.tag == 273) e.value = stripStart;
       else if (e.deferred) e.value += dataStart;
     }
+    // Header + IFD + data area only -- the pixel strip is written directly from
+    // the caller's buffer as a second writeAll below instead of being copied in
+    // here first: at 4096x3072 that copy was a ~25MB alloc+memcpy per frame,
+    // multiplied across the export worker pool, for zero layout difference.
     std::vector<uint8_t> out;
-    out.reserve(stripStart + pixelBytes);
+    out.reserve(stripStart);
     const uint8_t th[8] = {'I', 'I', 42, 0, 8, 0, 0, 0};
     out.insert(out.end(), th, th + 8);
     uint16_t n = (uint16_t)entries_.size();
@@ -78,10 +82,10 @@ class Dng {
     uint32_t zero = 0;
     append(out, &zero, 4);  // no next IFD
     out.insert(out.end(), data_.begin(), data_.end());
-    out.insert(out.end(), pixels, pixels + pixelBytes);
     int fd = io::openWrite(path.c_str());
     if (fd < 0) return false;
-    bool ok = io::writeAll(fd, out.data(), out.size());
+    bool ok = io::writeAll(fd, out.data(), out.size()) &&
+              io::writeAll(fd, pixels, pixelBytes);
     io::closeFd(fd);
     return ok;
   }
