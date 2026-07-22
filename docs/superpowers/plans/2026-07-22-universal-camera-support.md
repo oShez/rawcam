@@ -965,7 +965,7 @@ git commit -m "feat: lens ordering, dedupe, labelling and never-failing main-len
 - Consumes: `CameraSnapshot`, `SizeSpec`, `RectSpec`, `SnapshotSet` (Task 1).
 - Produces: `Camera2SnapshotSource(cameraManager: CameraManager).capture(): SnapshotSet`.
 
-- [ ] **Step 1: Implement the source**
+- [x] **Step 1: Implement the source**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -1117,12 +1117,12 @@ class Camera2SnapshotSource(private val cameraManager: CameraManager) {
 }
 ```
 
-- [ ] **Step 2: Confirm it compiles**
+- [x] **Step 2: Confirm it compiles**
 
 Run: `./gradlew :app:compileDebugKotlin`
 Expected: BUILD SUCCESSFUL.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/Camera2SnapshotSource.kt
@@ -1143,7 +1143,7 @@ git commit -m "feat: add Camera2SnapshotSource with widened, time-bounded hidden
 - Consumes: `Camera2SnapshotSource.capture()` (Task 5), `LensDiscovery.discover()` (Task 4).
 - Produces: `CameraController.profile: DeviceProfile?`; `CameraController.lenses: List<LensProfile>`; `initialize(): DeviceProfile` (returns rather than throws).
 
-- [ ] **Step 1: Delete `LensInfo`/`LensSize`, replace usages with `LensProfile`/`LensSizeProfile`**
+- [x] **Step 1: Delete `LensInfo`/`LensSize`, replace usages with `LensProfile`/`LensSizeProfile`**
 
 `LensInfo.physicalId` maps to `LensProfile.cameraId`. **The three-way identity split stays exactly as it is:**
 
@@ -1165,7 +1165,7 @@ git commit -m "feat: add Camera2SnapshotSource with widened, time-bounded hidden
     }
 ```
 
-- [ ] **Step 2: Rewrite `initialize()` to return a profile instead of throwing**
+- [x] **Step 2: Rewrite `initialize()` to return a profile instead of throwing**
 
 ```kotlin
     /** Populated by [initialize]; null until then. */
@@ -1208,11 +1208,11 @@ git commit -m "feat: add Camera2SnapshotSource with widened, time-bounded hidden
     }
 ```
 
-- [ ] **Step 3: Retype `specFor` and `wbCalibFor`**
+- [x] **Step 3: Retype `specFor` and `wbCalibFor`**
 
 Only the parameter type changes, from `LensInfo` to `LensProfile`. `specFor` keeps its CCT-sorting logic **verbatim** — that is the DNG illuminant-ordering fix and must not be touched. `lens.colorMatrix2`, `lens.illuminant1`, `lens.illuminant2` read identically on the new type.
 
-- [ ] **Step 4: Update `RecordUiState.lenses`**
+- [x] **Step 4: Update `RecordUiState.lenses`**
 
 In `RecordScreen.kt:146`:
 
@@ -1222,7 +1222,7 @@ In `RecordScreen.kt:146`:
 
 Fix the resulting compile errors at the lens-chip render sites by replacing `lens.physicalId` with `lens.cameraId`. `lens.label`, `lens.sizes`, `lens.isMain` keep their names.
 
-- [ ] **Step 5: Build and confirm green**
+- [x] **Step 5: Build and confirm green**
 
 Run: `./gradlew :app:assembleDebug`
 Expected: BUILD SUCCESSFUL.
@@ -1230,7 +1230,7 @@ Expected: BUILD SUCCESSFUL.
 Run: `./gradlew :app:testDebugUnitTest`
 Expected: PASS — all Task 1-4 tests still green.
 
-- [ ] **Step 6: On-device regression — the actual gate for this task**
+- [x] **Step 6: On-device regression — the actual gate for this task**
 
 ```bash
 ./gradlew :app:assembleRelease
@@ -1253,7 +1253,7 @@ Pixel 7 Pro — required results:
 
 If lens counts, order, labels, or the default lens differ from today, **stop and fix before proceeding** — that is a regression in the extraction, not a new capability.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/CameraController.kt app/src/main/java/com/shez/rawcam/ui/RecordScreen.kt
