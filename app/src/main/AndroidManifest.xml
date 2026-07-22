@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-feature android:name="android.hardware.camera.raw" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.raw" android:required="false" />
     <application android:label="RawCam" android:theme="@android:style/Theme.Material.NoActionBar"
                  android:allowBackup="false"
                  android:icon="@mipmap/ic_launcher"

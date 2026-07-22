@@ -8,6 +8,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.PowerManager
 import android.os.StatFs
 import android.util.Log
@@ -85,7 +86,9 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -101,9 +104,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import com.shez.rawcam.camera.CompatibilityReport
 import com.shez.rawcam.camera.ControlTier
+import com.shez.rawcam.camera.DeviceProfile
 import com.shez.rawcam.camera.LensProfile
 import com.shez.rawcam.camera.ShutterStops
+import com.shez.rawcam.camera.UnsupportedReason
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
@@ -165,6 +171,8 @@ data class RecordUiState(
     val tint: Int = 0,
     val controlTier: ControlTier = ControlTier.FULL,
     val exposureRangeNs: LongRange? = null,
+    val unsupported: DeviceProfile.Unsupported? = null,
+    val reportText: String = "",
     // Locking a slider freezes its value: the slider itself is disabled (no manual
     // drag) and meterAt()'s tap-to-meter result skips that field entirely, whatever
     // MeterScope is active. Session-only (not persisted via CaptureState).
@@ -349,7 +357,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         cameraOps.launch {
             val remember = SettingsRepository.settings.first().rememberLastState
             val saved = if (remember) SettingsRepository.captureState.first() else null
-            controller.initialize()
+            val result = controller.initialize()
+            val report = CompatibilityReport.render(result, Build.MODEL, Build.VERSION.SDK_INT)
+            if (result is DeviceProfile.Unsupported) {
+                _uiState.update { it.copy(unsupported = result, reportText = report) }
+                return@launch
+            }
+            _uiState.update { it.copy(reportText = report) }
             val s0 = SettingsRepository.settings.first()
             val lensCount = controller.lenses.size
             val lensIndex = (saved?.lensIndex ?: s0.defaultLensIndex)
@@ -1193,6 +1207,21 @@ fun RecordScreen(
         }
     }
 
+    val unsupported = state.unsupported
+    if (unsupported != null) {
+        UnsupportedDeviceScreen(
+            reason = when (unsupported.reason) {
+                UnsupportedReason.NO_RAW_CAPABILITY -> "This phone's cameras don't provide RAW capture"
+                UnsupportedReason.NO_USABLE_RAW_SIZES -> "This phone reports RAW but offers no usable RAW image size"
+                UnsupportedReason.NO_BACK_CAMERA -> "No back-facing camera was found"
+                UnsupportedReason.PERMISSION_REDACTED -> "Camera details are hidden until permission is granted"
+            },
+            detail = unsupported.detail,
+            reportText = state.reportText,
+        )
+        return
+    }
+
     val spec = state.rawSpec
     if (spec == null) {
         // Camera enumeration (binder IPC, off-main) hasn't published lenses/rawSpec
@@ -1565,6 +1594,51 @@ fun RecordScreen(
             }
 
             SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
+        }
+    }
+}
+
+/**
+ * Full-screen terminal state for a device [CameraController.initialize] decided
+ * cannot record RAW at all (or one whose CAMERA-permission-redacted
+ * characteristics made that undecidable) -- reuses the camera-permission
+ * gate's visual language in [RecordScreen] (centred column, near-black
+ * background, one bordered accent pill) so the two "can't show a preview yet"
+ * states read as siblings rather than two unrelated screens. COPY REPORT
+ * writes [reportText] to the clipboard rather than firing a share intent --
+ * Settings (Task 10) owns sharing; duplicating that here would give the report
+ * two divergent exit paths.
+ */
+@Composable
+private fun UnsupportedDeviceScreen(reason: String, detail: String, reportText: String) {
+    val clipboard = LocalClipboardManager.current
+    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(
+                "DEVICE NOT SUPPORTED", color = RawCamColors.OnSurface,
+                fontSize = 15.sp, letterSpacing = 1.5.sp,
+            )
+            Text(
+                reason, color = RawCamColors.Muted, fontSize = 13.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 260.dp),
+            )
+            if (detail.isNotBlank()) {
+                Text(
+                    detail, color = RawCamColors.Muted, fontSize = 11.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                )
+            }
+            Surface(
+                color = Color.Transparent, shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, RawCamColors.Accent),
+            ) {
+                Text(
+                    "COPY REPORT", color = RawCamColors.Accent, fontSize = 13.sp, letterSpacing = 1.sp,
+                    modifier = Modifier
+                        .clickable { clipboard.setText(AnnotatedString(reportText)) }
+                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                )
+            }
         }
     }
 }
