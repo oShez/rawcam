@@ -1453,7 +1453,7 @@ git commit -m "feat: unsupported-device screen and non-RAW install unblocking"
 - Consumes: `LensProfile.controlTier` (Task 3).
 - Produces: `RecordUiState.controlTier: ControlTier`.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/ControlTierTest.kt`:
 
@@ -1482,12 +1482,12 @@ class ControlTierTest {
 }
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*ControlTierTest*"`
 Expected: PASS — Task 3 already implements the rule. If it fails, the Task 3 tier logic is wrong; fix `buildLens`, not the test.
 
-- [ ] **Step 3: Publish the tier into UI state**
+- [x] **Step 3: Publish the tier into UI state**
 
 Add to `RecordUiState`:
 
@@ -1505,7 +1505,7 @@ Set both wherever `lensIndex` changes and in the post-`initialize` publication, 
 
 `exposureRangeNs` is added here rather than in Task 9 so both lens-derived fields are published from one place — Task 9 only consumes it.
 
-- [ ] **Step 4: Disable manual sliders on an AUTO_ONLY lens**
+- [x] **Step 4: Disable manual sliders on an AUTO_ONLY lens**
 
 At the ISO / shutter / focus slider sites, the existing `enabled` condition accounts only for lock flags. Extend each so an unsupported control is disabled **and visually distinct from a locked one**:
 
@@ -1517,14 +1517,14 @@ At the ISO / shutter / focus slider sites, the existing `enabled` condition acco
 
 When `!manualAvailable`, render one line of body text above the chip row: `"This lens records RAW with automatic exposure"`. Do **not** show lock icons for these — they are not locked, they are absent, and conflating the two states is exactly the confusion this task exists to prevent.
 
-- [ ] **Step 5: Build and verify**
+- [x] **Step 5: Build and verify**
 
 Run: `./gradlew :app:assembleDebug && ./gradlew :app:testDebugUnitTest`
 Expected: BUILD SUCCESSFUL, all tests pass.
 
 On-device: both phones report `FULL` on every lens, so every slider must behave exactly as today. **This task is invisible on the owned hardware — that is the expected outcome, not a failure to verify.**
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/ui/RecordScreen.kt app/src/test/java/com/shez/rawcam/camera/ControlTierTest.kt
