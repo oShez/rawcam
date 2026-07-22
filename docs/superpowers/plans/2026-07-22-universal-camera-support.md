@@ -1421,7 +1421,7 @@ In `RecordScreen`'s composable, ahead of the existing `rawSpec == null` loading 
 
 `UnsupportedDeviceScreen` reuses the camera-permission gate's visual language: a centred column on the near-black background, the message in the app's existing body style, and one bordered accent pill labelled **COPY REPORT** writing `reportText` via `LocalClipboardManager.current.setText(AnnotatedString(reportText))`. Do **not** add a share-sheet intent here — Task 10 adds sharing from Settings, and duplicating it invites two divergent paths.
 
-- [ ] **Step 8: Build and verify**
+- [x] **Step 8: Build and verify**
 
 Run: `./gradlew :app:assembleDebug && ./gradlew :app:testDebugUnitTest`
 Expected: BUILD SUCCESSFUL, all tests pass.
