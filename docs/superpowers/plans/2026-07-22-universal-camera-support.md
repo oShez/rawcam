@@ -1826,12 +1826,12 @@ class FvFiveImporterTest {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*FvFiveImporterTest*"`
 Expected: FAIL — `Unresolved reference: FvFiveImporter`.
 
-- [ ] **Step 3: Implement the importer**
+- [x] **Step 3: Implement the importer**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -1918,12 +1918,12 @@ object FvFiveImporter {
 
 Note `rawSizes` is deliberately empty: this corpus is for *field* coverage, so its snapshots resolve to `Unsupported(NO_USABLE_RAW_SIZES)`, which is a valid outcome the fuzz assertion accepts. If a later pass wants these devices to reach lens-building, parse `android.scaler.streamConfigurationMap` here — but that is not required by this spec.
 
-- [ ] **Step 4: Run and confirm pass (or clean skip)**
+- [x] **Step 4: Run and confirm pass (or clean skip)**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*FvFiveImporterTest*"`
 Expected: PASS with the sample present; **SKIPPED, not failed**, when absent.
 
-- [ ] **Step 5: Verify the suite is green with no FV-5 data at all**
+- [x] **Step 5: Verify the suite is green with no FV-5 data at all**
 
 ```bash
 mv app/src/test/resources/fv5 /tmp/fv5-hold
@@ -1933,7 +1933,7 @@ mv /tmp/fv5-hold app/src/test/resources/fv5
 
 Expected: **BUILD SUCCESSFUL.** If removing the corpus breaks the suite, the governing constraint is violated — fix it before committing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/test/java/com/shez/rawcam/camera/FvFiveImporter.kt app/src/test/java/com/shez/rawcam/camera/FvFiveImporterTest.kt app/src/test/resources/fv5/
