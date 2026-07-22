@@ -52,13 +52,13 @@ Spec: `docs/superpowers/specs/2026-07-22-universal-camera-support-design.md`
 - Consumes: nothing.
 - Produces: `CameraSnapshot`, `SizeSpec`, `RectSpec`, `SnapshotSet` with `toJson(): String` and `SnapshotSet.fromJson(String): SnapshotSet`.
 
-- [ ] **Step 1: Find the project's Kotlin version so the serialization plugin matches**
+- [x] **Step 1: Find the project's Kotlin version so the serialization plugin matches**
 
 Run: `grep -rn "kotlin" build.gradle.kts settings.gradle.kts gradle/libs.versions.toml 2>/dev/null | grep -i version`
 
 Use the exact version string found as `<KOTLIN_VERSION>` below. The serialization plugin version **must** equal the Kotlin plugin version or the build fails with a plugin-resolution error.
 
-- [ ] **Step 2: Add the serialization plugin and test dependencies**
+- [x] **Step 2: Add the serialization plugin and test dependencies**
 
 In `app/build.gradle.kts`, add to `plugins`:
 
@@ -79,7 +79,7 @@ Add inside `android { }`:
     testOptions { unitTests.isReturnDefaultValues = true }
 ```
 
-- [ ] **Step 3: Write the failing round-trip test**
+- [x] **Step 3: Write the failing round-trip test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/CameraSnapshotTest.kt`:
 
@@ -123,12 +123,12 @@ class CameraSnapshotTest {
 }
 ```
 
-- [ ] **Step 4: Run it and confirm it fails**
+- [x] **Step 4: Run it and confirm it fails**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*CameraSnapshotTest*"`
 Expected: FAIL — `Unresolved reference: CameraSnapshot`.
 
-- [ ] **Step 5: Implement `CameraSnapshot.kt`**
+- [x] **Step 5: Implement `CameraSnapshot.kt`**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -207,12 +207,12 @@ data class SnapshotSet(
 }
 ```
 
-- [ ] **Step 6: Run the tests and confirm they pass**
+- [x] **Step 6: Run the tests and confirm they pass**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*CameraSnapshotTest*"`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/build.gradle.kts app/src/main/java/com/shez/rawcam/camera/CameraSnapshot.kt app/src/test/java/com/shez/rawcam/camera/CameraSnapshotTest.kt
@@ -232,7 +232,7 @@ git commit -m "feat: add CameraSnapshot data model and JVM test infrastructure"
 - Consumes: `CameraSnapshot`, `SizeSpec`, `RectSpec` (Task 1).
 - Produces: `LensDiscovery.discover(cameras: List<CameraSnapshot>): DeviceProfile`; `DeviceProfile.Supported(lenses, mainIndex, notes)`; `DeviceProfile.Unsupported(reason, detail, notes)`; `LensProfile`; `LensSizeProfile`; `ProfileNote(cameraId, accepted, message)`; `ControlTier.FULL|AUTO_ONLY`; `UnsupportedReason`; `SnapshotField`. Also the shared test helper `rawLens(id, cfa, white, black, sizes)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `app/src/test/java/com/shez/rawcam/camera/LensDiscoveryHardRequirementsTest.kt`:
 
@@ -312,12 +312,12 @@ class LensDiscoveryHardRequirementsTest {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensDiscoveryHardRequirements*"`
 Expected: FAIL — `Unresolved reference: LensDiscovery`.
 
-- [ ] **Step 3: Implement `DeviceProfile.kt`**
+- [x] **Step 3: Implement `DeviceProfile.kt`**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -399,7 +399,7 @@ sealed interface DeviceProfile {
 }
 ```
 
-- [ ] **Step 4: Implement `LensDiscovery.kt` (hard requirements only)**
+- [x] **Step 4: Implement `LensDiscovery.kt` (hard requirements only)**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -497,12 +497,12 @@ object LensDiscovery {
 }
 ```
 
-- [ ] **Step 5: Run and confirm all 7 tests pass**
+- [x] **Step 5: Run and confirm all 7 tests pass**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensDiscoveryHardRequirements*"`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/DeviceProfile.kt app/src/main/java/com/shez/rawcam/camera/LensDiscovery.kt app/src/test/java/com/shez/rawcam/camera/LensDiscoveryHardRequirementsTest.kt
@@ -522,7 +522,7 @@ git commit -m "feat: add DeviceProfile result types and hard-requirement lens di
 - Consumes: `rawLens` helper and everything from Task 2.
 - Produces: populated `LensProfile.defaulted`, real `colorMatrix1`, real `isoRange`, `exposureRangeNs`, `minFocusDiopters`, `sizes[].label`, and `ControlTier` demotion when the ISO range is absent.
 
-- [ ] **Step 1: Write the failing soft-field tests**
+- [x] **Step 1: Write the failing soft-field tests**
 
 Create `app/src/test/java/com/shez/rawcam/camera/LensDiscoverySoftFieldsTest.kt`:
 
@@ -596,7 +596,7 @@ class LensDiscoverySoftFieldsTest {
 }
 ```
 
-- [ ] **Step 2: Write the never-throws fuzz test**
+- [x] **Step 2: Write the never-throws fuzz test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/LensDiscoveryFuzzTest.kt`:
 
@@ -673,12 +673,12 @@ class LensDiscoveryFuzzTest {
 }
 ```
 
-- [ ] **Step 3: Run both and confirm failure**
+- [x] **Step 3: Run both and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensDiscoverySoftFields*" --tests "*LensDiscoveryFuzz*"`
 Expected: FAIL — soft-field assertions fail, and the fuzz test is a real crash candidate (`rawSizes[0]` on a zero-width size, `IntRange` from a malformed `isoRange`).
 
-- [ ] **Step 4: Replace `buildLens` in `LensDiscovery.kt` and add `sizeLabel`**
+- [x] **Step 4: Replace `buildLens` in `LensDiscovery.kt` and add `sizeLabel`**
 
 ```kotlin
     /** Full-frame diagonal, for the 35mm-equivalent crop-factor formula. */
@@ -794,12 +794,12 @@ Expected: FAIL — soft-field assertions fail, and the fuzz test is a real crash
     }
 ```
 
-- [ ] **Step 5: Run and confirm all pass**
+- [x] **Step 5: Run and confirm all pass**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensDiscovery*"`
 Expected: PASS — 7 hard-requirement + 8 soft-field + 2 fuzz tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/LensDiscovery.kt app/src/test/java/com/shez/rawcam/camera/
@@ -818,7 +818,7 @@ git commit -m "feat: soft-field defaulting and never-throws fuzz invariant for l
 - Consumes: `buildLens` from Task 3.
 - Produces: `discover()` returns lenses sorted widest-first, deduped by focal length, labelled (`"23mm"` or ordinal `"LENS 2"`), with a correct `mainIndex` and exactly one `isMain`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `app/src/test/java/com/shez/rawcam/camera/LensOrderingTest.kt`:
 
@@ -885,12 +885,12 @@ class LensOrderingTest {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensOrderingTest*"`
 Expected: FAIL — labels empty, no sorting, `mainIndex` always 0.
 
-- [ ] **Step 3: Replace the tail of `discover()` and add `finishLenses`**
+- [x] **Step 3: Replace the tail of `discover()` and add `finishLenses`**
 
 Replace the `return DeviceProfile.Supported(built, mainIndex = 0, notes = notes)` line with:
 
@@ -941,12 +941,12 @@ Replace the `return DeviceProfile.Supported(built, mainIndex = 0, notes = notes)
     }
 ```
 
-- [ ] **Step 4: Run and confirm pass**
+- [x] **Step 4: Run and confirm pass**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*LensDiscovery*" --tests "*LensOrderingTest*"`
 Expected: PASS — all tests, including the fuzz invariant which now also exercises `finishLenses`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/LensDiscovery.kt app/src/test/java/com/shez/rawcam/camera/LensOrderingTest.kt
