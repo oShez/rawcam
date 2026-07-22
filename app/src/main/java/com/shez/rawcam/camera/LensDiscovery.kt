@@ -55,8 +55,44 @@ object LensDiscovery {
                 "RAW is advertised but no camera offers a usable RAW image size.", notes,
             )
         }
-        val (lenses, mainIndex) = finishLenses(built, back)
+        val (lenses, mainIndex) = finishLenses(applyTopology(built, back, notes), back)
         return DeviceProfile.Supported(lenses, mainIndex, notes)
+    }
+
+    /**
+     * Derive [LensProfile.standalone] from topology and drop the logical
+     * container from the lens list. Found on-device (Xiaomi 14 Ultra,
+     * 2026-07-22): setPhysicalCameraId() rejects the session when the tag is
+     * the opened camera's own id, or any id that is not a physical child of
+     * the opened logical camera. So only children of the primary logical are
+     * taggable; every other lens -- hidden probed ids, listed non-child ids,
+     * and the no-logical fallback -- must open as its own CameraDevice.
+     */
+    private fun applyTopology(
+        built: List<LensProfile>, back: List<CameraSnapshot>, notes: MutableList<ProfileNote>,
+    ): List<LensProfile> {
+        val primary = back.firstOrNull { it.physicalIds.isNotEmpty() }
+        val children = primary?.physicalIds?.toSet() ?: emptySet()
+
+        val retyped = built.map { lens ->
+            val standalone = lens.cameraId !in children
+            if (lens.standalone == standalone) lens else lens.copy(standalone = standalone)
+        }
+
+        // The logical container duplicates whichever child the HAL routes it to;
+        // it is a lens of its own only when none of its children survived.
+        if (primary != null && retyped.any { it.cameraId in children }) {
+            val container = retyped.filter { it.cameraId == primary.cameraId }
+            if (container.isNotEmpty()) {
+                notes.removeAll { it.cameraId == primary.cameraId && it.accepted }
+                notes += ProfileNote(
+                    primary.cameraId, accepted = false,
+                    message = "logical container; its physical children are the lenses",
+                )
+                return retyped.filterNot { it.cameraId == primary.cameraId }
+            }
+        }
+        return retyped
     }
 
     /**
@@ -74,7 +110,15 @@ object LensDiscovery {
     ): Pair<List<LensProfile>, Int> {
         val deduped = built
             .groupBy { it.focalMm }
-            .map { (focal, group) -> if (focal == null) group else listOf(group.maxBy { it.sizes.size }) }
+            // A taggable child beats a standalone twin regardless of size count:
+            // it is the id the previous enumerator exposed, so WB anchors and
+            // session behaviour stay identical across the refactor.
+            .map { (focal, group) ->
+                if (focal == null) group
+                else listOf(group.sortedWith(
+                    compareBy<LensProfile> { it.standalone }
+                        .thenByDescending { it.sizes.size }.thenBy { it.cameraId }).first())
+            }
             .flatten()
             .sortedWith(compareByDescending<LensProfile> { it.fovMetric }.thenBy { it.cameraId })
 
