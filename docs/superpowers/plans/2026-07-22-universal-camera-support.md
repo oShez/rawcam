@@ -1544,7 +1544,7 @@ git commit -m "feat: honest UI for AUTO_ONLY lenses without manual sensor contro
 - Consumes: `RecordUiState.exposureRangeNs` (published in Task 8).
 - Produces: `ShutterStops.available(all: List<Long>, range: LongRange?): List<Long>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/ShutterStopsTest.kt`:
 
@@ -1577,12 +1577,12 @@ class ShutterStopsTest {
 
 The third case matters: an empty shutter list would leave the UI with no selectable value at all, which is worse than one imperfect option the HAL will clamp.
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*ShutterStopsTest*"`
 Expected: FAIL — `Unresolved reference: ShutterStops`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -1607,7 +1607,7 @@ object ShutterStops {
 }
 ```
 
-- [ ] **Step 4: Use it at the shutter slider**
+- [x] **Step 4: Use it at the shutter slider**
 
 Where `RecordScreen` builds its shutter stop list:
 
@@ -1617,7 +1617,7 @@ Where `RecordScreen` builds its shutter stop list:
 
 Clamp `shutterIndex` into `shutterChoices.indices` whenever the lens changes, in the same place `coerceToMode` already clamps ISO. An out-of-range index after a lens switch is exactly the class of bug fixed in `0ba7eaa`.
 
-- [ ] **Step 5: Run tests and build**
+- [x] **Step 5: Run tests and build**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*ShutterStopsTest*" && ./gradlew :app:assembleDebug`
 Expected: PASS, BUILD SUCCESSFUL.
@@ -1626,7 +1626,7 @@ Expected: PASS, BUILD SUCCESSFUL.
 
 On both phones, confirm the shutter list is unchanged from today (both sensors' ranges comfortably contain the app's stops) and that switching lenses never leaves the shutter chip blank.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/camera/ShutterStops.kt app/src/main/java/com/shez/rawcam/ui/RecordScreen.kt app/src/test/java/com/shez/rawcam/camera/ShutterStopsTest.kt
