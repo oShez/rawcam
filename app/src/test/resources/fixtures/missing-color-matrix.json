@@ -1,0 +1,19 @@
+{
+  "model": "Shape: missing color matrix",
+  "sdkInt": 34,
+  "cameras": [
+    {
+      "cameraId": "0",
+      "facing": 1,
+      "capabilities": [1, 3],
+      "rawSizes": [{"width": 4000, "height": 3000, "minFrameDurationNs": 33333333}],
+      "cfa": 0,
+      "whiteLevel": 1023,
+      "blackLevel": [64, 64, 64, 64],
+      "isoRange": [50, 3200],
+      "focalLengthsMm": [4.2],
+      "physicalSizeMm": [6.4, 4.8],
+      "sensorOrientation": 90
+    }
+  ]
+}

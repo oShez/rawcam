@@ -1,0 +1,747 @@
+{
+    "model": "24030PN60G",
+    "sdkInt": 36,
+    "cameras": [
+        {
+            "cameraId": "0",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20,
+                11
+            ],
+            "hardwareLevel": 3,
+            "physicalIds": [
+                "2",
+                "3"
+            ],
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 16640566
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 16383,
+            "blackLevel": [
+                1024,
+                1024,
+                1024,
+                1024
+            ],
+            "focalLengthsMm": [
+                8.72
+            ],
+            "physicalSizeMm": [
+                13.1072,
+                9.8304
+            ],
+            "colorTransform1": [
+                0.734375,
+                -0.21875,
+                -0.125,
+                -0.5078125,
+                1.4375,
+                0.0390625,
+                -0.125,
+                0.3046875,
+                0.375
+            ],
+            "colorTransform2": [
+                1.0859375,
+                -0.359375,
+                -0.546875,
+                -0.984375,
+                2.25,
+                -0.4765625,
+                -0.203125,
+                0.40625,
+                0.421875
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                3200
+            ],
+            "exposureRangeNs": [
+                36044,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 6.6666665,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90
+        },
+        {
+            "cameraId": "1",
+            "facing": 0,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20
+            ],
+            "hardwareLevel": 3,
+            "rawSizes": [
+                {
+                    "width": 3264,
+                    "height": 2448,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 3264,
+                    "height": 1836,
+                    "minFrameDurationNs": 33333333
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 1023,
+            "blackLevel": [
+                64,
+                64,
+                64,
+                64
+            ],
+            "focalLengthsMm": [
+                2.83
+            ],
+            "physicalSizeMm": [
+                4.582656,
+                3.436992
+            ],
+            "colorTransform1": [
+                1.1171875,
+                -0.421875,
+                -0.109375,
+                -0.3125,
+                1.1015625,
+                0.1796875,
+                0.0546875,
+                0.0546875,
+                0.5234375
+            ],
+            "colorTransform2": [
+                1.640625,
+                -0.984375,
+                0.1953125,
+                -0.3515625,
+                1.1953125,
+                0.53125,
+                0.1015625,
+                -0.0625,
+                0.9296875
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                800
+            ],
+            "exposureRangeNs": [
+                25008,
+                409724820
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 3264,
+                "bottom": 2448
+            },
+            "minFocusDiopters": 0.0,
+            "oisModes": [
+                0
+            ],
+            "sensorOrientation": 270
+        },
+        {
+            "cameraId": "2",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20
+            ],
+            "hardwareLevel": 3,
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 16640566
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 16383,
+            "blackLevel": [
+                1024,
+                1024,
+                1024,
+                1024
+            ],
+            "focalLengthsMm": [
+                8.72
+            ],
+            "physicalSizeMm": [
+                13.1072,
+                9.8304
+            ],
+            "colorTransform1": [
+                0.734375,
+                -0.21875,
+                -0.125,
+                -0.5078125,
+                1.4375,
+                0.0390625,
+                -0.125,
+                0.3046875,
+                0.375
+            ],
+            "colorTransform2": [
+                1.0859375,
+                -0.359375,
+                -0.546875,
+                -0.984375,
+                2.25,
+                -0.4765625,
+                -0.203125,
+                0.40625,
+                0.421875
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                3200
+            ],
+            "exposureRangeNs": [
+                26656,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 6.6666665,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90
+        },
+        {
+            "cameraId": "3",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20
+            ],
+            "hardwareLevel": 3,
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 33279265
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 1023,
+            "blackLevel": [
+                64,
+                64,
+                64,
+                64
+            ],
+            "focalLengthsMm": [
+                2.03
+            ],
+            "physicalSizeMm": [
+                5.7344,
+                4.3008
+            ],
+            "colorTransform1": [
+                0.9609375,
+                -0.3515625,
+                -0.1171875,
+                -0.4296875,
+                1.328125,
+                0.078125,
+                -0.0859375,
+                0.2890625,
+                0.3984375
+            ],
+            "colorTransform2": [
+                1.890625,
+                -1.2578125,
+                -0.078125,
+                -0.5078125,
+                1.5,
+                0.1640625,
+                -0.046875,
+                0.1796875,
+                0.7578125
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                1119
+            ],
+            "exposureRangeNs": [
+                36044,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 20.0,
+            "oisModes": [
+                0
+            ],
+            "sensorOrientation": 90
+        },
+        {
+            "cameraId": "4",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20
+            ],
+            "hardwareLevel": 3,
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 33279265
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 1023,
+            "blackLevel": [
+                64,
+                64,
+                64,
+                64
+            ],
+            "focalLengthsMm": [
+                12.28
+            ],
+            "physicalSizeMm": [
+                5.7344,
+                4.3008
+            ],
+            "colorTransform1": [
+                0.78125,
+                -0.203125,
+                -0.1015625,
+                -0.5078125,
+                1.3515625,
+                0.125,
+                -0.1796875,
+                0.375,
+                0.4375
+            ],
+            "colorTransform2": [
+                1.421875,
+                -0.7421875,
+                -0.1796875,
+                -0.71875,
+                1.8203125,
+                -0.078125,
+                -0.109375,
+                0.28125,
+                0.6484375
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                1119
+            ],
+            "exposureRangeNs": [
+                36044,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 10.0,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90,
+            "standalone": true
+        },
+        {
+            "cameraId": "5",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20
+            ],
+            "hardwareLevel": 3,
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 33282077
+                }
+            ],
+            "cfa": 2,
+            "whiteLevel": 1023,
+            "blackLevel": [
+                64,
+                64,
+                64,
+                64
+            ],
+            "focalLengthsMm": [
+                19.4
+            ],
+            "physicalSizeMm": [
+                5.7344,
+                4.3008
+            ],
+            "colorTransform1": [
+                0.8203125,
+                -0.2421875,
+                -0.1015625,
+                -0.515625,
+                1.3671875,
+                0.109375,
+                -0.15625,
+                0.359375,
+                0.4453125
+            ],
+            "colorTransform2": [
+                1.484375,
+                -0.59375,
+                -0.734375,
+                -0.9375,
+                2.2578125,
+                -0.640625,
+                -0.21875,
+                0.4921875,
+                0.390625
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                1119
+            ],
+            "exposureRangeNs": [
+                34172,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 3.3333333,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90,
+            "standalone": true
+        },
+        {
+            "cameraId": "6",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20,
+                11
+            ],
+            "hardwareLevel": 3,
+            "physicalIds": [
+                "2",
+                "3",
+                "4",
+                "5"
+            ],
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 16640566
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 16383,
+            "blackLevel": [
+                1024,
+                1024,
+                1024,
+                1024
+            ],
+            "focalLengthsMm": [
+                8.72
+            ],
+            "physicalSizeMm": [
+                13.1072,
+                9.8304
+            ],
+            "colorTransform1": [
+                0.734375,
+                -0.21875,
+                -0.125,
+                -0.5078125,
+                1.4375,
+                0.0390625,
+                -0.125,
+                0.3046875,
+                0.375
+            ],
+            "colorTransform2": [
+                1.0859375,
+                -0.359375,
+                -0.546875,
+                -0.984375,
+                2.25,
+                -0.4765625,
+                -0.203125,
+                0.40625,
+                0.421875
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                3200
+            ],
+            "exposureRangeNs": [
+                36044,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 6.6666665,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90,
+            "standalone": true
+        },
+        {
+            "cameraId": "9",
+            "facing": 1,
+            "capabilities": [
+                0,
+                9,
+                3,
+                7,
+                4,
+                5,
+                1,
+                6,
+                2,
+                19,
+                18,
+                20,
+                11
+            ],
+            "hardwareLevel": 3,
+            "physicalIds": [
+                "2",
+                "3",
+                "4",
+                "5"
+            ],
+            "rawSizes": [
+                {
+                    "width": 4096,
+                    "height": 3072,
+                    "minFrameDurationNs": 33333333
+                },
+                {
+                    "width": 4096,
+                    "height": 2304,
+                    "minFrameDurationNs": 16640566
+                }
+            ],
+            "cfa": 3,
+            "whiteLevel": 16383,
+            "blackLevel": [
+                1024,
+                1024,
+                1024,
+                1024
+            ],
+            "focalLengthsMm": [
+                8.72
+            ],
+            "physicalSizeMm": [
+                13.1072,
+                9.8304
+            ],
+            "colorTransform1": [
+                0.734375,
+                -0.21875,
+                -0.125,
+                -0.5078125,
+                1.4375,
+                0.0390625,
+                -0.125,
+                0.3046875,
+                0.375
+            ],
+            "colorTransform2": [
+                1.0859375,
+                -0.359375,
+                -0.546875,
+                -0.984375,
+                2.25,
+                -0.4765625,
+                -0.203125,
+                0.40625,
+                0.421875
+            ],
+            "illuminant1": 21,
+            "illuminant2": 17,
+            "isoRange": [
+                50,
+                3200
+            ],
+            "exposureRangeNs": [
+                36044,
+                1000000000
+            ],
+            "activeArray": {
+                "left": 0,
+                "top": 0,
+                "right": 4096,
+                "bottom": 3072
+            },
+            "minFocusDiopters": 6.6666665,
+            "oisModes": [
+                0,
+                1
+            ],
+            "sensorOrientation": 90,
+            "standalone": true
+        }
+    ]
+}

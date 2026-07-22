@@ -101,8 +101,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.camera.Camera2SnapshotSource
 import com.shez.rawcam.camera.CameraController
 import com.shez.rawcam.camera.CompatibilityReport
 import com.shez.rawcam.camera.ControlTier
@@ -992,6 +994,30 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * HandlerThread), so closing on backgrounding would permanently kill the camera
      * for the rest of the process. close() is reserved for onCleared().
      */
+    /**
+     * Captures this device's raw camera characteristics via a fresh
+     * [Camera2SnapshotSource] and writes them to
+     * `getExternalFilesDir(null)/snapshot-<model>.json` -- this is how real device
+     * fixtures for [com.shez.rawcam.camera.GoldenFixtureTest] get produced. Runs on
+     * [cameraOps]: [Camera2SnapshotSource.capture] is binder IPC, same as every other
+     * camera call, and must never block the main thread. [onResult] is invoked back
+     * on the main thread with the written [File] or the failure.
+     */
+    fun dumpCharacteristics(onResult: (Result<File>) -> Unit) {
+        cameraOps.launch {
+            val result = runCatching {
+                val cameraManager = getApplication<Application>()
+                    .getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val snapshot = Camera2SnapshotSource(cameraManager).capture()
+                val dir = getApplication<Application>().getExternalFilesDir(null)
+                    ?: error("no external files dir")
+                val safeModel = Build.MODEL.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                File(dir, "snapshot-$safeModel.json").also { it.writeText(snapshot.toJson()) }
+            }
+            withContext(Dispatchers.Main) { onResult(result) }
+        }
+    }
+
     fun handleActivityStop() {
         if (!_uiState.value.recording) return
         pollJob?.cancel()

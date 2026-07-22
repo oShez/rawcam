@@ -64,7 +64,10 @@ class MainActivity : ComponentActivity() {
                         )
                         Screen.Clips -> ClipsScreen(onBack = { screen = Screen.Record })
                         Screen.Exports -> ExportsScreen(onBack = { screen = Screen.Record })
-                        Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Record })
+                        Screen.Settings -> SettingsScreen(
+                            onBack = { screen = Screen.Record },
+                            viewModel = viewModel,
+                        )
                     }
                 }
             }

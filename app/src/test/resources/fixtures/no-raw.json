@@ -1,0 +1,17 @@
+{
+  "model": "Shape: no RAW capability",
+  "sdkInt": 34,
+  "cameras": [
+    {
+      "cameraId": "0",
+      "facing": 1,
+      "capabilities": [0],
+      "cfa": 0,
+      "whiteLevel": 1023,
+      "blackLevel": [64, 64, 64, 64],
+      "focalLengthsMm": [4.2],
+      "physicalSizeMm": [6.4, 4.8],
+      "sensorOrientation": 90
+    }
+  ]
+}

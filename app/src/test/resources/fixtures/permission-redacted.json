@@ -1,0 +1,8 @@
+{
+  "model": "Shape: permission redacted",
+  "sdkInt": 34,
+  "cameras": [
+    { "cameraId": "0" },
+    { "cameraId": "1" }
+  ]
+}

@@ -1,5 +1,6 @@
 package com.shez.rawcam.ui
 
+import android.content.Intent
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -38,10 +39,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -52,6 +56,7 @@ import com.shez.rawcam.settings.SettingsRepository
 import com.shez.rawcam.settings.ShutterDisplay
 import com.shez.rawcam.settings.StartupMeter
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * Full settings list, sectioned to match [docs/superpowers/specs/2026-07-18-settings-page-design.md].
@@ -61,14 +66,23 @@ import kotlinx.coroutines.launch
  * value, so external changes (e.g. Reset) are reflected immediately via the flow.
  */
 @Composable
-fun SettingsScreen(onBack: () -> Unit = {}) {
+fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewModel()) {
     BackHandler(onBack = onBack)
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val settings by SettingsRepository.settings.collectAsState(initial = Settings())
+    val recordUiState by viewModel.uiState.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
+    var showReport by remember { mutableStateOf(false) }
+    var dumpStatus by remember { mutableStateOf<String?>(null) }
 
     fun apply(transform: (Settings) -> Settings) {
         scope.launch { SettingsRepository.update(transform) }
+    }
+
+    if (showReport) {
+        CompatibilityReportScreen(reportText = recordUiState.reportText, onBack = { showReport = false })
+        return
     }
 
     if (showResetDialog) {
@@ -267,6 +281,28 @@ fun SettingsScreen(onBack: () -> Unit = {}) {
                 Text("Reset all settings", color = RawCamColors.Accent, fontSize = 15.sp)
             }
 
+            SectionHeader("DEVICE")
+            ActionRow(
+                title = "Compatibility report",
+                subtitle = "What RawCam found on this phone, and why",
+                onClick = { showReport = true },
+            )
+            ActionRow(
+                title = "Dump characteristics (JSON)",
+                subtitle = dumpStatus ?: "Writes a snapshot fixture and opens the share sheet",
+                onClick = {
+                    dumpStatus = "Dumping…"
+                    viewModel.dumpCharacteristics { result ->
+                        result.onSuccess { file ->
+                            dumpStatus = "Saved ${file.name}"
+                            shareFile(context, file, "application/json")
+                        }.onFailure { e ->
+                            dumpStatus = "Failed: ${e.message}"
+                        }
+                    }
+                },
+            )
+
             SectionHeader("ABOUT")
             Text(
                 "RawCam 0.1", color = RawCamColors.Muted, fontSize = 12.sp,
@@ -395,4 +431,84 @@ private fun TextFieldRow(title: String, value: String, onCommit: (String) -> Uni
                 },
         )
     }
+}
+
+/** Navigational row -- like [ToggleRow] but fires [onClick] instead of toggling a
+ * value, for actions that open a sub-screen or share sheet (Device section). */
+@Composable
+private fun ActionRow(title: String, subtitle: String?, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = RawCamColors.OnSurface, fontSize = 15.sp)
+            subtitle?.let {
+                Spacer(Modifier.height(2.dp))
+                Text(it, color = RawCamColors.Muted, fontSize = 12.sp)
+            }
+        }
+        Text("›", color = RawCamColors.Muted, fontSize = 18.sp)
+    }
+}
+
+/**
+ * Read-only scrollable view of [CompatibilityReport.render]'s output, reached from
+ * the Device section's "Compatibility report" row. SHARE fires a plain-text
+ * ACTION_SEND -- there is no file to attach here (contrast the JSON dump below,
+ * which shares an actual file via FileProvider).
+ */
+@Composable
+private fun CompatibilityReportScreen(reportText: String, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("←", fontSize = 18.sp) }
+            Text("Compatibility report", style = MaterialTheme.typography.titleLarge)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            reportText,
+            color = RawCamColors.OnSurface,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, RawCamColors.Outline, RoundedCornerShape(8.dp))
+                .clickable { shareText(context, reportText) }
+                .padding(vertical = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Text("SHARE", color = RawCamColors.Accent, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/** Plain-text share (compatibility report). */
+private fun shareText(context: android.content.Context, text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share compatibility report"))
+}
+
+/** File share via the app's FileProvider (see file_paths.xml) -- same mechanism as
+ * ExportsScreen's DNG sharing, single-file ACTION_SEND instead of _MULTIPLE. */
+private fun shareFile(context: android.content.Context, file: File, mime: String) {
+    val authority = "${context.packageName}.fileprovider"
+    val uri = FileProvider.getUriForFile(context, authority, file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share ${file.name}"))
 }

@@ -4,4 +4,10 @@
          (getExternalFilesDir/exports/clipName/*.dng), not the whole external
          files dir (which also holds clips/ and bench.bin). -->
     <external-files-path name="exports" path="exports/" />
+    <!-- Root of getExternalFilesDir(null), where RecordViewModel.dumpCharacteristics
+         writes the snapshot JSON dump (Settings, Device section, Dump characteristics).
+         Declaring the root only permits getUriForFile to resolve a path under it;
+         the app still names one specific file per share intent, so this does not by
+         itself expose clips/ or bench.bin to anything. -->
+    <external-files-path name="snapshot-root" path="." />
 </paths>
