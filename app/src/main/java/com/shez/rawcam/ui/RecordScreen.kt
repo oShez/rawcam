@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -817,8 +818,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // cannot be true until controller.initialize() has completed -- see
                 // nearestIso's comment for the full chain. controller.rawSpec is valid.
                 val spec = controller.rawSpec
-                // Packed10 payload record size: (w*h/4)*5 + 64 bytes of FrameMeta.
-                val frameBytes = (spec.width.toLong() * spec.height / 4) * 5 + 64
+                val frameBytes = frameRecordBytes(spec)
                 val available = StatFs(controller.clipsDir.absolutePath).availableBytes
                 val required = frameBytes * s.fps * s.settings.freeSpaceReserveSeconds.toLong()
                 if (available < required) {
@@ -986,9 +986,28 @@ private fun formatTimer(totalSeconds: Int): String {
     return "%02d:%02d".format(s / 60, s % 60)
 }
 
+/**
+ * Bytes per recorded frame record (packed payload + 64-byte FrameMeta), mirroring
+ * capture.cpp's pack-mode choice exactly: Packed10 (1.25 B/px) only for a <=10-bit
+ * white level on a width divisible by 4, Packed12 (1.5 B/px) for <=12-bit on an
+ * even width, else Raw16 (2 B/px -- the true row stride isn't known until the
+ * first frame arrives, so this is a floor; stride padding can only add to it).
+ * Was hardcoded to the Packed10 formula, which under-reserved free space ~20% on
+ * a 12-bit sensor and ~60% on anything recording Raw16.
+ */
+private fun frameRecordBytes(spec: CameraController.RawSpec): Long {
+    val pixels = spec.width.toLong() * spec.height
+    val payload = when {
+        spec.whiteLevel <= 0x3FF && spec.width % 4 == 0 -> (pixels / 4) * 5
+        spec.whiteLevel <= 0xFFF && spec.width % 2 == 0 -> (pixels / 2) * 3
+        else -> pixels * 2
+    }
+    return payload + 64
+}
+
 /** Free space -> recordable time at the current fps/frame size ("~23 min"). */
-private fun remainingLabel(freeBytes: Long, fps: Int, width: Int, height: Int): String {
-    val frameBytes = (width.toLong() * height / 4) * 5 + 64
+private fun remainingLabel(freeBytes: Long, fps: Int, spec: CameraController.RawSpec): String {
+    val frameBytes = frameRecordBytes(spec)
     val perSecond = frameBytes * fps
     if (perSecond <= 0) return "—"
     val seconds = freeBytes / perSecond
@@ -1110,6 +1129,22 @@ fun RecordScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(viewModel) {
         viewModel.events.collect { msg -> snackbarHostState.showSnackbar(msg) }
+    }
+
+    // Auto-export starts ExportService straight from the record flow, but the
+    // runtime POST_NOTIFICATIONS ask lived only in ClipsScreen -- a user who
+    // records with autoExport on and never opens Clips would get invisible
+    // exports (the service still runs; its progress notification is just never
+    // shown). Ask here the first time the setting is observed enabled.
+    val notificationPermLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(state.settings.autoExport) {
+        if (state.settings.autoExport &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     // Free-space poll lives here (not in the viewmodel) so it's lifecycle-gated:
@@ -1240,7 +1275,13 @@ fun RecordScreen(
             }
         }
 
-        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+        // displayCutoutPadding (on top of systemBarsPadding) keeps the overlay
+        // controls clear of the camera punch-hole. In landscape this device
+        // reserves the left 48dp (168px) for a vertically-centered cutout, which
+        // sat directly over the left status rail; systemBarsPadding alone doesn't
+        // account for the cutout, so the timer/frames text was under the hole.
+        // Only the overlay is inset -- the preview underneath still fills the edge.
+        Box(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding()) {
             if (state.thermalSevere) {
                 Surface(
                     color = RawCamColors.Accent,
@@ -1307,24 +1348,31 @@ fun RecordScreen(
                     modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (state.recording) RecDot()
-                        Text(
-                            formatTimer(state.elapsedSeconds),
-                            color = RawCamColors.OnSurface, fontSize = 24.sp,
-                            fontFamily = FontFamily.Monospace,
+                    // Idle, the timer reads 00:00 and frames-written/dropped are both
+                    // 0 -- three dead readouts stacked down the left edge. Show the
+                    // live capture stats only while recording (when they mean
+                    // something); idle keeps just the one useful readout, space
+                    // remaining. This is the bulk of the left-side declutter.
+                    if (state.recording) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            RecDot()
+                            Text(
+                                formatTimer(state.elapsedSeconds),
+                                color = RawCamColors.OnSurface, fontSize = 24.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                        StatItem("${state.written}", "frames written")
+                        StatItem(
+                            "${state.dropped}", "dropped",
+                            valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
                         )
                     }
-                    StatItem("${state.written}", "frames written")
                     StatItem(
-                        "${state.dropped}", "dropped",
-                        valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
-                    )
-                    StatItem(
-                        remainingLabel(state.freeSpaceBytes, state.fps, spec.width, spec.height),
+                        remainingLabel(state.freeSpaceBytes, state.fps, spec),
                         "space remaining",
                     )
                 }
