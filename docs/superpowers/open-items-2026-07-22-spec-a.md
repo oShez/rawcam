@@ -104,3 +104,11 @@ connected and unlocked before starting it.
 - Pixel 7 Pro regression (the gate's other half) NOT run — device not present. Do it before merging to main.
 - Stale note corrected: the preserved telephoto clip `clip_20260721_220030` no longer exists on-device (verified 2026-07-22); do not go looking for it.
 - NEXT: Tasks 7-11. **Start with `2026-07-23-spec-a-tasks-7-11-execution-guide.md` in the plans directory** — it carries the environment facts, Xiaomi topology table, stale-plan corrections, per-task briefings, recommended order (8 → 9 → 7 → 10 → 11), and stop conditions. The plan file still holds the code listings.
+
+---
+
+## Update 2026-07-23: Task 7 shipped code-complete; device check owed
+
+- `462bebf` Task 7: `CompatibilityReport.render` (RED confirmed — `Unresolved reference: CompatibilityReport` — then GREEN, 3/3), `UnsupportedDeviceScreen` composable (permission-gate visual language, clipboard COPY REPORT), the `ensureCameraInitialized()` guard right after `controller.initialize()`, and `camera.raw` uses-feature flipped to `required="false"`. Suite 39/39 (36 prior + 3 new), `assembleDebug` green.
+- **The Xiaomi 14 Ultra was not connected this session.** The plan's Step 8 on-device check (`pm revoke`/`pm grant` CAMERA cycle, confirming the permission gate and not a crash) was **not run** — its checkbox is deliberately left unticked.
+- **OWED before merge, batch with Task 10's device session:** the permission revoke → gate → grant cycle on the Xiaomi (and ideally the Pixel, once connected), confirming (a) normal launch is untouched — straight to viewfinder, no new screen — and (b) revoking CAMERA mid-session shows the existing permission gate, not `UnsupportedDeviceScreen` and not a crash. `PERMISSION_REDACTED` still cannot render on-device today (the permission gate returns before `initialize()` runs when permission is missing) — its mapping is wired but unreachable, exactly as the execution guide predicted.

@@ -1274,7 +1274,7 @@ git commit -m "refactor: drive CameraController from LensDiscovery instead of in
 - Consumes: `DeviceProfile` (Task 2), `CameraController.initialize()` (Task 6).
 - Produces: `CompatibilityReport.render(profile: DeviceProfile, model: String, sdkInt: Int): String`; `RecordUiState.unsupported: DeviceProfile.Unsupported?`; `RecordUiState.reportText: String`.
 
-- [ ] **Step 1: Unblock installation on non-RAW devices**
+- [x] **Step 1: Unblock installation on non-RAW devices**
 
 In `AndroidManifest.xml`, change line 7:
 
@@ -1284,7 +1284,7 @@ In `AndroidManifest.xml`, change line 7:
 
 Without this, a device with no RAW support cannot install the app at all, so it can never reach the screen this task builds.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/CompatibilityReportTest.kt`:
 
@@ -1324,12 +1324,12 @@ class CompatibilityReportTest {
 }
 ```
 
-- [ ] **Step 3: Run and confirm failure**
+- [x] **Step 3: Run and confirm failure**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*CompatibilityReportTest*"`
 Expected: FAIL — `Unresolved reference: CompatibilityReport`.
 
-- [ ] **Step 4: Implement the renderer**
+- [x] **Step 4: Implement the renderer**
 
 ```kotlin
 package com.shez.rawcam.camera
@@ -1370,12 +1370,12 @@ object CompatibilityReport {
 }
 ```
 
-- [ ] **Step 5: Run and confirm pass**
+- [x] **Step 5: Run and confirm pass**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*CompatibilityReportTest*"`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Surface the unsupported state in `RecordUiState`**
+- [x] **Step 6: Surface the unsupported state in `RecordUiState`**
 
 Add to `RecordUiState` (RecordScreen.kt:144):
 
@@ -1398,7 +1398,7 @@ In `ensureCameraInitialized()`, capture `initialize()`'s result and stop early w
 
 Everything after this in that coroutine (rawSpec publication, WB anchor restore, startup auto-meter) already assumes a working camera and must stay below this guard.
 
-- [ ] **Step 7: Render the unsupported screen**
+- [x] **Step 7: Render the unsupported screen**
 
 In `RecordScreen`'s composable, ahead of the existing `rawSpec == null` loading gate:
 
@@ -1434,7 +1434,7 @@ adb shell pm revoke com.shez.rawcam android.permission.CAMERA
 adb shell pm grant com.shez.rawcam android.permission.CAMERA
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add app/src/main/AndroidManifest.xml app/src/main/java/com/shez/rawcam/camera/CompatibilityReport.kt app/src/main/java/com/shez/rawcam/ui/RecordScreen.kt app/src/test/java/com/shez/rawcam/camera/CompatibilityReportTest.kt
