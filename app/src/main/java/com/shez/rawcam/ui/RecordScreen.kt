@@ -1847,6 +1847,12 @@ internal fun <T> TickedSlider(
                         SliderDefaults.Thumb(interactionSource = thumbInteraction, enabled = enabled && !locked)
                     }
                 },
+                // Material3 1.3's default Track leaves a themed "thumbTrackGapSize" gap
+                // (unpainted, background shows through) on each side of the thumb -- on
+                // this dark panel background that gap reads as black bars flanking the
+                // thumb. Zeroing it restores a continuous track, matching how the slider
+                // looked before the value bubble was added.
+                track = { state -> SliderDefaults.Track(sliderState = state, thumbTrackGapSize = 0.dp) },
             )
             Text(
                 labelFor(stops.last()), color = RawCamColors.Muted,
