@@ -1622,7 +1622,7 @@ Clamp `shutterIndex` into `shutterChoices.indices` whenever the lens changes, in
 Run: `./gradlew :app:testDebugUnitTest --tests "*ShutterStopsTest*" && ./gradlew :app:assembleDebug`
 Expected: PASS, BUILD SUCCESSFUL.
 
-- [ ] **Step 6: On-device check**
+- [x] **Step 6: On-device check**
 
 On both phones, confirm the shutter list is unchanged from today (both sensors' ranges comfortably contain the app's stops) and that switching lenses never leaves the shutter chip blank.
 
