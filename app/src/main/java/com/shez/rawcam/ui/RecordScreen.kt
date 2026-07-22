@@ -101,6 +101,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
+import com.shez.rawcam.camera.LensProfile
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
@@ -143,7 +144,7 @@ import kotlin.math.roundToInt
  * publishes them here -- the composable renders a loading placeholder until then. */
 data class RecordUiState(
     val rawSpec: CameraController.RawSpec? = null,
-    val lenses: List<CameraController.LensInfo> = emptyList(),
+    val lenses: List<LensProfile> = emptyList(),
     val previewReady: Boolean = false,
     val recording: Boolean = false,
     val busy: Boolean = false,
@@ -294,16 +295,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     /**
      * Starts camera enumeration/restore exactly once, and only once CAMERA
      * permission is actually granted. Previously this ran unconditionally from
-     * init{} regardless of permission state -- but [CameraController.initialize]'s
-     * enumerateLenses() reads CameraCharacteristics keys (REQUEST_AVAILABLE_
-     * CAPABILITIES and friends) that Android redacts to null for apps lacking the
-     * CAMERA permission, which made every physical/logical lens candidate fail
-     * `buildLensCandidate`'s null checks and left `deduped` empty -- crashing the
-     * whole process with `check(deduped.isNotEmpty())`'s "no RAW-capable back
-     * lens" IllegalStateException the instant the app launched without the
-     * permission already granted (found 2026-07-21 on-device while verifying the
-     * RecordScreen permission-gate UI, which this crash meant could never actually
-     * be reached). Called from init{} (the common case -- permission already
+     * init{} regardless of permission state -- and enumeration used to throw on
+     * the redacted characteristics Android hands an app that lacks the CAMERA
+     * permission, crashing the whole process the instant the app launched without
+     * it (found 2026-07-21 on-device while verifying the RecordScreen
+     * permission-gate UI, which that crash meant could never actually be
+     * reached). Enumeration no longer throws -- LensDiscovery classifies that
+     * exact case as UnsupportedReason.PERMISSION_REDACTED -- but the gate stays:
+     * there is no point burning a full characteristics sweep to learn we lack
+     * permission, and the caller still wants a real profile, not a redacted one.
+     * Called from init{} (the common case -- permission already
      * granted from a prior run) and again from RecordScreen once its runtime
      * permission request resolves to granted (the fresh-install/just-denied case)
      * -- the guard makes every call after the first a no-op, so calling from both

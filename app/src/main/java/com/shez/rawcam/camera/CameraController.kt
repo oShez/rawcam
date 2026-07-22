@@ -2,11 +2,9 @@ package com.shez.rawcam.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -25,7 +23,6 @@ import android.view.Surface
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.settings.OisMode
 import java.io.File
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -60,65 +57,10 @@ class CameraController(private val context: Context) {
         val isoRange: ClosedRange<Int>, val maxFps: Int,
         val minFocusDiopters: Float, val deviceName: String,
         /** DNG/EXIF LightSource codes + second calibration matrix, straight from
-         * the active [LensInfo] -- illuminant2==0 means no second calibration
+         * the active [LensProfile] -- illuminant2==0 means no second calibration
          * point (colorMatrix2 is then all-zero and must not be written to the
          * DNG as if it were real -- see dng_writer.cpp). */
         val illuminant1: Int, val illuminant2: Int, val colorMatrix2: FloatArray,
-    )
-
-    /** One selectable RAW output size of a lens. [label] is what the UI shows. */
-    data class LensSize(val width: Int, val height: Int, val maxFps: Int, val label: String)
-
-    /**
-     * One selectable back lens. [physicalId] is null only for the single-lens
-     * fallback (open the logical camera untagged — today's behavior). [fovMetric]
-     * is sensorPhysicalWidth / focalLength: proportional to field of view, used
-     * for sorting (widest first) and zoom labels.
-     */
-    data class LensInfo(
-        val physicalId: String?, val label: String, val focalMm: Float,
-        val fovMetric: Float, val sizes: List<LensSize>,
-        val cfa: Int, val whiteLevel: Int, val blackLevel: IntArray,
-        val colorMatrix1: FloatArray, val isoRange: ClosedRange<Int>,
-        val minFocusDiopters: Float, val activeArraySize: Rect,
-        /** DNG-style second calibration illuminant (nullable -- some sensors only
-         * expose one). Row-major 3x3, same convention as [colorMatrix1]: CIE
-         * XYZ -> sensor space under [illuminant2]. */
-        val colorMatrix2: FloatArray?,
-        /** DNG/EXIF reference-illuminant codes for [colorMatrix1] / [colorMatrix2];
-         * mapped to a CCT by [illuminantCct]. Null when the characteristic is absent. */
-        val illuminant1: Int?, val illuminant2: Int?,
-        /** CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION modes this
-         * lens supports (e.g. OIS_MODE_OFF/ON). Null on a sensor that doesn't expose
-         * the characteristic at all -- distinct from an array containing only OFF,
-         * which is common and means "no OIS hardware but the key exists". */
-        val availableOisModes: IntArray?,
-        /** True when [physicalId] is NOT a physical child of the primary logical
-         * camera (tagged via OutputConfiguration.setPhysicalCameraId) but a fully
-         * separate camera id that must be opened as its own standalone
-         * [CameraDevice] -- e.g. a telephoto/periscope lens the OS hides from both
-         * CameraManager.cameraIdList and the primary logical camera's
-         * physicalCameraIds, yet which independently reports RAW+MANUAL_SENSOR and
-         * opens successfully on its own (observed: MIUI/HyperOS on a Xiaomi 14
-         * Ultra, ids "4"/"5"). [physicalId] is never null when this is true -- it
-         * holds the id to open directly, not a tag. See [probeHiddenLenses]. */
-        val standalone: Boolean = false,
-        /** 35mm-equivalent focal length in mm, i.e. the number phones are actually
-         * marketed/specced with (e.g. "12mm ultrawide", "23mm main", "75mm 3.2x",
-         * "120mm 5x" on this device) -- NOT [focalMm], which is the lens's real
-         * physical focal length (a few mm on any phone sensor) and reads as
-         * obviously wrong to anyone checking against official specs. Computed in
-         * [buildLensCandidate] from the sensor's own measured physical size
-         * (SENSOR_INFO_PHYSICAL_SIZE), not a looked-up "1/2.51-inch"-style format
-         * table -- exact for this specific lens rather than approximate. */
-        val equivFocalMm: Float,
-        /** True for exactly one lens per device: the one [enumerateLenses] matched
-         * against the primary logical camera's own advertised focal length, i.e.
-         * the "main"/1x lens -- used by [initialize] to pick [defaultLensIndex].
-         * Kept separate from [label] (now the lens's real focal length in mm, not
-         * a zoom multiplier) so that display formatting can change freely without
-         * breaking default-lens detection, which used to string-match `label == "1x"`. */
-        val isMain: Boolean = false,
     )
 
     /** Result of a tap-to-meter pass: converged 3A readings snapped to manual control values. */
@@ -148,14 +90,18 @@ class CameraController(private val context: Context) {
     private val cameraManager =
         context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     /** Id of the primary logical camera (the normal back logical camera, e.g. "0")
-     * -- opened for every non-[LensInfo.standalone] lens; physical children are
+     * -- opened for every non-[LensProfile.standalone] lens; physical children are
      * reached by tagging OutputConfigurations under this same open device, never
      * by opening their id directly. */
     private lateinit var primaryCameraId: String
 
     /** Selectable back lenses, widest first. At least one entry. Populated by
      * [initialize]; empty until then. */
-    @Volatile var lenses: List<LensInfo> = emptyList()
+    @Volatile var lenses: List<LensProfile> = emptyList()
+        private set
+
+    /** Populated by [initialize]; null until then. */
+    @Volatile var profile: DeviceProfile? = null
         private set
 
     /** Index in [lenses] of the main (1×) lens — the revert target on mode failure.
@@ -169,7 +115,7 @@ class CameraController(private val context: Context) {
     @Volatile lateinit var rawSpec: RawSpec
         private set
 
-    /** Identity key for the active lens -- [LensInfo.physicalId] verbatim, used ONLY
+    /** Identity key for the active lens -- [LensProfile.cameraId] verbatim, used ONLY
      * to key per-lens WB state ([anchorState], [presetCurves]) and to detect an
      * actual lens change in [selectMode]/[meterAt]. NOT used to decide session
      * tagging or which camera id to open -- see [sessionTagId]/[activeCameraId]. */
@@ -177,7 +123,7 @@ class CameraController(private val context: Context) {
 
     /** Camera id actually passed to [CameraManager.openCamera] for the active lens:
      * [primaryCameraId] for a physical-child lens (or the single-lens fallback), or
-     * the lens's own id when [LensInfo.standalone]. Set by [applySelectedLens]. */
+     * the lens's own id when [LensProfile.standalone]. Set by [applySelectedLens]. */
     @Volatile private var activeCameraId: String = ""
 
     /** Id of the [CameraDevice] currently held in [device] (or about to be), so
@@ -189,7 +135,7 @@ class CameraController(private val context: Context) {
 
     /** Physical camera id THIS SESSION's OutputConfigurations are tagged with via
      * setPhysicalCameraId -- null for the single-lens fallback AND for a standalone
-     * lens ([LensInfo.standalone]): a standalone device's own captures already
+     * lens ([LensProfile.standalone]): a standalone device's own captures already
      * target exactly that sensor and must never be tagged. Set by
      * [applySelectedLens]; distinct from [activePhysicalId], which keeps its
      * original per-lens-identity meaning regardless of standalone-ness. */
@@ -197,11 +143,11 @@ class CameraController(private val context: Context) {
 
     /** Active-array size (sensor pixel bounds) of the active lens; used by [meterAt]
      * to map a normalized tap point into a metering region. Cached from the same
-     * per-lens [CameraCharacteristics] already fetched in [enumerateLenses] — never
+     * per-lens characteristics snapshot [LensDiscovery] already resolved — never
      * refetched on the open/select hot path. */
     @Volatile private var activeArraySize: Rect? = null
 
-    /** Active lens's supported OIS modes ([LensInfo.availableOisModes]), tracked
+    /** Active lens's supported OIS modes ([LensProfile.oisModes]), tracked
      * alongside [activeArraySize] with the same lifecycle (set in [initialize] and
      * [selectMode], read by [applyManual] to gate [oisMode] ON/OFF requests against
      * what the hardware actually supports). Null means the characteristic itself
@@ -343,22 +289,35 @@ class CameraController(private val context: Context) {
     @Volatile private var sessionGeneration = 0
 
     /**
-     * Enumerates the logical camera's RAW-capable back lenses and populates [lenses],
-     * [defaultLensIndex], [rawSpec] and the active-lens tracking fields. This is
-     * per-lens [CameraManager.getCameraCharacteristics] binder IPC (plus stream-config
-     * queries) -- it MUST be called off the main thread (the caller's cameraOps
-     * dispatcher or Dispatchers.Default), exactly once, before any other method on
-     * this class. Not called from init{} so construction itself is main-thread-safe.
+     * Captures this device's camera characteristics and resolves them into a
+     * [DeviceProfile], populating [lenses], [defaultLensIndex], [rawSpec] and the
+     * active-lens tracking fields. Binder IPC per camera id -- it MUST be called
+     * off the main thread (the caller's cameraOps dispatcher or Dispatchers.Default),
+     * exactly once, before any other method on this class. Not called from init{}
+     * so construction itself is main-thread-safe.
+     *
+     * Returns Unsupported rather than throwing. The previous implementation used
+     * cameraIdList.first{} and check(deduped.isNotEmpty()), either of which
+     * crashed the process on hardware without a RAW back camera (and on any
+     * launch before CAMERA permission was granted).
      */
-    fun initialize() {
-        primaryCameraId = cameraManager.cameraIdList.first { id ->
-            val c = cameraManager.getCameraCharacteristics(id)
-            c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_BACK &&
-                c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-                    ?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW) == true
+    fun initialize(): DeviceProfile {
+        val snapshot = Camera2SnapshotSource(cameraManager).capture()
+        val result = LensDiscovery.discover(snapshot.cameras)
+        profile = result
+        result.notes.forEach { Log.i(TAG, "lens ${it.cameraId}: ${it.message}") }
+        if (result !is DeviceProfile.Supported) {
+            Log.w(TAG, "device unsupported: ${(result as DeviceProfile.Unsupported).reason}")
+            return result
         }
-        lenses = enumerateLenses(cameraManager.getCameraCharacteristics(primaryCameraId))
-        defaultLensIndex = lenses.indexOfFirst { it.isMain }.coerceAtLeast(0)
+        // The primary logical camera is the parent of every non-standalone lens:
+        // the first back camera declaring physical children, else the first back
+        // camera, else the first accepted lens.
+        primaryCameraId = snapshot.cameras.firstOrNull { it.physicalIds.isNotEmpty() && it.facing == 1 }?.cameraId
+            ?: snapshot.cameras.firstOrNull { it.facing == 1 }?.cameraId
+            ?: result.lenses.first().cameraId
+        lenses = result.lenses
+        defaultLensIndex = result.mainIndex
         applySelectedLens(lenses[defaultLensIndex], 0)
         // Permanent cheap sanity line for field debugging: catches a matrix-direction
         // or model regression immediately in logcat without needing a unit test.
@@ -371,6 +330,7 @@ class CameraController(private val context: Context) {
                 "5600K=(${g5600.red},${g5600.greenEven},${g5600.blue}) " +
                 "10000K=(${g10000.red},${g10000.greenEven},${g10000.blue})",
         )
+        return result
     }
 
     /**
@@ -387,7 +347,7 @@ class CameraController(private val context: Context) {
             // Reopening the SAME id lets the framework implicitly disconnect the
             // previous device for us (see below); crossing to a genuinely different
             // top-level device -- e.g. switching into or out of a standalone lens,
-            // see LensInfo.standalone -- has no such guarantee, so the old device
+            // see LensProfile.standalone -- has no such guarantee, so the old device
             // must be torn down explicitly first or it would just leak.
             try {
                 prevDevice.close()
@@ -441,7 +401,7 @@ class CameraController(private val context: Context) {
         // as anchorState's kdoc). Gated on an actual physical-camera change, not
         // sizeIndex alone, so a same-lens resolution switch keeps a still-valid
         // live meter instead of discarding it for no reason.
-        if (activePhysicalId != lens.physicalId) wbOverride = null
+        if (activePhysicalId != lens.cameraId) wbOverride = null
         applySelectedLens(lens, sizeIndex)
         return true
     }
@@ -450,23 +410,24 @@ class CameraController(private val context: Context) {
      * field keyed off "the active lens", including which camera id the NEXT
      * [openAndPreview] must open ([activeCameraId]) and whether this session's
      * OutputConfigurations need physical-id tagging ([sessionTagId]) -- see
-     * [LensInfo.standalone]'s kdoc for why those two diverge from [activePhysicalId]
+     * [LensProfile.standalone]'s kdoc for why those two diverge from [activePhysicalId]
      * for a standalone lens. Does not touch the live session; the caller re-keys
      * the preview SurfaceView, and the resulting surfaceCreated -> openCamera ->
      * openAndPreview reopens against whatever this just published (same path
      * documented on [selectMode]). */
-    private fun applySelectedLens(lens: LensInfo, sizeIndex: Int) {
-        activePhysicalId = lens.physicalId
+    private fun applySelectedLens(lens: LensProfile, sizeIndex: Int) {
+        activePhysicalId = lens.cameraId          // WB identity key -- unchanged meaning
         rawSpec = specFor(lens, sizeIndex)
-        activeArraySize = lens.activeArraySize
-        activeOisModes = lens.availableOisModes
+        activeArraySize = Rect(lens.activeArray.left, lens.activeArray.top,
+                               lens.activeArray.right, lens.activeArray.bottom)
+        activeOisModes = lens.oisModes
         wbCalib = wbCalibFor(lens)
         if (lens.standalone) {
-            activeCameraId = lens.physicalId!!
-            sessionTagId = null
+            activeCameraId = lens.cameraId        // open this id directly
+            sessionTagId = null                   // never tag a standalone device
         } else {
             activeCameraId = primaryCameraId
-            sessionTagId = lens.physicalId
+            sessionTagId = lens.cameraId
         }
     }
 
@@ -972,148 +933,7 @@ class CameraController(private val context: Context) {
 
     // --- internals -------------------------------------------------------------
 
-    /**
-     * Enumerates the logical camera's physical lenses: dedupes sensors exposed
-     * under two ids (same focal length -> keep the id with the most RAW sizes),
-     * sorts widest-first, and labels each with its zoom factor relative to the
-     * main lens (the focal length the logical camera itself advertises).
-     * Falls back to a single logical-camera entry when nothing enumerates.
-     */
-    private fun enumerateLenses(logicalCh: CameraCharacteristics): List<LensInfo> {
-        val candidates = logicalCh.physicalCameraIds.mapNotNull { id ->
-            try {
-                buildLensCandidate(id, cameraManager.getCameraCharacteristics(id))
-            } catch (e: Exception) {
-                Log.w(TAG, "skipping physical camera $id", e)
-                null
-            }
-        }
-        val knownIds = cameraManager.cameraIdList.toSet() + logicalCh.physicalCameraIds.toSet()
-        val hidden = probeHiddenLenses(knownIds)
-        val deduped = (candidates + hidden)
-            .groupBy { it.focalMm }
-            .map { (_, group) -> group.maxBy { it.sizes.size } }
-            .sortedByDescending { it.fovMetric }
-            .ifEmpty { listOfNotNull(buildLensCandidate(null, logicalCh)) }
-        check(deduped.isNotEmpty()) { "no RAW-capable back lens" }
-        val logicalFocal =
-            logicalCh.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
-        val mainIdx = if (logicalFocal == null) 0
-        else deduped.indices.minBy { abs(deduped[it].focalMm - logicalFocal) }
-        return deduped.mapIndexed { i, lens ->
-            lens.copy(label = "%.0fmm".format(Locale.US, lens.equivFocalMm), isMain = i == mainIdx)
-        }
-    }
-
-    /** Null when [ch] lacks RAW, manual-sensor support, or any required key. */
-    private fun buildLensCandidate(physicalId: String?, ch: CameraCharacteristics): LensInfo? {
-        val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return null
-        if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)) return null
-        if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)) return null
-        val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
-        val rawSizes = map.getOutputSizes(ImageFormat.RAW_SENSOR)
-            ?.takeIf { it.isNotEmpty() } ?: return null
-        val focal =
-            ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
-                ?: return null
-        val physSize = ch.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
-        // 35mm-equivalent = real focal length * (full-frame diagonal / this sensor's
-        // OWN measured diagonal) -- the standard crop-factor formula, using this
-        // lens's actual physical size rather than a looked-up sensor-format name
-        // (e.g. "1/2.51-inch"), which is only ever approximate.
-        val sensorDiagonalMm =
-            kotlin.math.sqrt(physSize.width.toDouble().pow(2) + physSize.height.toDouble().pow(2))
-        val equivFocal = (focal * (FULL_FRAME_DIAGONAL_MM / sensorDiagonalMm)).toFloat()
-        // Camera2 CFA constants share our Cfa enum order: RGGB=0 GRBG=1 GBRG=2 BGGR=3.
-        val cfa = ch.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: return null
-        val whiteLevel = ch.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: return null
-        val blackPattern = ch.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN) ?: return null
-        val xform = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
-        // Second calibration illuminant/matrix, and both illuminant codes: all
-        // nullable (not every sensor exposes a second calibration point) -- consumed
-        // by gainsFor's DNG-style interpolation, never gate lens enumeration.
-        val xform2 = ch.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)
-        // SDK type is Key<Byte> despite the DNG/EXIF codes being small ints; widen so
-        // LensInfo/illuminantCct can work with plain Int like every other code path.
-        val illum1 = ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)?.toInt()
-        val illum2 = ch.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)?.toInt()
-        val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
-        val activeArray = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
-        val oisModes = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-        val sorted = rawSizes.sortedByDescending { it.width.toLong() * it.height }
-        val maxArea = sorted.first().width.toLong() * sorted.first().height
-        val sizes = sorted.map { s ->
-            val minDur = map.getOutputMinFrameDuration(ImageFormat.RAW_SENSOR, s)
-            LensSize(
-                width = s.width, height = s.height,
-                maxFps = if (minDur > 0) (1e9 / minDur).toInt() else 30,
-                label = sizeLabel(s.width, s.height, maxArea),
-            )
-        }
-        return LensInfo(
-            physicalId = physicalId,
-            label = "", // filled by enumerateLenses once the main lens is known
-            focalMm = focal,
-            equivFocalMm = equivFocal,
-            fovMetric = physSize.width / focal,
-            sizes = sizes,
-            cfa = cfa,
-            whiteLevel = whiteLevel,
-            blackLevel = IntArray(4).also { blackPattern.copyTo(it, 0) },
-            // Row-major 3x3: index i -> row i/3, column i%3 (getElement takes column, row).
-            colorMatrix1 = FloatArray(9) { i -> xform.getElement(i % 3, i / 3).toFloat() },
-            isoRange = sensRange.lower..sensRange.upper,
-            minFocusDiopters = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
-            activeArraySize = activeArray,
-            colorMatrix2 = xform2?.let { t -> FloatArray(9) { i -> t.getElement(i % 3, i / 3).toFloat() } },
-            illuminant1 = illum1,
-            illuminant2 = illum2,
-            availableOisModes = oisModes,
-        )
-    }
-
-    /**
-     * Probes camera ids the OS hides from normal discovery -- observed on a Xiaomi
-     * 14 Ultra (MIUI/HyperOS): ids "4"/"5" (3.2x telephoto, 5x periscope) report
-     * full RAW+MANUAL_SENSOR support and open successfully as standalone
-     * [CameraDevice]s, yet appear in neither [CameraManager.cameraIdList] nor the
-     * primary logical camera's physicalCameraIds. [excludeIds] is every id already
-     * known (skip re-probing them). Real-world Camera2 ids are small decimal-string
-     * indices on every device this has been observed on, so this is a generic
-     * bounded scan, not hardcoded to any specific hidden id. An id that doesn't
-     * exist, or is genuinely inaccessible (e.g. this device's ids "7"/"8", a hard
-     * "system only device" CameraAccessException), simply throws and is skipped --
-     * the same tolerance [enumerateLenses] already applies to a failing physical
-     * child.
-     */
-    private fun probeHiddenLenses(excludeIds: Set<String>): List<LensInfo> {
-        val found = mutableListOf<LensInfo>()
-        for (i in 0 until HIDDEN_LENS_PROBE_RANGE) {
-            val id = i.toString()
-            if (id in excludeIds) continue
-            try {
-                val ch = cameraManager.getCameraCharacteristics(id)
-                if (ch.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) continue
-                buildLensCandidate(id, ch)?.let { found += it.copy(standalone = true) }
-            } catch (e: Exception) {
-                Log.d(TAG, "hidden-lens probe: id $id unusable", e)
-            }
-        }
-        return found
-    }
-
-    /** "4:3" / "16:9" for full-area sizes, "LOW" for binned (under half the max area). */
-    private fun sizeLabel(w: Int, h: Int, maxArea: Long): String {
-        if (w.toLong() * h < maxArea / 2) return "LOW"
-        val aspect = w.toFloat() / h
-        return when {
-            abs(aspect - 4f / 3f) < 0.05f -> "4:3"
-            abs(aspect - 16f / 9f) < 0.1f -> "16:9"
-            else -> "${h}p"
-        }
-    }
-
-    private fun specFor(lens: LensInfo, sizeIndex: Int): RawSpec {
+    private fun specFor(lens: LensProfile, sizeIndex: Int): RawSpec {
         val size = lens.sizes[sizeIndex]
         // A genuine second calibration point requires BOTH the matrix and its
         // illuminant code; a sensor exposing only one of the pair (seen on some
@@ -1260,7 +1080,7 @@ class CameraController(private val context: Context) {
     /** Builds the active lens's [WbCalib]: illuminant codes resolved to CCTs
      * (defaulting illuminant1 -> 2856K, illuminant2 -> 6504K when absent/unknown --
      * the DNG spec's own conventional default pair). */
-    private fun wbCalibFor(lens: LensInfo): WbCalib = WbCalib(
+    private fun wbCalibFor(lens: LensProfile): WbCalib = WbCalib(
         matrix1 = lens.colorMatrix1,
         cct1 = illuminantCct(lens.illuminant1) ?: 2856,
         matrix2 = lens.colorMatrix2,
@@ -1476,13 +1296,6 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
-        // sqrt(36^2 + 24^2) -- full-frame (35mm) sensor diagonal, mm. The reference
-        // every "35mm-equivalent focal length" spec (LensInfo.equivFocalMm) is
-        // quoted against.
-        private const val FULL_FRAME_DIAGONAL_MM = 43.2666564f
-        // Upper bound for probeHiddenLenses' scan -- comfortably above the largest
-        // camera id any current multi-camera phone has been seen to expose.
-        private const val HIDDEN_LENS_PROBE_RANGE = 16
         // Mirror of RecordScreen.KELVIN_STOPS / TINT_STOPS. gainsToKelvinTint returns
         // values from these sets so the metered result lands exactly on a slider tick.
         private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
