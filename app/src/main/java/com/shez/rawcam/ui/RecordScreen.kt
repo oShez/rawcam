@@ -103,6 +103,7 @@ import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.camera.CameraController
 import com.shez.rawcam.camera.ControlTier
 import com.shez.rawcam.camera.LensProfile
+import com.shez.rawcam.camera.ShutterStops
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
@@ -356,9 +357,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             val sizeIndex = (saved?.sizeIndex ?: s0.defaultSizeIndex)
                 .let { if (it in controller.lenses[lensIndex].sizes.indices) it else 0 }
             if (lensIndex != controller.defaultLensIndex || sizeIndex != 0) controller.selectMode(lensIndex, sizeIndex)
+            val lens = controller.lenses.getOrNull(lensIndex)
             val fps = (saved?.fps ?: s0.defaultFps)
                 .let { f -> fpsOptions(controller.rawSpec).let { o -> if (f in o) f else o.first() } }
-            val stops = shutterStops(fps)
+            // shutterStopsFor(fps, lens?.exposureRangeNs), not shutterStops(fps): at this
+            // point _uiState.value.exposureRangeNs is still the pre-init default (null),
+            // since it's only published below -- reading it here would restore an
+            // unfiltered index for one frame on lenses with a narrower sensor range.
+            val stops = shutterStopsFor(fps, lens?.exposureRangeNs)
             val denom = saved?.shutterDenom ?: s0.defaultShutterDenom
             val shutterIndex = stops.indexOf(stops.minByOrNull { kotlin.math.abs(it - denom) } ?: stops.first()).coerceAtLeast(0)
             val iso = (saved?.iso ?: if (s0.defaultIso == 0) controller.rawSpec.isoRange.start else s0.defaultIso)
@@ -370,7 +376,6 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.restoreWbAnchor(RggbChannelVector(saved.anchorR, saved.anchorG, saved.anchorG, saved.anchorB), saved.anchorKelvin)
             restoredFromSaved = saved != null
             restoredLensIndex = lensIndex
-            val lens = controller.lenses.getOrNull(lensIndex)
             _uiState.update {
                 it.copy(
                     rawSpec = controller.rawSpec, lenses = controller.lenses,
@@ -398,24 +403,37 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * The candidate list itself is biased by [Settings.mainsFreq] -- each list includes
      * denominators that divide evenly into the mains frequency (and its double), which
      * keeps exposure an integer multiple of the flicker period and avoids banding under
-     * artificial light; OFF keeps the old flat list. */
-    fun shutterStops(fps: Int): List<Int> = when (_uiState.value.settings.mainsFreq) {
-        // No flicker constraint -- densified with more standard shutter speeds.
-        MainsFreq.OFF -> listOf(
-            24, 30, 40, 48, 50, 60, 75, 90, 100, 120, 150, 180, 200, 240, 250, 300,
-            350, 400, 500, 600, 750, 800, 1000,
-        )
-        // Every entry below (besides the fixed 24 anchor) stays a clean multiple of
-        // 50 -- more of them than before, but the anti-flicker property from the
-        // original list is preserved exactly, just at finer granularity.
-        MainsFreq.HZ50 -> listOf(
-            24, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000,
-        )
-        // Same idea, multiples of 60.
-        MainsFreq.HZ60 -> listOf(
-            24, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 840, 900, 960, 1000,
-        )
-    }.filter { it > fps }
+     * artificial light; OFF keeps the old flat list. Further intersected with the active
+     * lens's real exposure range (state.exposureRangeNs) so a lens whose sensor can't
+     * honour the full fixed-stop table never offers a stop the HAL would silently clamp
+     * anyway -- see [ShutterStops]. */
+    fun shutterStops(fps: Int): List<Int> = shutterStopsFor(fps, _uiState.value.exposureRangeNs)
+
+    private fun shutterStopsFor(fps: Int, range: LongRange?): List<Int> {
+        val raw = when (_uiState.value.settings.mainsFreq) {
+            // No flicker constraint -- densified with more standard shutter speeds.
+            MainsFreq.OFF -> listOf(
+                24, 30, 40, 48, 50, 60, 75, 90, 100, 120, 150, 180, 200, 240, 250, 300,
+                350, 400, 500, 600, 750, 800, 1000,
+            )
+            // Every entry below (besides the fixed 24 anchor) stays a clean multiple of
+            // 50 -- more of them than before, but the anti-flicker property from the
+            // original list is preserved exactly, just at finer granularity.
+            MainsFreq.HZ50 -> listOf(
+                24, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000,
+            )
+            // Same idea, multiples of 60.
+            MainsFreq.HZ60 -> listOf(
+                24, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 840, 900, 960, 1000,
+            )
+        }.filter { it > fps }
+        if (range == null) return raw
+        // Denominators are converted to exposure-time nanoseconds (what the sensor's
+        // range is expressed in), filtered, then mapped back to the matching denom(s).
+        val nsStops = raw.map { 1_000_000_000L / it }
+        val allowedNs = ShutterStops.available(nsStops, range).toSet()
+        return raw.filterIndexed { i, _ -> nsStops[i] in allowedNs }
+    }
 
     /** FPS choices valid for [spec]. Never empty. Takes the mode's spec explicitly
      * (rather than reading controller.rawSpec) so composable callers can pass
@@ -751,8 +769,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val opts = fpsOptions(spec)
         val fps = if (state.fps in opts) state.fps
         else (opts.lastOrNull { it <= state.fps } ?: opts.first())
-        val stops = shutterStops(fps)
         val lens = state.lenses.getOrNull(state.lensIndex)
+        // Use the NEW lens's exposureRangeNs directly (not _uiState.value's, which is
+        // still the outgoing lens's until this function's return value is committed) --
+        // otherwise a lens switch would clamp shutterIndex against the wrong range for
+        // one frame, exactly the class of stale-index bug fixed in 0ba7eaa for ISO.
+        val stops = shutterStopsFor(fps, lens?.exposureRangeNs)
         return state.copy(
             rawSpec = spec,
             fps = fps,
