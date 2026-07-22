@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RawCam — manual RAW video for Android</title>
+<meta name="description" content="RawCam records uncompressed Bayer RAW video straight off your Android phone's camera sensor and exports CinemaDNG for DaVinci Resolve. Manual ISO, shutter, focus, and white balance." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link href="https://fonts.bunny.net/css?family=fragment-mono:400,400i" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0A0B0D;
+    --surface: #17191D;
+    --surface-variant: #24272C;
+    --text: #E9EAEC;
+    --muted: #8F959D;
+    --outline: #3A3E45;
+    --accent: #E5484D;
+    --accent-wash: rgba(229, 72, 77, 0.08);
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Fragment Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    background: var(--accent);
+    color: #0A0B0D;
+    padding: 10px 16px;
+    z-index: 10;
+  }
+  .skip-link:focus { left: 12px; top: 12px; }
+
+  a { color: inherit; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  header.top {
+    padding: 28px 0 0;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    width: fit-content;
+  }
+  .brand svg { width: 22px; height: 22px; display: block; }
+  .brand span {
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+
+  main { padding-bottom: 80px; }
+
+  .hero { padding: 64px 0 40px; }
+
+  .kicker {
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-weight: 400;
+    font-size: clamp(28px, 5vw, 44px);
+    line-height: 1.2;
+    letter-spacing: 0;
+    margin: 0 0 20px;
+    max-width: 14ch;
+  }
+  h1 .word {
+    display: inline-block;
+    opacity: 0;
+    transform: translateY(10px);
+    animation: word-in 0.5s cubic-bezier(0.16,1,0.3,1) forwards;
+  }
+
+  .lede {
+    color: var(--muted);
+    max-width: 60ch;
+    font-size: 15px;
+    margin: 0 0 36px;
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 22px;
+    min-height: 44px;
+    border: 1px solid var(--outline);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text);
+    text-decoration: none;
+    font-family: inherit;
+    font-size: 15px;
+    transition-property: border-color, background-color, transform;
+    transition-duration: 160ms;
+    transition-timing-function: ease-out;
+  }
+  @media (hover: hover) {
+    .btn:hover { border-color: var(--accent); background: var(--accent-wash); }
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .fineprint { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  .fineprint code {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    word-break: break-all;
+  }
+
+  section { padding: 36px 0; border-top: 1px solid var(--outline); }
+
+  h2 {
+    font-weight: 400;
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 22px;
+  }
+
+  .spec {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 10px 20px;
+  }
+  .spec dt {
+    color: var(--muted);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--surface-variant);
+  }
+  .spec dd {
+    margin: 0;
+    font-size: 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--surface-variant);
+  }
+  @media (max-width: 480px) {
+    .spec { grid-template-columns: 1fr; }
+    .spec dt { border-bottom: none; padding-bottom: 2px; }
+    .spec dd { padding-top: 0; }
+  }
+
+  ol.steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+  }
+  ol.steps li {
+    counter-increment: step;
+    position: relative;
+    padding: 0 0 20px 34px;
+    font-size: 14.5px;
+    color: var(--text);
+  }
+  ol.steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0; top: 0;
+    width: 22px; height: 22px;
+    border: 1px solid var(--outline);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  ol.steps li .muted { color: var(--muted); }
+
+  .aside {
+    margin-top: 24px;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    font-size: 13.5px;
+    color: var(--muted);
+  }
+  .aside strong { color: var(--text); font-weight: 400; }
+
+  footer {
+    border-top: 1px solid var(--outline);
+    padding: 24px 0 40px;
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  footer p { margin: 0 0 6px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    h1 .word { animation: none; opacity: 1; transform: none; }
+    .btn { transition: none; }
+  }
+
+  @keyframes word-in {
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#main" aria-label="RawCam home">
+      <svg viewBox="0 0 108 108" aria-hidden="true">
+        <path fill="#E5484D" fill-rule="evenodd" d="M54,26 L78.25,68 L29.75,68 Z M54,82 L29.75,40 L78.25,40 Z" />
+      </svg>
+      <span>RAWCAM</span>
+    </a>
+  </header>
+
+  <main id="main">
+    <section class="hero" style="border-top:none; padding-top:64px;">
+      <p class="kicker">Android &middot; manual RAW video</p>
+      <h1><span class="word" style="animation-delay:0ms">Raw</span> <span class="word" style="animation-delay:80ms">sensor</span> <span class="word" style="animation-delay:160ms">data.</span> <span class="word" style="animation-delay:240ms">Straight</span> <span class="word" style="animation-delay:320ms">to</span> <span class="word" style="animation-delay:400ms">Resolve.</span></h1>
+      <p class="lede">RawCam records uncompressed Bayer video directly off your phone's camera sensor and exports CinemaDNG you can grade like a cinema camera. Manual ISO, shutter, focus, and white balance, with no auto-anything getting in the way.</p>
+
+      <div class="cta-row">
+        <a class="btn" href="#" id="download-link">
+          <span class="dot" aria-hidden="true"></span>
+          Download v0.1 &middot; APK &middot; 3.1 MB
+        </a>
+      </div>
+      <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>4eedda50ff4e3e5d26c9b94260bf0baf5409b02e1ff6b4c7f814b05ade9bbe11</code></p>
+    </section>
+
+    <section aria-labelledby="spec-h">
+      <h2 id="spec-h">Spec</h2>
+      <dl class="spec">
+        <dt>Capture</dt>
+        <dd>Bayer RAW off the sensor &mdash; Packed10 / Packed12 / Raw16, chosen automatically per lens</dd>
+        <dt>Export</dt>
+        <dd>CinemaDNG, dual-illuminant calibrated, parallel export pipeline</dd>
+        <dt>Control</dt>
+        <dd>Manual ISO, shutter, focus, white balance (Kelvin + tint), with per-parameter locks</dd>
+        <dt>Lenses</dt>
+        <dd>Multi-lens, including hidden telephoto/periscope lenses on supported devices</dd>
+        <dt>Safety</dt>
+        <dd>Thermal-aware auto-stop, storage-reserve guard, configurable max clip length</dd>
+        <dt>Requires</dt>
+        <dd>Android 13+, a camera with RAW capability (checked automatically at launch)</dd>
+      </dl>
+    </section>
+
+    <section aria-labelledby="install-h">
+      <h2 id="install-h">Install</h2>
+      <ol class="steps">
+        <li>Download the APK above.</li>
+        <li>Open the downloaded file and allow installs from this source when your phone asks. <span class="muted">This is a one-time permission for the browser or file manager you used to download it.</span></li>
+        <li>Grant the camera permission on first launch.</li>
+      </ol>
+      <div class="aside">
+        <strong>Play Protect may flag this as an unrecognized app.</strong> That's expected for anything distributed outside the Play Store, not a sign of a problem. RawCam requests zero network permissions, so nothing it does can ever reach the internet.
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>RawCam v0.1</p>
+    <p>Not distributed on Google Play. No INTERNET permission is requested by the app; this page is the only network activity involved anywhere in the RawCam experience.</p>
+  </footer>
+</div>
+</body>
+</html>
