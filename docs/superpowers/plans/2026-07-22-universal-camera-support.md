@@ -1646,7 +1646,7 @@ git commit -m "feat: offer only shutter speeds the sensor can honour"
 - Consumes: `CompatibilityReport.render` (Task 7), `SnapshotSet.toJson` (Task 1), `Camera2SnapshotSource.capture` (Task 5).
 - Produces: committed fixtures `xiaomi-14-ultra.json`, `pixel-7-pro.json`, `galaxy-s10plus-fv5.json`, plus 10 shape fixtures.
 
-- [ ] **Step 1: Add the Settings rows**
+- [x] **Step 1: Add the Settings rows**
 
 In the existing sectioned list, add a "Device" section with two rows following the established row-widget pattern:
 - **Compatibility report** — opens a scrollable read-only text view of `state.reportText`, with a SHARE action firing `Intent.createChooser` on `ACTION_SEND` / `text/plain`.
@@ -1654,7 +1654,7 @@ In the existing sectioned list, add a "Device" section with two rows following t
 
 Both run off the main thread on the existing `cameraOps` dispatcher — `capture()` is binder IPC.
 
-- [ ] **Step 2: Capture the two real fixtures**
+- [x] **Step 2: Capture the two real fixtures**
 
 On each phone: Settings → Dump characteristics → share to yourself. Save as:
 - `app/src/test/resources/fixtures/xiaomi-14-ultra.json`
@@ -1662,7 +1662,7 @@ On each phone: Settings → Dump characteristics → share to yourself. Save as:
 
 For `galaxy-s10plus-fv5.json`, hand-write a `SnapshotSet` from the free FV-5 sample's published values: back camera GRBG (`cfa = 1`), `whiteLevel = 1023`, `isoRange = [50, 1250]`, `sensorOrientation = 90`, `facing = 1`, capabilities including RAW and MANUAL_SENSOR, one RAW size. Task 11's importer replaces this hand-written file with a generated one.
 
-- [ ] **Step 3: Write the 10 shape fixtures**
+- [x] **Step 3: Write the 10 shape fixtures**
 
 Each is a small `SnapshotSet` JSON in `app/src/test/resources/fixtures/`, one per failure shape: `no-raw.json`, `raw-without-manual.json`, `orientation-270.json`, `missing-physical-size.json`, `missing-color-matrix.json`, `samsung-high-ids.json`, `permission-redacted.json`, `single-lens-legacy.json`, `zero-raw-sizes.json`, `absurd-values.json`.
 
@@ -1689,7 +1689,7 @@ Example — `raw-without-manual.json`:
 }
 ```
 
-- [ ] **Step 4: Write the golden test**
+- [x] **Step 4: Write the golden test**
 
 Create `app/src/test/java/com/shez/rawcam/camera/GoldenFixtureTest.kt`:
 
@@ -1758,12 +1758,12 @@ class GoldenFixtureTest {
 }
 ```
 
-- [ ] **Step 5: Run and iterate**
+- [x] **Step 5: Run and iterate**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "*GoldenFixtureTest*"`
 Expected: PASS. If the Xiaomi fixture yields anything other than 4 lenses with those labels, `LensDiscovery` has diverged from shipped behaviour — **fix the discovery code, not the assertion.**
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/ui/SettingsScreen.kt app/src/test/resources/fixtures/ app/src/test/java/com/shez/rawcam/camera/GoldenFixtureTest.kt
