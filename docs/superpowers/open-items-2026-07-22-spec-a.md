@@ -103,4 +103,4 @@ connected and unlocked before starting it.
 - On-device (Xiaomi 14 Ultra, release build, `install -r`): exactly 4 chips 12/23/74/117mm in order, launches on 23mm, ids 6/9 (newly accepted by soft-defaulting) dedupe away by focal, switches 23→74→117→12 clean on one PID, record on 74mm standalone: 183 frames / 7.6s / 24fps / 2.68GB, **Exported · 183 DNGs**, crash buffer clean.
 - Pixel 7 Pro regression (the gate's other half) NOT run — device not present. Do it before merging to main.
 - Stale note corrected: the preserved telephoto clip `clip_20260721_220030` no longer exists on-device (verified 2026-07-22); do not go looking for it.
-- NEXT: Task 7 (unsupported-device screen + manifest `required="false"`).
+- NEXT: Tasks 7-11. **Start with `2026-07-23-spec-a-tasks-7-11-execution-guide.md` in the plans directory** — it carries the environment facts, Xiaomi topology table, stale-plan corrections, per-task briefings, recommended order (8 → 9 → 7 → 10 → 11), and stop conditions. The plan file still holds the code listings.
