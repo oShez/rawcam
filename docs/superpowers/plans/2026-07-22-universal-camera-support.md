@@ -1784,7 +1784,7 @@ git commit -m "feat: compatibility report, characteristics dump, and golden devi
 
 **This task must not become load-bearing.** Per the spec's governing rule, every correctness claim is already covered by Tasks 1-10. This adds fuzz breadth and nothing else. The importer lives in the **test** source set: it is a fixture-building tool, never shipped code.
 
-- [ ] **Step 1: Write the failing test against the free sample**
+- [x] **Step 1: Write the failing test against the free sample**
 
 Save the free sample to `app/src/test/resources/fv5/samsung_sm-g975f_beyond2.json`, then create `app/src/test/java/com/shez/rawcam/camera/FvFiveImporterTest.kt`:
 
@@ -1917,6 +1917,8 @@ object FvFiveImporter {
 ```
 
 Note `rawSizes` is deliberately empty: this corpus is for *field* coverage, so its snapshots resolve to `Unsupported(NO_USABLE_RAW_SIZES)`, which is a valid outcome the fuzz assertion accepts. If a later pass wants these devices to reach lens-building, parse `android.scaler.streamConfigurationMap` here — but that is not required by this spec.
+
+> **Corrected 2026-07-23, after fetching the real sample:** the snippet above was written against a guessed shape (flat `android.*` keys) before the actual file was in hand. The real download from `camerafv5.com/devices/licensing/` is `{sdkLevel: {cameraId: {apiNumber, cameraDirection, cameraId, cameraOrientation, capabilities: [{name, value}]}}}` — every AOSP field lives inside `capabilities`, not as a top-level key, and `value` is a typed wrapper (`NamedInteger` with `v`, `List` with `items`, `IntegerRange`/`LongRange` with `min`/`max`, `FloatSize` with `w`/`h`), plus two fields (`blackLevelPattern`, `colorTransform1/2`) that arrive as stringified Java `toString()` output requiring regex parsing. The shipped `FvFiveImporter.kt` was rewritten to match; see that file for the real implementation. Also corrected: `physicalCameraIds` **is** populated for this device's logical cameras (contrary to the original "IMPORTANT LIMITATION" claim below) — the corpus can exercise real topology after all, though the spec's governing rule still doesn't depend on it.
 
 - [x] **Step 4: Run and confirm pass (or clean skip)**
 
