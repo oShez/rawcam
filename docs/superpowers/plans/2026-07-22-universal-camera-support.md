@@ -1946,12 +1946,12 @@ git commit -m "test: add FV-5 fixture importer as optional fuzz breadth"
 
 ## Final verification
 
-- [ ] `./gradlew :app:testDebugUnitTest` — all JVM tests green
-- [ ] `./gradlew :app:assembleDebug :app:assembleRelease` — both variants build, R8 runs
-- [ ] C++ host tests still green: `& "$env:LOCALAPPDATA\Android\Sdk\cmake\3.22.1\bin\ctest.exe" --test-dir core/build` — 7/7
-- [ ] Suite green with `app/src/test/resources/fv5/` removed
-- [ ] **Xiaomi 14 Ultra:** 4 lenses (12/23/74/117mm), launches on 23mm, all lens-crossing directions clean, record + export on the 3x standalone lens succeeds
-- [ ] **Pixel 7 Pro:** 2 lenses, correct ISO range, record + export succeeds
-- [ ] Permission revoke → gate screen, no crash; re-grant → normal launch
-- [ ] Compatibility report renders and shares on both phones
-- [ ] No new `Log.e` or FATAL EXCEPTION in a full logcat sweep on either device
+- [x] `./gradlew :app:testDebugUnitTest` — all JVM tests green (47 tests, 0 skipped, 0 failures)
+- [x] `./gradlew :app:assembleDebug :app:assembleRelease` — both variants build, R8 runs
+- [x] C++ host tests still green: `& "$env:LOCALAPPDATA\Android\Sdk\cmake\3.22.1\bin\ctest.exe" --test-dir core/build` — 7/7
+- [x] Suite green with `app/src/test/resources/fv5/` removed
+- [x] **Xiaomi 14 Ultra:** 4 lenses (12/23/74/117mm), launches on 23mm, all lens-crossing directions clean, record + export on the 3x standalone lens succeeds
+- [x] **Pixel 7 Pro:** 3 lenses (13/24/117mm, corrected from the plan's original "2 lenses" guess), correct ISO ranges, record + export succeeds on a non-main lens (13mm ultrawide, 651 frames/651 DNGs, 0 dropped)
+- [x] Permission revoke → gate screen, no crash; re-grant → normal launch (verified on both phones)
+- [x] Compatibility report renders and shares on both phones
+- [x] No new `Log.e` or FATAL EXCEPTION in a full logcat sweep on either device
