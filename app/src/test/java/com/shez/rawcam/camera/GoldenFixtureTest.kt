@@ -2,7 +2,6 @@ package com.shez.rawcam.camera
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class GoldenFixtureTest {
@@ -27,16 +26,14 @@ class GoldenFixtureTest {
     }
 
     @Test
-    fun `pixel 7 pro yields two lenses, both fully manual`() {
-        // DEVIATION (pre-approved, see docs/superpowers/open-items-2026-07-22-spec-a.md):
-        // the Pixel 7 Pro was not connected during Task 10, so its fixture was never
-        // captured -- no pixel-7-pro.json was fabricated. Skip cleanly rather than
-        // fail; un-skipping this test (by capturing the real fixture) is owed before
-        // this branch merges to main.
-        val raw = rawOrNull("pixel-7-pro.json")
-        assumeTrue("pixel-7-pro.json fixture not present; skipping (owed before merge)", raw != null)
-        val r = LensDiscovery.discover(SnapshotSet.fromJson(raw!!).cameras) as DeviceProfile.Supported
-        assertEquals(2, r.lenses.size)
+    fun `pixel 7 pro yields three lenses with the main at 24mm`() {
+        // Real fixture captured 2026-07-23 via Settings -> Dump characteristics on-device.
+        // The plan's original guess of "two lenses" predated ground truth: this Pixel 7 Pro
+        // has three back-facing physical cameras (ultrawide/main/telephoto), all FULL control.
+        val r = profileOf("pixel-7-pro.json") as DeviceProfile.Supported
+        assertEquals(3, r.lenses.size)
+        assertEquals(listOf("13mm", "24mm", "117mm"), r.lenses.map { it.label })
+        assertEquals("24mm", r.lenses[r.mainIndex].label)
         assertTrue(r.lenses.all { it.controlTier == ControlTier.FULL })
     }
 
