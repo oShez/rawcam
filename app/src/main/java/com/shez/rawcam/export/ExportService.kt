@@ -13,7 +13,6 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foreground service that runs [NativeBridge.nativeExportClip] on a background
@@ -21,23 +20,26 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Exports are serialized on [exportExecutor], a single-thread executor: ClipsScreen
  * only disables the Export button per-clip, so tapping Export on two different clips
- * back to back is possible, and [cancelled] / [NOTIFICATION_ID] are single,
- * service-instance-wide values that are only meaningful for one export at a time. A
- * second Export request while one is running queues behind it instead of racing it on
- * a separate ad-hoc thread (the previous behavior, which let two exports share --
- * and clobber -- the same cancel flag and notification).
+ * back to back is possible. [NOTIFICATION_ID] is a single, service-instance-wide
+ * value only meaningful for the export currently running. A second Export request
+ * while one is running queues behind it instead of racing it on a separate ad-hoc
+ * thread.
  *
- * Cancel = stop the service (user action, or the system reclaiming it): [onDestroy]
- * flips the volatile [cancelled] flag, and the very next progress callback --
- * invoked synchronously from the native export loop, on the executor's worker thread
- * -- returns false, which unwinds exportClip() cleanly (the current frame's DNG is
- * already on disk; later frames are not written). Any export still queued behind the
- * one that was running is abandoned along with the service instance; the next Export
- * tap starts a fresh instance with [cancelled] reset to false.
+ * Cancel targets one clip by name ([cancelledClips]), not the whole service: a
+ * cancelled clip's own progress callback -- invoked synchronously from the native
+ * export loop, on the executor's worker thread -- sees its name in the set and
+ * returns false, which unwinds exportClip() cleanly (the current frame's DNG is
+ * already on disk; later frames are not written) without touching any other
+ * queued or running export. [onDestroy] (user backing out entirely, or the system
+ * reclaiming the service) is the only path that still cancels everything at once,
+ * by sweeping [runningClipName] and [queuedClips] into [cancelledClips] itself.
  */
 class ExportService : Service() {
 
-    private val cancelled = AtomicBoolean(false)
+    // Clip names whose export should stop at the next progress checkpoint. Per-clip
+    // rather than one shared flag, so cancelling one export -- running or still
+    // queued -- no longer aborts every other export sharing this service instance.
+    private val cancelledClips: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     private val exportExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     // Clip names accepted by onStartCommand whose export task has NOT yet started
@@ -46,6 +48,13 @@ class ExportService : Service() {
     // forever -- ClipsScreen then shows a permanent "Exporting…" with a Cancel
     // button that no-ops against the already-dead service instance.
     private val queuedClips = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+    // Name of whatever exportExecutor's single worker thread is currently running,
+    // if any -- only that thread writes it (first statement of the execute block,
+    // cleared before it returns), onDestroy only reads it. A cancelled RUNNING
+    // export is no longer in queuedClips (removed the moment it started), so
+    // onDestroy's sweep of queuedClips alone would miss it without this.
+    @Volatile private var runningClipName: String? = null
 
     // notify() is a Binder IPC to system_server that rebuilds a Notification --
     // calling it on every single exported frame (thousands per clip) made the
@@ -58,6 +67,19 @@ class ExportService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL) {
+            // Control message, not a new export: mark one clip cancelled and retire
+            // this start request immediately. stopSelf(startId) here only tears the
+            // service down if this was the LAST outstanding request (same mechanism
+            // already relied on below for the real export tasks) -- if a genuine
+            // export is running/queued, its own outstanding request keeps the
+            // instance alive; if the export had already finished before this cancel
+            // was delivered (stale tap after startService spun up a fresh, otherwise
+            // idle instance), this retires it instead of leaving a zombie service.
+            intent.getStringExtra(EXTRA_CLIP_NAME)?.let { cancelledClips.add(it) }
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val rawvPath = intent?.getStringExtra(EXTRA_RAWV_PATH)
         val outDir = intent?.getStringExtra(EXTRA_OUT_DIR)
         val clipName = intent?.getStringExtra(EXTRA_CLIP_NAME) ?: "clip"
@@ -77,23 +99,45 @@ class ExportService : Service() {
         ensureChannel()
         startForeground(NOTIFICATION_ID, buildNotification(clipName, 0, 0))
         status[clipName] = ExportStatus.RUNNING
+        // Clear any stale flag from an earlier cancel that outlived the export it
+        // targeted (e.g. a cancel tap that arrived after that export had already
+        // finished, or for a clip that was never actually running/queued) -- a new
+        // export request for this clip name must always start un-cancelled.
+        cancelledClips.remove(clipName)
 
         queuedClips.add(clipName)
         exportExecutor.execute {
+            // Set before queuedClips.remove so onDestroy's runningClipName/queuedClips
+            // sweep can never observe a gap where this clip is in neither.
+            runningClipName = clipName
             queuedClips.remove(clipName) // now running, not queued; onDestroy's sweep must skip it
+            if (cancelledClips.remove(clipName)) {
+                // Cancelled while still queued behind another export -- never ran.
+                runningClipName = null
+                status[clipName] = ExportStatus.CANCELLED
+                stopSelf(startId)
+                return@execute
+            }
             File(outDir).mkdirs()
             val ok = try {
                 NativeBridge.nativeExportClip(rawvPath, outDir) { done, total ->
-                    if (!cancelled.get()) maybeUpdateNotification(clipName, done, total)
-                    !cancelled.get()
+                    val thisCancelled = cancelledClips.contains(clipName)
+                    if (!thisCancelled) maybeUpdateNotification(clipName, done, total)
+                    !thisCancelled
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "export failed", e)
                 false
             }
+            runningClipName = null
+            // Consumed unconditionally (not just on the FAILED branch) so a cancel
+            // that arrived too late to actually stop a run that finished on its own
+            // (ok == true) doesn't linger in cancelledClips and poison a later,
+            // unrelated export of a clip with this same name.
+            val wasCancelled = cancelledClips.remove(clipName)
             status[clipName] = when {
                 ok -> ExportStatus.DONE
-                cancelled.get() -> ExportStatus.CANCELLED
+                wasCancelled -> ExportStatus.CANCELLED
                 else -> ExportStatus.FAILED
             }
             // Delete the source .rawv only on a genuine successful, non-cancelled
@@ -114,13 +158,16 @@ class ExportService : Service() {
     }
 
     override fun onDestroy() {
-        cancelled.set(true)
+        // Whole-instance teardown (system reclaim, or nothing left outstanding):
+        // nothing can be targeted per-clip once the service itself is going away,
+        // so mark the one export actually running as cancelled too -- its own
+        // progress callback observes cancelledClips on its next checkpoint, same
+        // as a normal per-clip cancel.
+        runningClipName?.let { cancelledClips.add(it) }
         exportExecutor.shutdownNow()
         // shutdownNow() silently discards tasks still in the executor's queue --
         // their exports never ran and never will on this instance, so move their
-        // status off RUNNING or ClipsScreen shows "Exporting…" forever. The
-        // currently-running export (already removed from queuedClips) sets its own
-        // CANCELLED via the progress callback observing `cancelled`.
+        // status off RUNNING or ClipsScreen shows "Exporting…" forever.
         while (true) {
             val name = queuedClips.poll() ?: break
             status[name] = ExportStatus.CANCELLED
@@ -171,6 +218,7 @@ class ExportService : Service() {
         const val EXTRA_OUT_DIR = "outDir"
         const val EXTRA_CLIP_NAME = "clipName"
         const val EXTRA_DELETE_AFTER = "deleteAfter"
+        const val ACTION_CANCEL = "com.shez.rawcam.export.ACTION_CANCEL"
         private const val TAG = "ExportService"
         private const val CHANNEL_ID = "export"
         private const val NOTIFICATION_ID = 1001
@@ -182,7 +230,7 @@ class ExportService : Service() {
 
         fun start(
             context: Context, rawvPath: String, outDir: String, clipName: String,
-            deleteAfter: Boolean = false,
+            deleteAfter: Boolean,
         ) {
             // Bound the process-lifetime status map: finished entries only ever
             // matter briefly for UI suffixes, so once the map grows past a
@@ -198,8 +246,15 @@ class ExportService : Service() {
             context.startForegroundService(intent)
         }
 
-        fun cancel(context: Context) {
-            context.stopService(Intent(context, ExportService::class.java))
+        /** Cancels exactly one export by clip name. Queued exports behind it, and
+         * exports of any other clip, are unaffected. Delivered as a plain (non-
+         * foreground) start command -- a no-op if no export with this name is
+         * currently running or queued. */
+        fun cancel(context: Context, clipName: String) {
+            context.startService(Intent(context, ExportService::class.java).apply {
+                action = ACTION_CANCEL
+                putExtra(EXTRA_CLIP_NAME, clipName)
+            })
         }
     }
 }

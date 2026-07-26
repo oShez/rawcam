@@ -77,4 +77,19 @@ class LensTopologyTest {
         val notes = supported(xiaomiShaped()).notes
         assertTrue(notes.any { it.cameraId == "0" && !it.accepted && it.message.contains("container") })
     }
+
+    /** No logical multi-camera anywhere in the snapshot (every physicalIds list is
+     * empty) forces the no-logicalFocal main-lens fallback. Before this fix it
+     * picked the literal widest-FOV lens; an ultra-wide (small focal, so a large
+     * fovMetric = physSize/focal) would win over a normal ~24mm-equivalent lens
+     * even though the latter is the obviously-intended default. */
+    @Test
+    fun `no logical camera picks the near-normal lens, not the widest, as main`() {
+        val normal = rawLens("0") // default focal 6.9mm / physicalSize 9.8x7.3mm => ~24mm equiv
+        val ultraWide = rawLens("2").copy(focalLengthsMm = listOf(2.2f)) // ~8mm equiv, much wider FOV
+        val lenses = supported(listOf(normal, ultraWide)).lenses.associateBy { it.cameraId }
+        assertTrue(lenses.getValue("0").fovMetric < lenses.getValue("2").fovMetric) // "2" really is widest
+        assertTrue(lenses.getValue("0").isMain) // yet "0" (near-normal) is picked as main
+        assertFalse(lenses.getValue("2").isMain)
+    }
 }

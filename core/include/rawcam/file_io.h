@@ -83,5 +83,16 @@ inline void closeFd(int fd) {
   ::close(fd);
 #endif
 }
+// Flushes kernel buffers to durable storage. Best-effort: the return value is
+// intentionally ignored at call sites -- a failed sync narrows an already-rare
+// post-finalize power-pull window further but must never fail the finalize
+// (or export) it's called from.
+inline void syncFd(int fd) {
+#ifdef _WIN32
+  _commit(fd);
+#else
+  ::fsync(fd);
+#endif
+}
 
 }  // namespace rawcam::io

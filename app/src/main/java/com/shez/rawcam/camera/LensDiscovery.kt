@@ -125,9 +125,20 @@ object LensDiscovery {
         val logicalFocal = sources.firstOrNull { it.physicalIds.isNotEmpty() }
             ?.focalLengthsMm?.firstOrNull()
         val withFocal = deduped.indices.filter { deduped[it].focalMm != null }
+        val withEquivFocal = withFocal.filter { deduped[it].equivFocalMm != null }
         val mainIndex = when {
             logicalFocal != null && withFocal.isNotEmpty() ->
                 withFocal.minBy { Math.abs(deduped[it].focalMm!! - logicalFocal) }
+            // No logical multi-camera to report an advertised main focal length --
+            // this device exposes every lens as its own fully separate top-level
+            // camera id. Prefer the focal length closest to a typical phone
+            // main/wide camera (~26mm equivalent) rather than literally the widest
+            // FOV: an ultra-wide sensor is common on these devices but is almost
+            // never the intended launch default. Falls back to widest-FOV only if
+            // no candidate has an equivalent focal length to compare (needs the
+            // sensor's physical size, which isn't always reported).
+            withEquivFocal.isNotEmpty() ->
+                withEquivFocal.minBy { Math.abs(deduped[it].equivFocalMm!! - TYPICAL_MAIN_EQUIV_FOCAL_MM) }
             withFocal.isNotEmpty() ->
                 withFocal.maxBy { deduped[it].fovMetric.toDouble() }
             else -> deduped.indices.maxBy {
@@ -146,6 +157,10 @@ object LensDiscovery {
 
     /** Full-frame diagonal, for the 35mm-equivalent crop-factor formula. */
     private const val FULL_FRAME_DIAGONAL_MM = 43.27
+
+    /** 35mm-equivalent focal length of a typical phone main/wide camera, used only
+     * by [finishLenses]'s no-logical-camera main-lens fallback. */
+    private const val TYPICAL_MAIN_EQUIV_FOCAL_MM = 26f
 
     /** Fallback when a sensor exposes no colour calibration: identity. A DNG
      * with an identity ColorMatrix1 still opens and still grades; the lens is

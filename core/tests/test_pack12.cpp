@@ -25,3 +25,11 @@ TEST_CASE("values above 12 bits are truncated to low 12") {
   CHECK(out[0] == 0xFFF);
   CHECK(out[1] == 0xFFF);
 }
+
+TEST_CASE("count==0 is a no-op, not a crash") {
+  uint8_t dummy = 0xAB;
+  pack12(nullptr, 0, &dummy);
+  unpack12(&dummy, 0, nullptr);
+  CHECK(dummy == 0xAB);  // loop body never ran, buffer untouched
+  CHECK(packed12Size(0) == 0);
+}

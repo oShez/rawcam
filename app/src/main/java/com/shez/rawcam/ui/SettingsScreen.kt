@@ -305,7 +305,7 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
 
             SectionHeader("ABOUT")
             Text(
-                "RawCam 0.1", color = RawCamColors.Muted, fontSize = 12.sp,
+                "RawCam " + com.shez.rawcam.BuildConfig.VERSION_NAME, color = RawCamColors.Muted, fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp),
             )
             Text(

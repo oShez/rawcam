@@ -239,7 +239,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                                 )
                             }
                         },
-                        onCancel = { ExportService.cancel(context) },
+                        onCancel = { ExportService.cancel(context, baseName(clip.file)) },
                         onDelete = {
                             scope.launch {
                                 if (SettingsRepository.settings.first().confirmDelete) {

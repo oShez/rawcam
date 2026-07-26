@@ -28,12 +28,13 @@ void Capture::onImageAvailable(AImageReader* reader) {
   }
 
   std::lock_guard<std::mutex> lock(queueMutex_);
-  if (queue_.size() >= kQueueCap) {
+  if (queueCount_ >= kQueueCap) {
     AImage_delete(image);
     dropped_++;
     return;
   }
-  queue_.push_back(image);
+  queue_[(queueHead_ + queueCount_) % kQueueCap] = image;
+  queueCount_++;
   queueCv_.notify_one();
 }
 
@@ -157,13 +158,14 @@ void Capture::writerLoop() {
     AImage* image = nullptr;
     {
       std::unique_lock<std::mutex> lock(queueMutex_);
-      queueCv_.wait(lock, [this] { return !queue_.empty() || stopping_.load(); });
-      if (queue_.empty()) {
+      queueCv_.wait(lock, [this] { return queueCount_ > 0 || stopping_.load(); });
+      if (queueCount_ == 0) {
         if (stopping_.load()) break;
         continue;
       }
-      image = queue_.front();
-      queue_.pop_front();
+      image = queue_[queueHead_];
+      queueHead_ = (queueHead_ + 1) % kQueueCap;
+      queueCount_--;
     }
     processImage(image);
   }
@@ -197,7 +199,8 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
     // anything is left it belongs to a deleted reader and must not be touched
     // (AImage_delete on it would double-free); just drop the pointers.
     std::lock_guard<std::mutex> lock(queueMutex_);
-    queue_.clear();
+    queueHead_ = 0;
+    queueCount_ = 0;
   }
 
   FileHeader hdr{};
@@ -301,8 +304,11 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
   // device, 2026-07-13 12:19 crash).
   {
     std::lock_guard<std::mutex> lock(queueMutex_);
-    for (AImage* img : queue_) AImage_delete(img);
-    queue_.clear();
+    for (size_t i = 0; i < queueCount_; i++) {
+      AImage_delete(queue_[(queueHead_ + i) % kQueueCap]);
+    }
+    queueHead_ = 0;
+    queueCount_ = 0;
   }
 
   uint64_t written = 0;

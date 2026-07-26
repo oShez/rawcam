@@ -51,7 +51,7 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     testOptions { unitTests.isReturnDefaultValues = true }
     kotlinOptions { jvmTarget = "17" }
     compileOptions {

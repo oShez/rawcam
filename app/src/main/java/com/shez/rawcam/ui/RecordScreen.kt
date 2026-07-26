@@ -409,8 +409,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * this doesn't run while the app is backgrounded. */
     suspend fun refreshFreeSpace() {
         val free = withContext(Dispatchers.IO) {
-            try { StatFs(controller.clipsDir.absolutePath).availableBytes }
-            catch (e: Exception) { 0L }
+            try {
+                controller.clipsDir.mkdirs() // idempotent; StatFs needs the dir to exist
+                StatFs(controller.clipsDir.absolutePath).availableBytes
+            } catch (e: Exception) { 0L }
         }
         _uiState.update { it.copy(freeSpaceBytes = free) }
     }
@@ -852,6 +854,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleRecord() {
         val s = _uiState.value
         if (s.busy) return // debounce: a start/stop transition is already in flight
+        // A tap-to-meter is mid-convergence (up to ~1.8s, blocking the camera
+        // thread) -- starting a recording here would race its session
+        // reconfiguration against meterAt's own repeating-request/session use.
+        // Same guard meterAt() itself already applies before starting a new meter.
+        if (s.metering) return
         if (s.recording) stopRecordingInternal() else startRecordingInternal()
     }
 

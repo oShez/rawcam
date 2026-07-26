@@ -25,6 +25,7 @@ bool RawvWriter::finalize() {
   if (fd_ < 0 || finalized_) return false;
   hdr_.frameCount = frames_;
   bool ok = io::seekTo(fd_, 0) && io::writeAll(fd_, &hdr_, sizeof hdr_);
+  io::syncFd(fd_);  // best-effort; narrows the post-finalize power-pull window
   io::closeFd(fd_);
   fd_ = -1;
   finalized_ = true;

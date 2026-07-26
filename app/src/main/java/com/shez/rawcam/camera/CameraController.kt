@@ -179,8 +179,11 @@ class CameraController(private val context: Context) {
      * regardless of this flag (spec requirement -- one line per process). */
     @Volatile var debugLogging: Boolean = false
 
-    /** Directory Task 11 should place clip files in (created eagerly). */
-    val clipsDir: File = File(context.getExternalFilesDir(null), "clips").apply { mkdirs() }
+    /** Directory clip files live in. A plain path -- no I/O -- so constructing a
+     * CameraController never touches disk; callers that actually need the
+     * directory to exist (StatFs reads, starting a recording) call .mkdirs()
+     * themselves at the point of use, both already off the main thread. */
+    val clipsDir: File = File(context.getExternalFilesDir(null), "clips")
 
     private val cameraThread = HandlerThread("camera").apply { start() }
     private val cameraHandler = Handler(cameraThread.looper)
@@ -444,6 +447,7 @@ class CameraController(private val context: Context) {
         if (recording) return false
         val preview = previewSurface ?: return false
         if (device == null) return false
+        clipsDir.mkdirs() // idempotent; the actual write (below, via `path`) needs this to exist
         val spec = rawSpec
         val raw = NativeBridge.nativeStartRecording(
             path, spec.width, spec.height, spec.cfa, spec.whiteLevel,
@@ -484,9 +488,29 @@ class CameraController(private val context: Context) {
             recording = false
             Log.e(TAG, "recording session configuration failed")
             NativeBridge.nativeStopRecording() // discard the never-fed native writer
+            val failedRaw = rawSurface
             rawSurface = null
             previewSurface?.let { ps ->
-                cameraHandler.post { createSession(listOf(ps), forRecording = false) {} }
+                cameraHandler.post {
+                    // `session = null` above (before the failed createSession attempt)
+                    // only covers the synchronous path -- a LATE onConfigured for that
+                    // same abandoned attempt can still land on cameraHandler ahead of
+                    // this post and reassign `session` to one still targeting
+                    // failedRaw (sessionGeneration is normally bumped by createSession
+                    // itself, which here only runs AFTER this block, i.e. too late to
+                    // reject that stale callback). Close/null whatever session is live
+                    // now and bump the generation so any still-pending late callback
+                    // self-rejects (see sessionGeneration's kdoc), before releasing.
+                    session?.close()
+                    session = null
+                    sessionGeneration++
+                    try {
+                        failedRaw?.release()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "rawSurface release failed", e)
+                    }
+                    createSession(listOf(ps), forRecording = false) {}
+                }
             }
             return false
         }
@@ -898,6 +922,7 @@ class CameraController(private val context: Context) {
 
         // 3. Only now is it safe to tear down the native writer.
         val stats = NativeBridge.nativeStopRecording()
+        val finishedRaw = rawSurface
         rawSurface = null
 
         // 4. Return to preview-only.
@@ -905,6 +930,21 @@ class CameraController(private val context: Context) {
             cameraHandler.post {
                 session?.close()
                 session = null
+                // Release only after the session that targeted it has been closed
+                // (immediately above, same camera-thread post) -- releasing first
+                // would risk the still-referencing session's close() touching a
+                // released Surface. The session was already idle (step 1/2 above)
+                // before nativeStopRecording ran, so no capture is in flight here.
+                // CameraCaptureSession.close()'s own docs call teardown "not
+                // instantaneous" and point to onClosed() as the real completion
+                // signal, which this class doesn't listen for -- accepted given the
+                // drain above already quiesces captures, but caught defensively
+                // rather than let a device-specific straggler crash the app.
+                try {
+                    finishedRaw?.release()
+                } catch (e: Exception) {
+                    Log.e(TAG, "rawSurface release failed", e)
+                }
                 createSession(listOf(ps), forRecording = false) {}
             }
         }
@@ -1296,10 +1336,17 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
-        // Mirror of RecordScreen.KELVIN_STOPS / TINT_STOPS. gainsToKelvinTint returns
-        // values from these sets so the metered result lands exactly on a slider tick.
+        // Curated subsets of RecordScreen.KELVIN_STOPS (step 100) / TINT_STOPS (step
+        // 2, even only) -- gainsToKelvinTint returns values from these sets so the
+        // metered result always lands on a real slider tick, not a mirror of the
+        // full slider resolution. KELVIN_CANDIDATES' values are all multiples of
+        // 100 (a true subset of KELVIN_STOPS) by construction. TINT_CANDIDATES was
+        // previously step 5, which includes odd values (-45, -35, ... 45) that
+        // aren't in TINT_STOPS at all -- a meter could set uiState.tint to a value
+        // with no matching tick. Step 10 keeps a similarly coarse candidate set
+        // while staying a guaranteed subset (every multiple of 10 is even).
         private val KELVIN_CANDIDATES = intArrayOf(2000, 2700, 3200, 4000, 5000, 5600, 6500, 7500, 9000, 10000)
-        private val TINT_CANDIDATES = (-50..50 step 5).toList()
+        private val TINT_CANDIDATES = (-50..50 step 10).toList()
         // Seed anchor for gainsFor before the first successful meterAt of a given lens
         // (see anchorState's kdoc): a typical green-dominant phone-sensor neutral at
         // 5600K (gainsFor's own no-anchor-yet default). Better than trusting a possibly-

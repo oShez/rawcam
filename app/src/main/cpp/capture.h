@@ -1,10 +1,10 @@
 #pragma once
 #include <jni.h>
 #include <media/NdkImageReader.h>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -69,7 +69,15 @@ class Capture {
 
   std::mutex queueMutex_;
   std::condition_variable queueCv_;
-  std::deque<AImage*> queue_;
+  // Fixed-capacity ring buffer, not std::deque: the capture callback (must
+  // never block/allocate on the camera thread) and the writer thread share
+  // this at up to the frame rate, and a deque's per-push/pop node churn is
+  // not provably allocation-free. queue_[queueHead_] is the oldest queued
+  // image; queueCount_ (<= kQueueCap) is how many of queue_'s kQueueCap
+  // slots are live, starting at queueHead_ and wrapping.
+  std::array<AImage*, kQueueCap> queue_{};
+  size_t queueHead_ = 0;
+  size_t queueCount_ = 0;
   std::atomic<bool> stopping_{false};
 
   std::thread writerThread_;
