@@ -58,6 +58,7 @@ data class Settings(
     val reticleHoldMs: Int = 600,            // 300, 600, 1200
     val gridEnabled: Boolean = false,
     val levelEnabled: Boolean = false,
+    val zebraEnabled: Boolean = false,
     val shutterDisplay: ShutterDisplay = ShutterDisplay.FRACTION,
     val showStatsSidebar: Boolean = true,
     val showBench: Boolean = true,
@@ -138,6 +139,7 @@ object SettingsRepository {
     private val KEY_RETICLE_HOLD_MS = intPreferencesKey("reticleHoldMs")
     private val KEY_GRID_ENABLED = booleanPreferencesKey("gridEnabled")
     private val KEY_LEVEL_ENABLED = booleanPreferencesKey("levelEnabled")
+    private val KEY_ZEBRA_ENABLED = booleanPreferencesKey("zebraEnabled")
     private val KEY_SHUTTER_DISPLAY = stringPreferencesKey("shutterDisplay")
     private val KEY_SHOW_STATS_SIDEBAR = booleanPreferencesKey("showStatsSidebar")
     private val KEY_SHOW_BENCH = booleanPreferencesKey("showBench")
@@ -188,6 +190,7 @@ object SettingsRepository {
             reticleHoldMs = this[KEY_RETICLE_HOLD_MS] ?: fallback.reticleHoldMs,
             gridEnabled = this[KEY_GRID_ENABLED] ?: fallback.gridEnabled,
             levelEnabled = this[KEY_LEVEL_ENABLED] ?: fallback.levelEnabled,
+            zebraEnabled = this[KEY_ZEBRA_ENABLED] ?: fallback.zebraEnabled,
             shutterDisplay = decodeEnum(this[KEY_SHUTTER_DISPLAY], fallback.shutterDisplay),
             showStatsSidebar = this[KEY_SHOW_STATS_SIDEBAR] ?: fallback.showStatsSidebar,
             showBench = this[KEY_SHOW_BENCH] ?: fallback.showBench,
@@ -243,6 +246,7 @@ object SettingsRepository {
             prefs[KEY_RETICLE_HOLD_MS] = next.reticleHoldMs
             prefs[KEY_GRID_ENABLED] = next.gridEnabled
             prefs[KEY_LEVEL_ENABLED] = next.levelEnabled
+            prefs[KEY_ZEBRA_ENABLED] = next.zebraEnabled
             prefs[KEY_SHUTTER_DISPLAY] = next.shutterDisplay.name
             prefs[KEY_SHOW_STATS_SIDEBAR] = next.showStatsSidebar
             prefs[KEY_SHOW_BENCH] = next.showBench

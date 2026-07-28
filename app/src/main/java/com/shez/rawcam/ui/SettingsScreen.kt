@@ -238,6 +238,11 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
                 title = "Level", subtitle = "Horizon indicator", checked = settings.levelEnabled,
                 onChange = { v -> apply { it.copy(levelEnabled = v) } },
             )
+            ToggleRow(
+                title = "Zebras", subtitle = "Stripe the parts of the frame that are clipping to white",
+                checked = settings.zebraEnabled,
+                onChange = { v -> apply { it.copy(zebraEnabled = v) } },
+            )
             EnumRow(
                 title = "Shutter display", subtitle = null,
                 options = listOf(ShutterDisplay.FRACTION to "1/48", ShutterDisplay.ANGLE to "180°"),
