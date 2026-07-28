@@ -1,5 +1,7 @@
 package com.shez.rawcam.camera
 
+import kotlin.math.abs
+
 /**
  * A coarse grid of clipped-highlight cells, run-length merged along each row.
  *
@@ -89,5 +91,36 @@ object ZebraAnalysis {
             }
         }
         return ZebraMask(cols, rows, runs)
+    }
+
+    /**
+     * Largest analysis area we will ask the camera for, in pixels (1920x1080).
+     *
+     * Camera2's mandatory stream-combination table guarantees
+     * `PRIV(preview) + YUV(preview) + RAW(max)` on every device advertising the RAW
+     * capability -- which RawCam already hard-requires. Staying inside the *preview*
+     * size class is what makes the third output a guarantee rather than a gamble, so
+     * an oversized YUV is only ever chosen when a device advertises nothing smaller.
+     */
+    const val PREVIEW_AREA_CAP = 1920L * 1080L
+
+    /**
+     * Picks the analysis stream size: closest aspect ratio to [targetAspect] first,
+     * then smallest area. No resolution is hardcoded -- devices vary widely in what
+     * they advertise for `YUV_420_888`.
+     *
+     * Returns null when nothing usable was advertised, which the caller treats as
+     * "zebra silently does nothing on this device" rather than an error.
+     */
+    fun pickAnalysisSize(candidates: List<SizeSpec>, targetAspect: Float): SizeSpec? {
+        val usable = candidates.filter { it.width > 0 && it.height > 0 }
+        if (usable.isEmpty()) return null
+        val area = { s: SizeSpec -> s.width.toLong() * s.height }
+        val withinCap = usable.filter { area(it) <= PREVIEW_AREA_CAP }
+        val pool = if (withinCap.isNotEmpty()) withinCap else usable
+        if (targetAspect <= 0f || !targetAspect.isFinite()) return pool.minByOrNull(area)
+        val err = { s: SizeSpec -> abs(s.width.toFloat() / s.height - targetAspect) }
+        val best = pool.minOf(err)
+        return pool.filter { err(it) <= best + 1e-3f }.minByOrNull(area)
     }
 }

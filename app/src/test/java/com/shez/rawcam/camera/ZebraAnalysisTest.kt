@@ -110,4 +110,45 @@ class ZebraAnalysisTest {
         assertTrue(mask.runs.all { it.row in 0 until 24 })
         assertTrue(mask.runs.all { it.startCol >= 0 && it.endColExclusive <= 32 })
     }
+
+    private fun sz(w: Int, h: Int) = SizeSpec(w, h)
+
+    @Test
+    fun `picks the smallest size at the closest aspect ratio`() {
+        val candidates = listOf(sz(1920, 1080), sz(640, 480), sz(320, 240), sz(1280, 720))
+        // 4:3 target -> the two 4:3 options win on aspect, then 320x240 wins on area.
+        assertEquals(sz(320, 240), ZebraAnalysis.pickAnalysisSize(candidates, 4f / 3f))
+    }
+
+    @Test
+    fun `aspect ratio beats raw smallness`() {
+        // 176x144 (11:9) is the smallest by area, but 640x360 matches 16:9 exactly.
+        val candidates = listOf(sz(176, 144), sz(640, 360), sz(1280, 720))
+        assertEquals(sz(640, 360), ZebraAnalysis.pickAnalysisSize(candidates, 16f / 9f))
+    }
+
+    @Test
+    fun `oversized candidates are rejected while any preview-class size exists`() {
+        val candidates = listOf(sz(4000, 3000), sz(640, 480))
+        assertEquals(sz(640, 480), ZebraAnalysis.pickAnalysisSize(candidates, 4f / 3f))
+    }
+
+    @Test
+    fun `falls back to the smallest oversized size when nothing fits the cap`() {
+        val candidates = listOf(sz(4000, 3000), sz(8000, 6000))
+        assertEquals(sz(4000, 3000), ZebraAnalysis.pickAnalysisSize(candidates, 4f / 3f))
+    }
+
+    @Test
+    fun `returns null when there is nothing usable`() {
+        assertEquals(null, ZebraAnalysis.pickAnalysisSize(emptyList(), 4f / 3f))
+        assertEquals(null, ZebraAnalysis.pickAnalysisSize(listOf(sz(0, 0), sz(-1, 4)), 4f / 3f))
+    }
+
+    @Test
+    fun `a nonsense target aspect still returns the smallest usable size`() {
+        val candidates = listOf(sz(640, 480), sz(320, 240))
+        assertEquals(sz(320, 240), ZebraAnalysis.pickAnalysisSize(candidates, 0f))
+        assertEquals(sz(320, 240), ZebraAnalysis.pickAnalysisSize(candidates, Float.NaN))
+    }
 }
