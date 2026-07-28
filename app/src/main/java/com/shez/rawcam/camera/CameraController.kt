@@ -2,9 +2,11 @@ package com.shez.rawcam.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
@@ -14,6 +16,7 @@ import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.ImageReader
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -29,6 +32,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.RggbChannelVector
 import kotlin.math.ln
@@ -211,6 +217,34 @@ class CameraController(private val context: Context) {
     @Volatile private var session: CameraCaptureSession? = null
     @Volatile private var previewSurface: Surface? = null
     @Volatile private var rawSurface: Surface? = null
+
+    /**
+     * Mirrors [Settings.zebraEnabled]; written by RecordViewModel's settings
+     * collector (same pattern as [debugLogging]) and read by [createSession] when it
+     * assembles the output list. Because the Settings screen is unreachable while
+     * recording (its nav button is disabled), this can never flip mid-recording.
+     */
+    @Volatile var zebraEnabled: Boolean = false
+
+    /** Optional low-res YUV analysis stream feeding the zebra overlay. Created and
+     * torn down only from the camera thread (inside [createSession] / [close]). */
+    private var zebraReader: ImageReader? = null
+    @Volatile private var zebraSurface: Surface? = null
+    private var zebraThread: HandlerThread? = null
+    private var zebraHandler: Handler? = null
+
+    /** Reused across frames so the analysis path allocates nothing steady-state --
+     * same reasoning as the capture queue's ring buffer. Analysis-thread-only. */
+    private var zebraBuffer: ByteArray = ByteArray(0)
+    private var lastZebraNs = 0L
+
+    private val _zebraMask = MutableStateFlow<ZebraMask?>(null)
+
+    /** Latest clipped-highlight mask, or null when zebra is off or unavailable on
+     * this device. Updated at most every [ZEBRA_MIN_INTERVAL_NS] from the analysis
+     * thread; consumers must read it in a way that does not force a full
+     * recomposition (see RecordScreen's ZebraOverlay). */
+    val zebraMask: StateFlow<ZebraMask?> = _zebraMask.asStateFlow()
 
     @Volatile private var recording = false
     @Volatile private var manualSet = false
@@ -967,6 +1001,12 @@ class CameraController(private val context: Context) {
             meterCallbackThread?.quitSafely()
             meterCallbackThread = null
             meterCallbackHandler = null
+            // Inside this post{} because releaseZebra() is camera-thread-only, unlike
+            // cameraThread.quitSafely() below.
+            releaseZebra()
+            zebraThread?.quitSafely()
+            zebraThread = null
+            zebraHandler = null
         }
         cameraThread.quitSafely()
     }
@@ -1014,16 +1054,114 @@ class CameraController(private val context: Context) {
         )
     }
 
+    /**
+     * Reads the Y plane (which *is* luminance -- the reason this stream is YUV and
+     * not a second RAW one), thresholds it, and publishes the mask.
+     *
+     * `acquireLatestImage` deliberately discards backlog: if analysis falls behind,
+     * the right answer is the newest frame, not a queued stale one. Every failure is
+     * logged and swallowed -- an exception escaping here would kill the analysis
+     * thread, and a preview aid must never be able to do that.
+     */
+    private val zebraListener = ImageReader.OnImageAvailableListener { reader ->
+        val img = try {
+            reader.acquireLatestImage()
+        } catch (e: Exception) {
+            Log.e(TAG, "zebra acquire failed", e); null
+        } ?: return@OnImageAvailableListener
+        try {
+            val now = SystemClock.elapsedRealtimeNanos()
+            if (now - lastZebraNs >= ZEBRA_MIN_INTERVAL_NS) {
+                lastZebraNs = now
+                val plane = img.planes[0]
+                val buf = plane.buffer
+                val n = buf.remaining()
+                if (zebraBuffer.size < n) zebraBuffer = ByteArray(n)
+                buf.get(zebraBuffer, 0, n)
+                _zebraMask.value = ZebraAnalysis.threshold(
+                    zebraBuffer, img.width, img.height, plane.rowStride, plane.pixelStride,
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "zebra analysis failed", e)
+        } finally {
+            try { img.close() } catch (e: Exception) { Log.w(TAG, "zebra image close failed", e) }
+        }
+    }
+
+    /**
+     * Returns the analysis surface for the session about to be created, building the
+     * reader (and its thread) on first use and rebuilding it whenever the active
+     * lens's chosen size changes. Camera-thread only.
+     *
+     * Returns null when the device advertises no usable YUV size -- the session is
+     * then created without a third output and zebra is a silent no-op, per the
+     * spec's graceful-degradation rule.
+     */
+    private fun ensureZebraSurface(): Surface? {
+        val spec = rawSpec
+        val sizes = try {
+            cameraManager.getCameraCharacteristics(activeCameraId)
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(ImageFormat.YUV_420_888)
+                ?.map { SizeSpec(it.width, it.height) }
+                .orEmpty()
+        } catch (e: Exception) {
+            Log.e(TAG, "zebra: YUV size query failed", e); emptyList()
+        }
+        val pick = ZebraAnalysis.pickAnalysisSize(
+            sizes, spec.width.toFloat() / spec.height,
+        ) ?: run {
+            Log.w(TAG, "zebra: no usable YUV size on camera $activeCameraId")
+            releaseZebra()
+            return null
+        }
+        val existing = zebraReader
+        if (existing != null && existing.width == pick.width && existing.height == pick.height) {
+            return zebraSurface
+        }
+        releaseZebra()
+        return try {
+            val thread = zebraThread ?: HandlerThread("camera-zebra").apply { start() }
+                .also { zebraThread = it; zebraHandler = Handler(it.looper) }
+            val reader = ImageReader.newInstance(pick.width, pick.height, ImageFormat.YUV_420_888, 2)
+            reader.setOnImageAvailableListener(zebraListener, zebraHandler ?: Handler(thread.looper))
+            zebraReader = reader
+            zebraSurface = reader.surface
+            Log.i(TAG, "zebra: analysis stream ${pick.width}x${pick.height}")
+            zebraSurface
+        } catch (e: Exception) {
+            Log.e(TAG, "zebra: reader creation failed", e)
+            releaseZebra()
+            null
+        }
+    }
+
+    /** Tears the analysis stream down and clears the published mask. Camera-thread
+     * only. The HandlerThread itself is left running for reuse and quit in [close]. */
+    private fun releaseZebra() {
+        try { zebraReader?.close() } catch (e: Exception) { Log.w(TAG, "zebra reader close failed", e) }
+        zebraReader = null
+        zebraSurface = null
+        _zebraMask.value = null
+    }
+
     private fun createSession(
         surfaces: List<Surface>, forRecording: Boolean,
         onFailed: () -> Unit = {}, onConfigured: () -> Unit,
     ) {
         val dev = device ?: run { onFailed(); return }
         val generation = ++sessionGeneration
+        // Appended here rather than at createSession's four call sites so no path --
+        // preview open, recording start, or either failure-recovery reopen -- can
+        // silently omit it. Tagged with sessionTagId alongside the others below,
+        // which a standalone lens correctly leaves null.
+        val zebra = if (zebraEnabled) ensureZebraSurface() else { releaseZebra(); null }
+        val allSurfaces = if (zebra != null) surfaces + zebra else surfaces
         try {
             val config = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
-                surfaces.map { s ->
+                allSurfaces.map { s ->
                     OutputConfiguration(s).apply {
                         sessionTagId?.let { setPhysicalCameraId(it) }
                     }
@@ -1086,6 +1224,7 @@ class CameraController(private val context: Context) {
         val dev = device ?: return
         val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewSurface ?: return)
+            zebraSurface?.let { addTarget(it) }
             if (manualSet) applyManual(this, withFrameDuration = false)
         }.build()
         s.setRepeatingRequest(req, null, cameraHandler)
@@ -1097,6 +1236,7 @@ class CameraController(private val context: Context) {
         val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             addTarget(previewSurface ?: return)
             addTarget(raw)
+            zebraSurface?.let { addTarget(it) }
             applyManual(this, withFrameDuration = true)
         }.build()
         s.setRepeatingRequest(req, captureCallback, cameraHandler)
@@ -1336,6 +1476,12 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val SESSION_TIMEOUT_S = 3L
+
+        /** ~15 analyses/second. A visual exposure aid does not need every frame, and
+         * halving the work matters most while recording, where it shares the device
+         * with the capture hot path. */
+        private const val ZEBRA_MIN_INTERVAL_NS = 66_000_000L
+
         // Curated subsets of RecordScreen.KELVIN_STOPS (step 100) / TINT_STOPS (step
         // 2, even only) -- gainsToKelvinTint returns values from these sets so the
         // metered result always lands on a real slider tick, not a mirror of the
