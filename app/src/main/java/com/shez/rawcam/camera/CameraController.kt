@@ -1141,11 +1141,13 @@ class CameraController(private val context: Context) {
     /** Tears the analysis stream down and clears the published mask. Camera-thread
      * only. The HandlerThread itself is left running for reuse and quit in [close].
      *
-     * Called from three places where a session may still hold a reference to the
-     * old reader's [Surface]: the toggle-off branch in [createSession], the
-     * size-change rebuild in [ensureZebraSurface], and the retry-without-zebra
-     * path in [createSession]. Closing [zebraReader] here without first waiting for
-     * that session to close is safe because every caller sits on a path that
+     * Called from two places where a session may still hold a reference to the
+     * old reader's [Surface]: the toggle-off branch in [createSession] (also the
+     * path the retry-without-zebra recursion lands on, since it re-enters
+     * [createSession] with `withZebra = false` rather than calling this directly)
+     * and the size-change rebuild in [ensureZebraSurface]. Closing [zebraReader]
+     * here without first waiting for that session to close is safe because every
+     * caller sits on a path that
      * immediately supersedes the old session before its own teardown would ever
      * reach the freed Surface -- either the device was just reopened (reopening the
      * same camera id implicitly disconnects the previous device and whatever
