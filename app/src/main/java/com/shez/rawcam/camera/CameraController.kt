@@ -229,11 +229,11 @@ class CameraController(private val context: Context) {
     /** Optional low-res YUV analysis stream feeding the zebra overlay. Created and
      * torn down only from the camera thread (inside [createSession] / [close]). */
     private var zebraReader: ImageReader? = null
-    @Volatile private var zebraSurface: Surface? = null
+    private var zebraSurface: Surface? = null
     private var zebraThread: HandlerThread? = null
     private var zebraHandler: Handler? = null
 
-    /** Reused across frames so the analysis path allocates nothing steady-state --
+    /** Reused across frames so the plane copy allocates nothing steady-state --
      * same reasoning as the capture queue's ring buffer. Analysis-thread-only. */
     private var zebraBuffer: ByteArray = ByteArray(0)
     private var lastZebraNs = 0L
@@ -1122,10 +1122,11 @@ class CameraController(private val context: Context) {
         }
         releaseZebra()
         return try {
-            val thread = zebraThread ?: HandlerThread("camera-zebra").apply { start() }
-                .also { zebraThread = it; zebraHandler = Handler(it.looper) }
+            val handler = zebraHandler ?: Handler(
+                HandlerThread("camera-zebra").apply { start() }.also { zebraThread = it }.looper,
+            ).also { zebraHandler = it }
             val reader = ImageReader.newInstance(pick.width, pick.height, ImageFormat.YUV_420_888, 2)
-            reader.setOnImageAvailableListener(zebraListener, zebraHandler ?: Handler(thread.looper))
+            reader.setOnImageAvailableListener(zebraListener, handler)
             zebraReader = reader
             zebraSurface = reader.surface
             Log.i(TAG, "zebra: analysis stream ${pick.width}x${pick.height}")
@@ -1139,6 +1140,21 @@ class CameraController(private val context: Context) {
 
     /** Tears the analysis stream down and clears the published mask. Camera-thread
      * only. The HandlerThread itself is left running for reuse and quit in [close].
+     *
+     * Called from three places where a session may still hold a reference to the
+     * old reader's [Surface]: the toggle-off branch in [createSession], the
+     * size-change rebuild in [ensureZebraSurface], and the retry-without-zebra
+     * path in [createSession]. Closing [zebraReader] here without first waiting for
+     * that session to close is safe because every caller sits on a path that
+     * immediately supersedes the old session before its own teardown would ever
+     * reach the freed Surface -- either the device was just reopened (reopening the
+     * same camera id implicitly disconnects the previous device and whatever
+     * session it held, see [openAndPreview]), or the next step in [createSession]
+     * is its own `dev.createCaptureSession(config)` call, which Camera2 documents
+     * as discarding any session that currently exists on the device before the new
+     * one takes hold. Same class of race as [stopRecording]'s surface-release
+     * ordering comment; resolved here by relying on that framework guarantee
+     * instead of an explicit close-and-wait.
      *
      * The null is posted onto [zebraHandler] rather than set here directly: a call
      * to [zebraListener] queued (or already executing) on that thread before
@@ -1181,7 +1197,8 @@ class CameraController(private val context: Context) {
         // instead of surfacing it as the caller's "unsupported lens/size mode".
         val retryWithoutZebra = {
             Log.w(TAG, "zebra: session rejected the analysis output; retrying without it")
-            releaseZebra()
+            // releaseZebra() is not called here: the recursive call below runs with
+            // withZebra = false, so its own else-branch already guarantees it.
             createSession(surfaces, forRecording, withZebra = false, onFailed = onFailed, onConfigured = onConfigured)
         }
         try {
