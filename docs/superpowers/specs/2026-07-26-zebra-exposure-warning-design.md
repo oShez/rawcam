@@ -1,7 +1,7 @@
 # Zebra Exposure Warning — Design Spec
 
 **Date:** 2026-07-26
-**Status:** Design approved, pending spec review → implementation plan
+**Status:** Implemented and device-verified 2026-07-29
 **Feature:** An optional animated diagonal-stripe overlay over clipped
 highlights in the live preview, toggleable in Settings, active whenever the
 viewfinder is up (idle preview and while recording) — a standard cine-camera
