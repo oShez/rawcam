@@ -1138,16 +1138,30 @@ class CameraController(private val context: Context) {
     }
 
     /** Tears the analysis stream down and clears the published mask. Camera-thread
-     * only. The HandlerThread itself is left running for reuse and quit in [close]. */
+     * only. The HandlerThread itself is left running for reuse and quit in [close].
+     *
+     * The null is posted onto [zebraHandler] rather than set here directly: a call
+     * to [zebraListener] queued (or already executing) on that thread before
+     * [ImageReader.close] can still land its own `_zebraMask.value = ...` after this
+     * function returns, permanently reviving a mask for an analysis stream that no
+     * longer exists. Posting after close() puts the null strictly behind any such
+     * write in the same thread's queue. */
     private fun releaseZebra() {
         try { zebraReader?.close() } catch (e: Exception) { Log.w(TAG, "zebra reader close failed", e) }
         zebraReader = null
         zebraSurface = null
-        _zebraMask.value = null
+        val handler = zebraHandler
+        if (handler != null) handler.post { _zebraMask.value = null } else _zebraMask.value = null
     }
 
+    /**
+     * [withZebra] is false only on the one-shot retry the two failure paths below
+     * perform when a session that INCLUDED the analysis output failed to configure.
+     * It has to be a parameter rather than a re-read of [zebraEnabled], which is
+     * still true at that point and would put the output straight back.
+     */
     private fun createSession(
-        surfaces: List<Surface>, forRecording: Boolean,
+        surfaces: List<Surface>, forRecording: Boolean, withZebra: Boolean = true,
         onFailed: () -> Unit = {}, onConfigured: () -> Unit,
     ) {
         val dev = device ?: run { onFailed(); return }
@@ -1156,8 +1170,20 @@ class CameraController(private val context: Context) {
         // preview open, recording start, or either failure-recovery reopen -- can
         // silently omit it. Tagged with sessionTagId alongside the others below,
         // which a standalone lens correctly leaves null.
-        val zebra = if (zebraEnabled) ensureZebraSurface() else { releaseZebra(); null }
+        val zebra = if (withZebra && zebraEnabled) ensureZebraSurface() else { releaseZebra(); null }
         val allSurfaces = if (zebra != null) surfaces + zebra else surfaces
+        // Whether THIS attempt carried the analysis output, captured for the failure
+        // paths. A device may construct the reader happily and still reject the
+        // three-stream combination -- guaranteed by the mandatory-combination table
+        // for the logical/standalone paths, but NOT when sessionTagId != null, where
+        // the physical-stream table has no RAW entry at all. Dropping the output and
+        // retrying once turns that rejection into the silent no-op the spec requires,
+        // instead of surfacing it as the caller's "unsupported lens/size mode".
+        val retryWithoutZebra = {
+            Log.w(TAG, "zebra: session rejected the analysis output; retrying without it")
+            releaseZebra()
+            createSession(surfaces, forRecording, withZebra = false, onFailed = onFailed, onConfigured = onConfigured)
+        }
         try {
             val config = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
@@ -1198,7 +1224,8 @@ class CameraController(private val context: Context) {
 
                     override fun onConfigureFailed(s: CameraCaptureSession) {
                         Log.e(TAG, "session configuration failed (recording=$forRecording)")
-                        if (generation == sessionGeneration) onFailed()
+                        if (generation != sessionGeneration) return
+                        if (zebra != null) retryWithoutZebra() else onFailed()
                     }
 
                     override fun onReady(s: CameraCaptureSession) {
@@ -1216,7 +1243,7 @@ class CameraController(private val context: Context) {
             // An uncaught exception here kills the camera HandlerThread and the
             // process; fail soft so the UI can reopen with a fresh surface instead.
             Log.e(TAG, "createCaptureSession failed", e)
-            onFailed()
+            if (zebra != null) retryWithoutZebra() else onFailed()
         }
     }
 
