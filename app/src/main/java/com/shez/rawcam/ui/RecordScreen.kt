@@ -16,6 +16,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -83,6 +84,7 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -112,6 +114,7 @@ import com.shez.rawcam.camera.DeviceProfile
 import com.shez.rawcam.camera.LensProfile
 import com.shez.rawcam.camera.ShutterStops
 import com.shez.rawcam.camera.UnsupportedReason
+import com.shez.rawcam.camera.ZebraMask
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
@@ -205,6 +208,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     // Cheap: no camera binder IPC happens until initialize() runs (below, off-main).
     val controller = CameraController(application)
 
+    /** Straight pass-through of the controller's mask -- deliberately NOT folded into
+     * RecordUiState: it updates ~15x/second, and RecordUiState drives the whole
+     * screen's recomposition. See RecordScreen's ZebraOverlay for how it is read. */
+    val zebraMask: StateFlow<ZebraMask?> get() = controller.zebraMask
+
     private val cameraOps = CoroutineScope(
         SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
     )
@@ -291,6 +299,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // above: the FIRST emission must apply a saved debugLogging=true, and
                 // this is a cheap @Volatile write with no live request to re-arm.
                 controller.debugLogging = s.debugLogging
+                controller.zebraEnabled = s.zebraEnabled
                 previous = s
             }
         }
@@ -1317,7 +1326,13 @@ fun RecordScreen(
                     }
                 }
         ) {
-            key(state.lensIndex, state.sizeIndex) {
+            // zebraEnabled joins the key because it changes the session's output
+            // list: recreating the SurfaceView drives surfaceCreated -> openCamera ->
+            // openAndPreview, which rebuilds the session with (or without) the
+            // analysis stream. Same proven path as a lens or resolution switch. Safe
+            // to do unconditionally because the Settings screen is disabled while
+            // recording, so this key cannot change mid-take.
+            key(state.lensIndex, state.sizeIndex, state.settings.zebraEnabled) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -1353,6 +1368,13 @@ fun RecordScreen(
                         drawLine(c, gridPoint(0f, y), gridPoint(w, y), strokeWidth)
                     }
                 }
+            }
+
+            // Zebra stripes over clipped highlights. Same paint-layer-only reasoning
+            // as the grid above: no pointerInput of its own, so tap-to-meter is
+            // unaffected.
+            if (state.settings.zebraEnabled) {
+                ZebraOverlay(viewModel.zebraMask, Modifier.fillMaxSize())
             }
 
             // Horizon level: only composed (and its sensor listener only registered)
@@ -1750,6 +1772,57 @@ private fun HorizonLevel(modifier: Modifier = Modifier, debugLogging: Boolean = 
                 .rotate(-roll)
                 .background(lineColor)
         )
+    }
+}
+
+/**
+ * Animated diagonal stripes over the cells [CameraController.zebraMask] flagged as
+ * clipping.
+ *
+ * Both the mask and the animation phase are read INSIDE the Canvas draw lambda, via
+ * State objects that are never destructured in the composable body. That is the whole
+ * point of the shape: a new mask ~15x/second (and a new phase every frame) invalidates
+ * the draw phase only. Hoisting either read with `by` would recompose this composable
+ * at that rate instead, and folding the mask into RecordUiState would recompose the
+ * entire screen.
+ */
+@Composable
+private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier = Modifier) {
+    val mask = maskFlow.collectAsState()
+    val transition = rememberInfiniteTransition(label = "zebra")
+    val phase = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Restart),
+        label = "zebraPhase",
+    )
+    Canvas(modifier) {
+        val m = mask.value ?: return@Canvas
+        if (m.cols <= 0 || m.rows <= 0 || m.runs.isEmpty()) return@Canvas
+        val period = 14.dp.toPx()
+        val shift = phase.value * period
+        // Hard stops at the midpoint make a stripe, not a gradient; a diagonal
+        // start->end vector plus TileMode.Repeated tiles it across the whole layer, so
+        // stripes stay continuous from one cell run to the next instead of restarting
+        // per rect.
+        val stripes = Brush.linearGradient(
+            0.0f to Color.White.copy(alpha = 0.85f),
+            0.5f to Color.White.copy(alpha = 0.85f),
+            0.5f to Color.Transparent,
+            1.0f to Color.Transparent,
+            start = Offset(shift, shift),
+            end = Offset(shift + period, shift + period),
+            tileMode = TileMode.Repeated,
+        )
+        val cw = size.width / m.cols
+        val ch = size.height / m.rows
+        m.runs.forEach { run ->
+            drawRect(
+                brush = stripes,
+                topLeft = Offset(run.startCol * cw, run.row * ch),
+                size = Size((run.endColExclusive - run.startCol) * cw, ch),
+            )
+        }
     }
 }
 
