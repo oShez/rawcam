@@ -219,12 +219,14 @@ class CameraController(private val context: Context) {
     @Volatile private var rawSurface: Surface? = null
 
     /**
-     * Mirrors [Settings.zebraEnabled]; written by RecordViewModel's settings
-     * collector (same pattern as [debugLogging]) and read by [createSession] when it
-     * assembles the output list. Because the Settings screen is unreachable while
-     * recording (its nav button is disabled), this can never flip mid-recording.
+     * Mirror [Settings.zebraHighlightEnabled] and [Settings.zebraShadowEnabled];
+     * written by RecordViewModel's settings collector (same pattern as
+     * [debugLogging]) and read by [createSession] when it assembles the output
+     * list. Because the Settings screen is unreachable while recording (its nav
+     * button is disabled), neither can flip mid-recording.
      */
-    @Volatile var zebraEnabled: Boolean = false
+    @Volatile var zebraHighlightEnabled: Boolean = false
+    @Volatile var zebraShadowEnabled: Boolean = false
 
     /** Optional low-res YUV analysis stream feeding the zebra overlay. Created and
      * torn down only from the camera thread (inside [createSession] / [close]). */
@@ -1188,7 +1190,12 @@ class CameraController(private val context: Context) {
         // preview open, recording start, or either failure-recovery reopen -- can
         // silently omit it. Tagged with sessionTagId alongside the others below,
         // which a standalone lens correctly leaves null.
-        val zebra = if (withZebra && zebraEnabled) ensureZebraSurface() else { releaseZebra(); null }
+        val zebra = if (withZebra && (zebraHighlightEnabled || zebraShadowEnabled)) {
+            ensureZebraSurface()
+        } else {
+            releaseZebra()
+            null
+        }
         val allSurfaces = if (zebra != null) surfaces + zebra else surfaces
         // Whether THIS attempt carried the analysis output, captured for the failure
         // paths. A device may construct the reader happily and still reject the
