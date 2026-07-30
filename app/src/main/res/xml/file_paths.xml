@@ -10,4 +10,10 @@
          the app still names one specific file per share intent, so this does not by
          itself expose clips/ or bench.bin to anything. -->
     <external-files-path name="snapshot-root" path="." />
+    <!-- Public export root once MANAGE_EXTERNAL_STORAGE is granted —
+         ExportPaths.exportsRootDir() writes DNGs to Download/RawCam/<clip>/ in
+         that case, and the share sheet still needs a content:// URI (not a
+         raw file:// path) for that public location, same as the private one
+         above. -->
+    <external-path name="downloads-rawcam" path="Download/RawCam/" />
 </paths>

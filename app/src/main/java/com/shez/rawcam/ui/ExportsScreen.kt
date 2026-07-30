@@ -42,6 +42,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.shez.rawcam.settings.SettingsRepository
+import com.shez.rawcam.export.ExportPaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -53,7 +54,7 @@ import java.util.Locale
 
 private data class ExportEntry(val dir: File, val dngCount: Int, val totalBytes: Long)
 
-private fun exportsDirOf(context: Context) = File(context.getExternalFilesDir(null), "exports")
+private fun exportsDirOf(context: Context) = ExportPaths.exportsRootDir(context)
 
 private fun loadExports(context: Context): List<ExportEntry> {
     val dirs = exportsDirOf(context).listFiles { f -> f.isDirectory } ?: emptyArray()

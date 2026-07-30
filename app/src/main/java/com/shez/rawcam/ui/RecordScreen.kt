@@ -116,6 +116,7 @@ import com.shez.rawcam.camera.ShutterStops
 import com.shez.rawcam.camera.UnsupportedReason
 import com.shez.rawcam.camera.ZebraMask
 import com.shez.rawcam.export.ExportService
+import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -989,7 +990,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                             val app = getApplication<Application>()
                             val rawvPath = File(controller.clipsDir, name).absolutePath
                             val baseName = name.removeSuffix(".rawv")
-                            val outDir = File(app.getExternalFilesDir(null), "exports/$baseName").absolutePath
+                            val outDir = File(ExportPaths.exportsRootDir(app), baseName).absolutePath
                             ExportService.start(app, rawvPath, outDir, baseName, st.deleteAfterExport)
                         }
                     }

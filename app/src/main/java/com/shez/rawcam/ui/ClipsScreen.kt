@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.export.ExportService
+import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -70,9 +71,6 @@ private data class ClipEntry(
 
 private fun clipsDirOf(context: android.content.Context) =
     File(context.getExternalFilesDir(null), "clips")
-
-private fun exportsDirOf(context: android.content.Context) =
-    File(context.getExternalFilesDir(null), "exports")
 
 private fun baseName(f: File) = f.name.removeSuffix(".rawv")
 
@@ -97,7 +95,7 @@ private fun durationLabel(frames: Int, fps: Int): String =
 
 private fun loadClips(context: android.content.Context): List<ClipEntry> {
     val clipsDir = clipsDirOf(context)
-    val exportsDir = exportsDirOf(context)
+    val exportsDir = ExportPaths.exportsRootDir(context)
     val files = clipsDir.listFiles { f -> f.isFile && f.name.endsWith(".rawv") } ?: emptyArray()
     return files.sortedByDescending { it.lastModified() }.map { f ->
         val info = NativeBridge.nativeClipInfo(f.absolutePath)
@@ -229,7 +227,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                         onExport = {
                             scope.launch {
                                 val deleteAfter = SettingsRepository.settings.first().deleteAfterExport
-                                val outDir = File(exportsDirOf(context), baseName(clip.file))
+                                val outDir = File(ExportPaths.exportsRootDir(context), baseName(clip.file))
                                 ExportService.start(
                                     context,
                                     clip.file.absolutePath,
