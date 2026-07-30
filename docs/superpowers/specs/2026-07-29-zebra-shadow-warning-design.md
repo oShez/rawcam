@@ -1,7 +1,7 @@
 # Zebra Shadow Warning + Highlight Restyle — Design Spec
 
 **Date:** 2026-07-29
-**Status:** Design approved, not yet implemented
+**Status:** Implemented 2026-07-30, on-device verification outstanding (no device connected at implementation time)
 **Feature:** Extends the shipped zebra exposure warning
 (`2026-07-26-zebra-exposure-warning-design.md`) two ways: (1) restyles the
 existing highlight-clip stripes from solid white to a fine red/white
