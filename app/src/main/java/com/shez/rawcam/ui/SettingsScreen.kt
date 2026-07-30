@@ -239,9 +239,14 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
                 onChange = { v -> apply { it.copy(levelEnabled = v) } },
             )
             ToggleRow(
-                title = "Zebras", subtitle = "Stripe the parts of the frame that are clipping to white",
-                checked = settings.zebraEnabled,
-                onChange = { v -> apply { it.copy(zebraEnabled = v) } },
+                title = "Highlight zebra", subtitle = "Stripe blown highlights (clipping to white)",
+                checked = settings.zebraHighlightEnabled,
+                onChange = { v -> apply { it.copy(zebraHighlightEnabled = v) } },
+            )
+            ToggleRow(
+                title = "Shadow zebra", subtitle = "Stripe crushed shadows (clipping to black)",
+                checked = settings.zebraShadowEnabled,
+                onChange = { v -> apply { it.copy(zebraShadowEnabled = v) } },
             )
             EnumRow(
                 title = "Shutter display", subtitle = null,
