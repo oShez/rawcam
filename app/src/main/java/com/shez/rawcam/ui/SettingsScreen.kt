@@ -45,8 +45,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
 import com.shez.rawcam.settings.MeterScope
@@ -75,6 +80,21 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
     var showResetDialog by remember { mutableStateOf(false) }
     var showReport by remember { mutableStateOf(false) }
     var dumpStatus by remember { mutableStateOf<String?>(null) }
+    // The system grant screen ExportPaths.requestAllFilesAccess() opens is a
+    // separate Activity on the same task backstack -- this screen resumes
+    // (ON_RESUME) when the user navigates back from it, which is the only
+    // signal available that the permission may have changed.
+    var allFilesAccess by remember { mutableStateOf(ExportPaths.hasAllFilesAccess(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                allFilesAccess = ExportPaths.hasAllFilesAccess(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     fun apply(transform: (Settings) -> Settings) {
         scope.launch { SettingsRepository.update(transform) }
@@ -311,6 +331,15 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
                         }
                     }
                 },
+            )
+            ActionRow(
+                title = "Allow file access",
+                subtitle = if (allFilesAccess) {
+                    "Granted — exports show up over USB in Windows/Mac file browsers"
+                } else {
+                    "Lets exported clips show up over USB in Windows/Mac file browsers"
+                },
+                onClick = { if (!allFilesAccess) ExportPaths.requestAllFilesAccess(context) },
             )
 
             SectionHeader("ABOUT")
