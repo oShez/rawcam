@@ -146,8 +146,16 @@ class ExportService : Service() {
             // system's periodic scan. Only meaningful when they were written
             // under the public ExportPaths root -- skipped otherwise, since a
             // private-storage path isn't something the scanner can do
-            // anything useful with.
-            if (ok && ExportPaths.hasAllFilesAccess(this)) {
+            // anything useful with. Gated on outDir itself (where this export
+            // actually landed), not a live hasAllFilesAccess() check: exports
+            // are serialized on a single-thread executor, so a queued export
+            // can sit behind a running one long enough for the user to flip
+            // the permission in Settings between enqueue (when outDir was
+            // resolved) and completion (now) -- a live permission check here
+            // would either skip scanning a public-root export whose permission
+            // was since revoked, or scan a private-root export whose
+            // permission was since granted.
+            if (ok && ExportPaths.isPublicRoot(this, File(outDir))) {
                 val dngPaths = File(outDir).listFiles { f -> f.name.endsWith(".dng") }
                     ?.map { it.absolutePath }?.toTypedArray() ?: emptyArray()
                 if (dngPaths.isNotEmpty()) {

@@ -83,10 +83,13 @@ private fun humanSize(bytes: Long): String {
 }
 
 /** Hands the clip's whole DNG set to the system share sheet via a FileProvider (scoped
- * to exports/ only, see file_paths.xml) -- Quick Share/Nearby Share to a paired laptop,
- * a Drive folder, email, whatever share target the user already has set up. No custom
- * networking: the share sheet is the standard, already-hardened Android mechanism for
- * "get these files onto another device", so this app doesn't need to be a file server. */
+ * to the export root paths declared in file_paths.xml -- both the private exports/
+ * fallback and the public Download/RawCam location that [com.shez.rawcam.export.ExportPaths]
+ * can resolve to, see ExportPaths.exportsRootDir()) -- Quick Share/Nearby Share to a
+ * paired laptop, a Drive folder, email, whatever share target the user already has set
+ * up. No custom networking: the share sheet is the standard, already-hardened Android
+ * mechanism for "get these files onto another device", so this app doesn't need to be a
+ * file server. */
 private fun shareExport(context: Context, entry: ExportEntry) {
     val authority = "${context.packageName}.fileprovider"
     val dngs = entry.dir.listFiles { f -> f.name.endsWith(".dng") } ?: return
@@ -102,7 +105,10 @@ private fun shareExport(context: Context, entry: ExportEntry) {
 
 /**
  * Browses exported DNG folders (written by [com.shez.rawcam.export.ExportService] under
- * getExternalFilesDir/exports/<clipName>/), shares a clip's full DNG set through the
+ * whichever root [com.shez.rawcam.export.ExportPaths.exportsRootDir] resolves --
+ * the public Download/RawCam/<clipName>/ location when this app holds
+ * MANAGE_EXTERNAL_STORAGE, or the private getExternalFilesDir/exports/<clipName>/
+ * fallback otherwise), shares a clip's full DNG set through the
  * system share sheet, and deletes an export folder outright (the source .rawv on
  * ClipsScreen is untouched -- this only removes the exported DNG copy). Delete reuses
  * the same [com.shez.rawcam.settings.Settings.confirmDelete] gate and confirmation-
