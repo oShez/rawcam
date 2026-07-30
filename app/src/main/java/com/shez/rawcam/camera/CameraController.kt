@@ -1177,8 +1177,9 @@ class CameraController(private val context: Context) {
     /**
      * [withZebra] is false only on the one-shot retry the two failure paths below
      * perform when a session that INCLUDED the analysis output failed to configure.
-     * It has to be a parameter rather than a re-read of [zebraEnabled], which is
-     * still true at that point and would put the output straight back.
+     * It has to be a parameter rather than a re-read of [zebraHighlightEnabled] or
+     * [zebraShadowEnabled], which may still be true at that point and would put
+     * the output straight back.
      */
     private fun createSession(
         surfaces: List<Surface>, forRecording: Boolean, withZebra: Boolean = true,
