@@ -37,9 +37,27 @@ object ExportPaths {
      * MANAGE_EXTERNAL_STORAGE. Purely a path comparison: does not itself check
      * the current permission state, since a directory already written under the
      * public root stays there regardless of whether the permission was later
-     * revoked. */
-    fun isPublicRoot(context: Context, dir: File): Boolean =
-        dir.absolutePath.startsWith(publicRootPath().absolutePath)
+     * revoked. Segment-aware (not a bare prefix match), so a same-prefix
+     * sibling like Download/RawCam-backup is never misclassified. */
+    fun isPublicRoot(context: Context, dir: File): Boolean {
+        val root = publicRootPath().absolutePath
+        val path = dir.absolutePath
+        return path == root || path.startsWith(root + File.separator)
+    }
+
+    private fun privateRootPath(context: Context): File =
+        File(context.getExternalFilesDir(null), "exports")
+
+    /** Every location that may currently hold an exported clip -- the public
+     * root and the private fallback -- regardless of which one [exportsRootDir]
+     * currently resolves to. Exports are written to exactly one of these at a
+     * time (never both, per the no-copy constraint), but a clip exported before
+     * MANAGE_EXTERNAL_STORAGE was granted (or after it was revoked) stays where
+     * it was written even once the resolved root changes -- read paths
+     * (listing, sharing, deleting) must check both, or that clip becomes
+     * invisible in-app despite still existing on disk. */
+    fun allExportRoots(context: Context): List<File> =
+        listOf(publicRootPath(), privateRootPath(context))
 
     /** Root directory new exports are written under. Ensures the directory (and,
      * for the public case, a Download/RawCam/.nomedia marker) exist before
@@ -70,7 +88,7 @@ object ExportPaths {
             }
             return dir
         }
-        val dir = File(context.getExternalFilesDir(null), "exports")
+        val dir = privateRootPath(context)
         try {
             dir.mkdirs()
         } catch (e: SecurityException) {

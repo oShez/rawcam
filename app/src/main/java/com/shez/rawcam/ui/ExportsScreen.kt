@@ -2,6 +2,7 @@ package com.shez.rawcam.ui
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaScannerConnection
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -54,10 +55,15 @@ import java.util.Locale
 
 private data class ExportEntry(val dir: File, val dngCount: Int, val totalBytes: Long)
 
-private fun exportsDirOf(context: Context) = ExportPaths.exportsRootDir(context)
-
+// Lists across every export root (public + private fallback), not just the one
+// ExportPaths.exportsRootDir() currently resolves to -- a clip exported before
+// MANAGE_EXTERNAL_STORAGE was granted (or after it was revoked) stays where it
+// was written, and must not silently disappear from this screen just because
+// the resolved root later changed.
 private fun loadExports(context: Context): List<ExportEntry> {
-    val dirs = exportsDirOf(context).listFiles { f -> f.isDirectory } ?: emptyArray()
+    val dirs = ExportPaths.allExportRoots(context).flatMap { root ->
+        root.listFiles { f -> f.isDirectory }?.toList() ?: emptyList()
+    }
     return dirs.mapNotNull { dir ->
         val dngs = dir.listFiles { f -> f.name.endsWith(".dng") } ?: return@mapNotNull null
         if (dngs.isEmpty()) return@mapNotNull null
@@ -128,9 +134,20 @@ fun ExportsScreen(onBack: () -> Unit = {}) {
 
     // Off-main delete, same pattern as ClipsScreen.performDelete: the directory
     // removal runs on Dispatchers.IO, then refreshTick++ reloads the list.
+    // If this export was under the public root, its DNGs were indexed into
+    // MediaStore on export (see ExportService); re-scanning those same paths
+    // after deletion tells the scanner they're gone, so it removes the stale
+    // rows instead of a desktop still showing already-deleted files over MTP
+    // until the next system-initiated rescan.
     fun performDelete(dir: File) {
         scope.launch {
+            val dngPaths = dir.listFiles { f -> f.name.endsWith(".dng") }
+                ?.map { it.absolutePath }?.toTypedArray() ?: emptyArray()
+            val shouldRescan = dngPaths.isNotEmpty() && ExportPaths.isPublicRoot(context, dir)
             withContext(Dispatchers.IO) { dir.deleteRecursively() }
+            if (shouldRescan) {
+                MediaScannerConnection.scanFile(context, dngPaths, null, null)
+            }
             refreshTick++
         }
     }

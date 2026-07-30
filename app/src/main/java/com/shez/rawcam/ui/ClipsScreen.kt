@@ -95,12 +95,17 @@ private fun durationLabel(frames: Int, fps: Int): String =
 
 private fun loadClips(context: android.content.Context): List<ClipEntry> {
     val clipsDir = clipsDirOf(context)
-    val exportsDir = ExportPaths.exportsRootDir(context)
+    // Checks every export root (public + private fallback), not just the one
+    // exportsRootDir() currently resolves to -- a clip exported before the
+    // MANAGE_EXTERNAL_STORAGE permission was granted (or after it was revoked)
+    // stays where it was written, and must not read as "Not exported" just
+    // because the resolved root later changed.
+    val exportRoots = ExportPaths.allExportRoots(context)
     val files = clipsDir.listFiles { f -> f.isFile && f.name.endsWith(".rawv") } ?: emptyArray()
     return files.sortedByDescending { it.lastModified() }.map { f ->
         val info = NativeBridge.nativeClipInfo(f.absolutePath)
-        val outDir = File(exportsDir, baseName(f))
-        val exportedCount = if (outDir.isDirectory) {
+        val outDir = exportRoots.map { root -> File(root, baseName(f)) }.firstOrNull { it.isDirectory }
+        val exportedCount = if (outDir != null) {
             outDir.listFiles { of -> of.name.endsWith(".dng") }?.size ?: 0
         } else -1
         ClipEntry(
