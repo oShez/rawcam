@@ -1798,7 +1798,7 @@ private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier = M
     )
     Canvas(modifier) {
         val m = mask.value ?: return@Canvas
-        if (m.cols <= 0 || m.rows <= 0 || m.runs.isEmpty()) return@Canvas
+        if (m.cols <= 0 || m.rows <= 0 || m.highlightRuns.isEmpty()) return@Canvas
         val period = 14.dp.toPx()
         val shift = phase.value * period
         // Hard stops at the midpoint make a stripe, not a gradient; a diagonal
@@ -1816,7 +1816,7 @@ private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier = M
         )
         val cw = size.width / m.cols
         val ch = size.height / m.rows
-        m.runs.forEach { run ->
+        m.highlightRuns.forEach { run ->
             drawRect(
                 brush = stripes,
                 topLeft = Offset(run.startCol * cw, run.row * ch),

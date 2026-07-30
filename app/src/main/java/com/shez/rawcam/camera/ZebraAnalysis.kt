@@ -3,7 +3,8 @@ package com.shez.rawcam.camera
 import kotlin.math.abs
 
 /**
- * A coarse grid of clipped-highlight cells, run-length merged along each row.
+ * A coarse grid of clipped-highlight and crushed-shadow cells, each run-length merged
+ * along its row.
  *
  * Deliberately not per-pixel: zebra is a visual warning, not a measurement, and a
  * coarse grid keeps the overlay's per-frame draw-call count bounded. Runs exist
@@ -11,19 +12,20 @@ import kotlin.math.abs
  * cell is flagged -- is also its most common real use; merging turns that from
  * [cols] x [rows] rects into one rect per row.
  *
- * [runs] is ordered by row, then by [CellRun.startCol]. An empty [runs] means
- * nothing is clipping.
+ * [highlightRuns] and [shadowRuns] are each ordered by row, then by
+ * [CellRun.startCol]. An empty list means nothing is clipping in that direction.
  */
 data class ZebraMask(
     val cols: Int,
     val rows: Int,
-    val runs: List<CellRun>,
+    val highlightRuns: List<CellRun>,
+    val shadowRuns: List<CellRun>,
 ) {
     /** A horizontal span of flagged cells in one row: `[startCol, endColExclusive)`. */
     data class CellRun(val row: Int, val startCol: Int, val endColExclusive: Int)
 
     companion object {
-        val EMPTY = ZebraMask(0, 0, emptyList())
+        val EMPTY = ZebraMask(0, 0, emptyList(), emptyList())
     }
 }
 
@@ -35,13 +37,18 @@ data class ZebraMask(
 object ZebraAnalysis {
 
     /** A pixel counts as clipped only at the 8-bit Y plane's true maximum. */
-    const val CLIP_THRESHOLD = 255
+    const val HIGHLIGHT_CLIP_THRESHOLD = 255
+
+    /** A pixel counts as crushed only at the 8-bit Y plane's true minimum. */
+    const val SHADOW_CLIP_THRESHOLD = 0
 
     const val GRID_COLS = 32
     const val GRID_ROWS = 24
 
     /**
-     * Flags every grid cell containing at least one pixel at [CLIP_THRESHOLD].
+     * Flags every grid cell containing at least one pixel at [HIGHLIGHT_CLIP_THRESHOLD]
+     * (highlight) or at [SHADOW_CLIP_THRESHOLD] (shadow) -- independently, in the same
+     * single pass over the plane.
      *
      * [rowStride]/[pixelStride] come straight from `Image.Plane` -- a YUV Y plane is
      * frequently padded ([rowStride] > [width]) and may be interleaved
@@ -65,18 +72,29 @@ object ZebraAnalysis {
         val needed = (height - 1).toLong() * rowStride + (width - 1).toLong() * pixelStride + 1L
         if (y.size < needed) return ZebraMask.EMPTY
 
-        val flags = BooleanArray(cols * rows)
+        val highlightFlags = BooleanArray(cols * rows)
+        val shadowFlags = BooleanArray(cols * rows)
         for (py in 0 until height) {
             val cellRow = py * rows / height
             val rowBase = py * rowStride
             val flagBase = cellRow * cols
             for (px in 0 until width) {
-                if ((y[rowBase + px * pixelStride].toInt() and 0xFF) >= CLIP_THRESHOLD) {
-                    flags[flagBase + px * cols / width] = true
-                }
+                val v = y[rowBase + px * pixelStride].toInt() and 0xFF
+                val cell = flagBase + px * cols / width
+                if (v >= HIGHLIGHT_CLIP_THRESHOLD) highlightFlags[cell] = true
+                if (v <= SHADOW_CLIP_THRESHOLD) shadowFlags[cell] = true
             }
         }
 
+        return ZebraMask(
+            cols, rows,
+            highlightRuns = mergeRuns(highlightFlags, cols, rows),
+            shadowRuns = mergeRuns(shadowFlags, cols, rows),
+        )
+    }
+
+    /** Run-length merges a flat [cols] x [rows] flag grid into per-row [ZebraMask.CellRun]s. */
+    private fun mergeRuns(flags: BooleanArray, cols: Int, rows: Int): List<ZebraMask.CellRun> {
         val runs = ArrayList<ZebraMask.CellRun>()
         for (r in 0 until rows) {
             var c = 0
@@ -90,7 +108,7 @@ object ZebraAnalysis {
                 }
             }
         }
-        return ZebraMask(cols, rows, runs)
+        return runs
     }
 
     /**
