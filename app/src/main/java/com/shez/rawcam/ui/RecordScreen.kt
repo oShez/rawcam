@@ -1327,16 +1327,19 @@ fun RecordScreen(
                     }
                 }
         ) {
-            // zebraHighlightEnabled/zebraShadowEnabled join the key because either
-            // one changes the session's output list: recreating the SurfaceView
-            // drives surfaceCreated -> openCamera -> openAndPreview, which rebuilds
-            // the session with (or without) the analysis stream. Same proven path as
-            // a lens or resolution switch. Safe to do unconditionally because the
-            // Settings screen is disabled while recording, so this key cannot change
-            // mid-take.
+            // The OR of zebraHighlightEnabled/zebraShadowEnabled joins the key, not
+            // the two flags individually: CameraController's session gate is itself
+            // an OR (either flag alone justifies the analysis stream), so keying on
+            // both flags would force a session rebuild when one toggles while the
+            // other is already on -- even though the output list doesn't actually
+            // change. Recreating the SurfaceView drives surfaceCreated -> openCamera
+            // -> openAndPreview, which rebuilds the session with (or without) the
+            // analysis stream. Same proven path as a lens or resolution switch. Safe
+            // to do unconditionally because the Settings screen is disabled while
+            // recording, so this key cannot change mid-take.
             key(
                 state.lensIndex, state.sizeIndex,
-                state.settings.zebraHighlightEnabled, state.settings.zebraShadowEnabled,
+                state.settings.zebraHighlightEnabled || state.settings.zebraShadowEnabled,
             ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
