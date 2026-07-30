@@ -1,7 +1,8 @@
 # Zebra Shadow Warning + Highlight Restyle — open items after final review
 
-Date: 2026-07-30. Plan: `docs/superpowers/plans/2026-07-29-zebra-shadow-warning.md`.
-Spec: `docs/superpowers/specs/2026-07-29-zebra-shadow-warning-design.md`.
+Date: 2026-07-30 (code), 2026-07-31 (device verification). Plan:
+`docs/superpowers/plans/2026-07-29-zebra-shadow-warning.md`. Spec:
+`docs/superpowers/specs/2026-07-29-zebra-shadow-warning-design.md`.
 
 ## What's done
 
@@ -17,84 +18,98 @@ All 4 code tasks from the plan are committed and individually reviewed clean:
 The final whole-branch review found one Important-severity issue (the
 session-recreation `key()` in `RecordScreen.kt` was keying on both zebra
 flags individually instead of their OR, over-triggering a full camera-session
-rebuild when one flag toggled while the other was already on) plus this
-documentation gap. The code fix is applied and verified: `key()` now keys on
+rebuild when one flag toggled while the other was already on). Fixed and
+verified in `f8476fa`/`257bc91`: `key()` now keys on
 `state.settings.zebraHighlightEnabled || state.settings.zebraShadowEnabled`,
 matching `CameraController`'s own OR-based session gate exactly.
 `:app:assembleDebug :app:testDebugUnitTest` is BUILD SUCCESSFUL, 69/69 tests
 passing. The whole-branch review is clean after this fix.
 
-## What's NOT yet done: on-device verification
+## On-device verification — 2026-07-31 (Xiaomi device, model `24030PN60G`, Android 16)
 
-**No Android device was connected at implementation time**, so Task 5 of the
-plan (on-device verification) could not run. Every item below is owed before
-this feature is considered done, per this project's standing convention that
-a visual feature is not complete off a green build alone. From the plan's
-Task 5:
+Ran against the installed build after resolving a debug-signature conflict
+(old install uninstalled, fresh install succeeded). Results:
 
-- [ ] **Toggle persistence, including the upgrade path.** Turn "Highlight
-  zebra" on and "Shadow zebra" off, force-stop, relaunch, reopen Settings —
-  confirm both values survive independently. Repeat with the opposite
-  combination.
-- [ ] **Restyled highlight stripes.** With only "Highlight zebra" on, point at
-  a blown highlight — confirm a fine red/white candy-stripe (not solid
-  white), visibly tighter-pitched than the old 14dp bars, gone once exposure
-  drops. Screenshot and zoom in to confirm — a green build proves nothing
-  here.
-- [ ] **New shadow stripes.** With only "Shadow zebra" on, point at a crushed
-  shadow — confirm a fine blue stripe with the dark image visible through the
-  gaps, gone once the shadow lifts. Screenshot and zoom in.
-- [ ] **Both together.** Both toggles on, a scene with both a blown highlight
-  and a crushed shadow — confirm each stripe stays confined to its own
-  region and both animate at the same apparent speed.
-- [ ] **Orientation/corner check.** Fill only one corner of the frame with a
-  crushed shadow — confirm blue stripes appear in that same corner (the
-  shadow run list shares the highlight side's already-verified grid/pixel
-  mapping, but hasn't itself been confirmed on real hardware).
-- [ ] **Toggle stability.** With the viewfinder up, toggle both flags off and
-  on several times, independently and together — confirm the preview
-  recovers every time, no black frames left behind, no "Camera open failed"
-  toast.
-- [ ] **Recording not degraded.** Record at least 30 seconds with both
-  toggles ON at full resolution/fps — confirm 0 dropped frames, compared
-  against a same-length clip with both OFF.
-- [ ] **Crash buffer check.** `adb logcat -b crash -d` — confirm no `FATAL
-  EXCEPTION` from `com.shez.rawcam`.
+- [x] **Toggle persistence, both directions.** Highlight ON / Shadow OFF,
+  force-stopped, relaunched — both values held. Repeated with Highlight
+  OFF / Shadow ON — also held independently. Confirmed via screenshots.
+- [x] **Restyled highlight stripes.** With only "Highlight zebra" on, pointed
+  at a lamp: a fine red/white candy-stripe appeared, confined exactly to the
+  blown-out ceiling/wall area, visibly tighter-pitched than the old 14dp
+  bars. Screenshot-confirmed, zoomed.
+- [x] **New shadow stripes.** With only "Shadow zebra" on, pointing at an
+  ordinarily "dark" room produced no stripes at all — the sensor's noise
+  floor apparently never hits the literal `Y == 0` threshold from ambient
+  darkness alone (unlike highlight clipping, which is a hard sensor
+  ceiling). Confirmed instead by fully covering the lens with a fingertip:
+  a fine blue stripe pattern appeared, precisely tracing the fingertip's
+  irregular shape, dark background visible through the gaps. This also
+  serves as the orientation/mapping check below. **Design note, not a
+  defect:** true `Y == 0` may be rare-to-unreachable in normal shooting
+  conditions; this matches the spec's explicit choice of the strict floor,
+  but is worth knowing going in — the highlight and shadow thresholds are
+  not symmetric in how easily real scenes reach them.
+- [x] **Orientation/mapping check.** The fingertip-shaped blue-stripe blob
+  appeared in the correct location/shape (not flipped, not offset) —
+  confirms the shadow run list's grid mapping is correct, not just the
+  already-shipped highlight side's.
+- [x] **Both together, no interference.** Enabled both toggles simultaneously
+  and pointed at scenes that separately triggered each color — each
+  rendered correctly in the other's presence, no visual or toggle-state
+  interference.
+- [~] **Simultaneous highlight+shadow overlap in one frame.** Attempted (lamp
+  + partial finger-cover on one lens corner) but could not force a single
+  analysis cell to register both `Y == 255` and `Y == 0` at once in this
+  session — auto-exposure and partial occlusion don't reach the strict
+  floor the same way full lens occlusion does. **Still an open question,
+  not ruled out**: if a real scene does trigger both in one cell, the two
+  in-phase, differently-opaque brushes (opaque red/white vs. opaque
+  blue/transparent) may blend into an unintended color rather than reading
+  as "both." Revisit if this is ever seen in real use — not blocking, since
+  the spec doesn't dictate overlap behavior.
+- [x] **Toggle stability.** Across this session, both flags were flipped
+  independently and together roughly 10+ times (including a mid-verification
+  screen-lock/camera-error recovery) — the preview recovered every time
+  after relaunch, no persistent black frames or stuck "Camera open failed"
+  state tied to the zebra toggles themselves.
+- [x] **Recording not degraded.** Recorded ~111 seconds with both toggles ON
+  at the device's active resolution/fps. Completion toast: **2667 frames,
+  0 dropped.**
+- [x] **Crash buffer check.** `adb logcat -b crash -d` — empty. No `FATAL
+  EXCEPTION` from `com.shez.rawcam` anywhere in the buffer.
 
-## Additional case flagged by the final review (not in the original Task 5 list)
+### Unrelated observation (not a zebra-feature defect)
 
-- [ ] **A cell that clips both highlight and shadow in the same frame.** The
-  overlay's analysis grid is coarse (~60x45 px per cell at typical preview
-  resolutions) — a bright window against a black interior can put both a 255
-  pixel and a 0 pixel in the *same* cell, flagging it in both `highlightRuns`
-  and `shadowRuns` simultaneously. The two brushes are drawn in-phase (same
-  shared diagonal/period), and the highlight brush is opaque red/white while
-  the shadow brush is opaque blue over transparent — stacking them in the
-  same cell may render as an unintended blue-purple blend rather than
-  anything that reads as "this cell has both problems." Worth a specific
-  look on-device once a scene that triggers it is found (a bright window
-  against a dark interior is the easiest way to force it). This is **not
-  necessarily a defect** — the spec doesn't dictate overlap behavior, and no
-  task in the plan called it out — but it should be looked at deliberately
-  rather than discovered by accident.
+Mid-session, the device's screen locked from inactivity while screenshots
+were being taken (adb-driven screenshots don't count as user activity, so
+the normal screen timeout elapsed). This tore down the camera session with a
+real error cascade (`BufferQueue has been abandoned`, `CameraDevice-JV-0`
+close). This is existing app/OS lifecycle behavior — any recording in
+progress across a screen lock would hit the same thing regardless of the
+zebra feature — not something introduced by this plan. Not filed as a task
+item here since it's out of scope for this feature; worth a look someday if
+background/lock-screen recording continuity ever becomes a goal.
 
-## Migration path — specific verification owed
+### Not verified this session
 
-- [ ] **Old single-toggle upgrade.** Install the pre-branch APK (the one
-  shipping the single "Zebras" toggle), turn it on, then install this
-  branch's build over it (no uninstall). Open Settings and confirm
-  "Highlight zebra" comes up **ON** and "Shadow zebra" comes up **OFF**. This
-  exercises `SettingsRepository`'s DataStore migration fallback
-  (`zebraHighlightEnabled` reads `KEY_ZEBRA_HIGHLIGHT_ENABLED` first, falling
-  back to the old `KEY_ZEBRA_ENABLED`) — there is no automated test for this
-  path since it needs a live `Context`, so this on-device check is the only
-  verification it will ever get.
+- [ ] **Old single-toggle upgrade migration path.** The plan's Task 5 called
+  for installing the pre-branch APK (shipping the single "Zebras" toggle),
+  turning it on, then upgrading to this build in place and confirming
+  "Highlight zebra" comes up ON / "Shadow zebra" comes up OFF. No pre-branch
+  APK was available in this session to test the actual upgrade — only the
+  new build's own toggle persistence was verified (see above). The
+  migration code itself (`SettingsRepository`'s
+  `this[KEY_ZEBRA_HIGHLIGHT_ENABLED] ?: this[KEY_ZEBRA_ENABLED] ?: fallback`
+  fallback chain) was verified logically correct in code review, but this
+  specific real-upgrade path has never been exercised on a device. If a
+  build predating this plan is ever available again, this is still worth
+  running once.
 
-## Next
+## Conclusion
 
-Once a device is connected, run through Task 5's steps above in order,
-capture screenshots for the two visual checks, and update the spec's status
-line (`docs/superpowers/specs/2026-07-29-zebra-shadow-warning-design.md:4`)
-to `Implemented and device-verified <date>` once everything passes — or
-append a new dated update section to this file recording exactly what was
-found, same pattern as this project's other open-items docs.
+The feature is implemented, code-reviewed clean, and device-verified for
+every case that could be exercised in this session. The two items above
+(overlap-color rendering, old-APK upgrade path) are edge cases that could
+not be forced or tested with what was available, not known failures — this
+is not a "done, no open items" close like the original zebra exposure
+warning feature, but a "shipped, two narrow follow-ups identified" one.
