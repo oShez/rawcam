@@ -299,7 +299,8 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // above: the FIRST emission must apply a saved debugLogging=true, and
                 // this is a cheap @Volatile write with no live request to re-arm.
                 controller.debugLogging = s.debugLogging
-                controller.zebraEnabled = s.zebraEnabled
+                controller.zebraHighlightEnabled = s.zebraHighlightEnabled
+                controller.zebraShadowEnabled = s.zebraShadowEnabled
                 previous = s
             }
         }
@@ -1326,13 +1327,17 @@ fun RecordScreen(
                     }
                 }
         ) {
-            // zebraEnabled joins the key because it changes the session's output
-            // list: recreating the SurfaceView drives surfaceCreated -> openCamera ->
-            // openAndPreview, which rebuilds the session with (or without) the
-            // analysis stream. Same proven path as a lens or resolution switch. Safe
-            // to do unconditionally because the Settings screen is disabled while
-            // recording, so this key cannot change mid-take.
-            key(state.lensIndex, state.sizeIndex, state.settings.zebraEnabled) {
+            // zebraHighlightEnabled/zebraShadowEnabled join the key because either
+            // one changes the session's output list: recreating the SurfaceView
+            // drives surfaceCreated -> openCamera -> openAndPreview, which rebuilds
+            // the session with (or without) the analysis stream. Same proven path as
+            // a lens or resolution switch. Safe to do unconditionally because the
+            // Settings screen is disabled while recording, so this key cannot change
+            // mid-take.
+            key(
+                state.lensIndex, state.sizeIndex,
+                state.settings.zebraHighlightEnabled, state.settings.zebraShadowEnabled,
+            ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -1370,11 +1375,16 @@ fun RecordScreen(
                 }
             }
 
-            // Zebra stripes over clipped highlights. Same paint-layer-only reasoning
-            // as the grid above: no pointerInput of its own, so tap-to-meter is
-            // unaffected.
-            if (state.settings.zebraEnabled) {
-                ZebraOverlay(viewModel.zebraMask, Modifier.fillMaxSize())
+            // Zebra stripes over clipped highlights and/or crushed shadows. Same
+            // paint-layer-only reasoning as the grid above: no pointerInput of its
+            // own, so tap-to-meter is unaffected.
+            if (state.settings.zebraHighlightEnabled || state.settings.zebraShadowEnabled) {
+                ZebraOverlay(
+                    viewModel.zebraMask,
+                    state.settings.zebraHighlightEnabled,
+                    state.settings.zebraShadowEnabled,
+                    Modifier.fillMaxSize(),
+                )
             }
 
             // Horizon level: only composed (and its sensor listener only registered)
@@ -1777,7 +1787,8 @@ private fun HorizonLevel(modifier: Modifier = Modifier, debugLogging: Boolean = 
 
 /**
  * Animated diagonal stripes over the cells [CameraController.zebraMask] flagged as
- * clipping.
+ * clipping: red/white over blown highlights, blue over crushed shadows, each drawn
+ * only when its corresponding setting is on.
  *
  * Both the mask and the animation phase are read INSIDE the Canvas draw lambda, via
  * State objects that are never destructured in the composable body. That is the whole
@@ -1787,7 +1798,12 @@ private fun HorizonLevel(modifier: Modifier = Modifier, debugLogging: Boolean = 
  * entire screen.
  */
 @Composable
-private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier = Modifier) {
+private fun ZebraOverlay(
+    maskFlow: StateFlow<ZebraMask?>,
+    highlightEnabled: Boolean,
+    shadowEnabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val mask = maskFlow.collectAsState()
     val transition = rememberInfiniteTransition(label = "zebra")
     val phase = transition.animateFloat(
@@ -1798,33 +1814,68 @@ private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier = M
     )
     Canvas(modifier) {
         val m = mask.value ?: return@Canvas
-        if (m.cols <= 0 || m.rows <= 0 || m.highlightRuns.isEmpty()) return@Canvas
-        val period = 14.dp.toPx()
+        if (m.cols <= 0 || m.rows <= 0) return@Canvas
+        // 7dp candy-stripe period, half the originally-shipped 14dp bars -- a
+        // tighter pitch reads more clearly as "zebra". Hard stops at the midpoint
+        // make a stripe, not a gradient; a diagonal start->end vector plus
+        // TileMode.Repeated tiles it across the whole layer, so stripes stay
+        // continuous from one cell run to the next instead of restarting per rect.
+        // Both warnings share one phase/diagonal so they animate in lockstep when
+        // both are visible at once.
+        val period = 7.dp.toPx()
         val shift = phase.value * period
-        // Hard stops at the midpoint make a stripe, not a gradient; a diagonal
-        // start->end vector plus TileMode.Repeated tiles it across the whole layer, so
-        // stripes stay continuous from one cell run to the next instead of restarting
-        // per rect.
-        val stripes = Brush.linearGradient(
-            0.0f to Color.White.copy(alpha = 0.85f),
-            0.5f to Color.White.copy(alpha = 0.85f),
-            0.5f to Color.Transparent,
-            1.0f to Color.Transparent,
-            start = Offset(shift, shift),
-            end = Offset(shift + period, shift + period),
-            tileMode = TileMode.Repeated,
-        )
+        val start = Offset(shift, shift)
+        val end = Offset(shift + period, shift + period)
         val cw = size.width / m.cols
         val ch = size.height / m.rows
-        m.highlightRuns.forEach { run ->
-            drawRect(
-                brush = stripes,
-                topLeft = Offset(run.startCol * cw, run.row * ch),
-                size = Size((run.endColExclusive - run.startCol) * cw, ch),
+        if (highlightEnabled && m.highlightRuns.isNotEmpty()) {
+            val stripes = Brush.linearGradient(
+                0.0f to ZebraHighlightColor.copy(alpha = 0.85f),
+                0.5f to ZebraHighlightColor.copy(alpha = 0.85f),
+                0.5f to Color.White.copy(alpha = 0.85f),
+                1.0f to Color.White.copy(alpha = 0.85f),
+                start = start,
+                end = end,
+                tileMode = TileMode.Repeated,
             )
+            m.highlightRuns.forEach { run ->
+                drawRect(
+                    brush = stripes,
+                    topLeft = Offset(run.startCol * cw, run.row * ch),
+                    size = Size((run.endColExclusive - run.startCol) * cw, ch),
+                )
+            }
+        }
+        if (shadowEnabled && m.shadowRuns.isNotEmpty()) {
+            // Blue alternating with fully transparent (not a second opaque color):
+            // the gaps show the real, already-dark preview pixels through, unlike
+            // the highlight brush's opaque white counter-stripe.
+            val stripes = Brush.linearGradient(
+                0.0f to ZebraShadowColor.copy(alpha = 0.85f),
+                0.5f to ZebraShadowColor.copy(alpha = 0.85f),
+                0.5f to Color.Transparent,
+                1.0f to Color.Transparent,
+                start = start,
+                end = end,
+                tileMode = TileMode.Repeated,
+            )
+            m.shadowRuns.forEach { run ->
+                drawRect(
+                    brush = stripes,
+                    topLeft = Offset(run.startCol * cw, run.row * ch),
+                    size = Size((run.endColExclusive - run.startCol) * cw, ch),
+                )
+            }
         }
     }
 }
+
+/** Reuses the app's existing red accent rather than a new one-off hex -- close
+ * enough to the reference screenshots' red to read as the same convention. */
+private val ZebraHighlightColor = RawCamColors.Accent
+
+/** No existing theme color is blue; this is zebra-only. */
+private val ZebraShadowColor = Color(0xFF3385FF)
 
 @Composable
 private fun RecDot() {
