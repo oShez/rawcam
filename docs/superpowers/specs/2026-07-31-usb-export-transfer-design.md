@@ -1,7 +1,7 @@
 # USB-Visible Export Folder — Design Spec
 
 **Date:** 2026-07-31
-**Status:** Implemented, 4 open items (device-verified 2026-07-31)
+**Status:** Implemented, 1 open item (device-verified 2026-07-31)
 **Feature:** Moves exported DNG folders from the app-private, USB-invisible
 `Android/data/.../files/exports` directory to a public, `MediaStore`-indexed
 location (`Download/RawCam/<clip>/`), so a USB cable + Windows Explorer can

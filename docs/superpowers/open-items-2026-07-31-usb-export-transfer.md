@@ -74,48 +74,39 @@ All 4 code tasks from the plan are committed and individually reviewed clean:
 The final review (after all 4 tasks landed) found 4 issues invisible to any
 single task's per-task review. Two (a crash-loop risk and a permission/path
 race) were fixed in commit `6c57ebd` and confirmed by a scoped re-review with
-no new Critical/Important breakage. Two are recorded here rather than fixed,
-since fixing them means expanding scope beyond this plan's tasks:
+no new Critical/Important breakage. The remaining three were fixed in a
+follow-up pass (commit `a8779a6`):
 
-- **Orphaned exports across a permission toggle.** `ExportPaths.exportsRootDir()`
-  re-resolves on every call, so `ClipsScreen`/`ExportsScreen` only ever see
-  exports under whichever root is *currently* resolved. The realistic sequence
-  — export before granting the permission, then grant it later — leaves the
-  earlier export stranded under the private `Android/data/...` path with no
-  in-app way to see, Send, or Delete it (and if `deleteAfterExport` was on, the
-  source `.rawv` is already gone too). The spec's "one-time cutover" reasoning
-  covered exports made *before this feature shipped*, not this mid-lifecycle
-  toggle case, so this is a legitimate gap, not something the spec already
-  accepted. Fix sketch: add an `ExportPaths.allExportRoots(context): List<File>`
-  and use it in the two read paths (`loadClips`, `loadExports`) while keeping
-  `exportsRootDir()` as the sole write-path resolver — `file_paths.xml` already
-  declares both FileProvider paths, so `shareExport()` needs no further change.
-- **`MediaStore` rows outlive a deleted export.** `ExportsScreen`'s delete
-  handler does a bare `dir.deleteRecursively()`; nothing tells `MediaStore` the
-  files are gone, so a desktop browsing over MTP can keep showing
-  already-deleted files/folders until the next system-initiated rescan. Fix
-  sketch: capture the DNG paths before deleting and call
-  `MediaScannerConnection.scanFile()` on them afterward — the scanner removes
-  rows for files it finds missing.
-- **(Hardening note, not currently exploitable)** `ExportPaths.isPublicRoot()`
-  uses a plain `String.startsWith()` prefix match against the public root path,
-  with no path-separator boundary check. A hypothetical same-prefix sibling
-  directory (e.g. `Download/RawCam-backup`) would be misclassified as the
-  public root. Not live today — every `outDir` is built via `File(parent,
-  child)`, which always inserts a separator — but worth tightening
-  (`path == root || path.startsWith(root + File.separator)`) if this function
-  is ever reused elsewhere.
+- **Orphaned exports across a permission toggle — fixed.**
+  `ExportPaths.exportsRootDir()` re-resolves on every call, so
+  `ClipsScreen`/`ExportsScreen` only ever saw exports under whichever root was
+  *currently* resolved; exporting before granting the permission, then
+  granting it later, left the earlier export stranded and invisible in-app.
+  Added `ExportPaths.allExportRoots(context): List<File>` and switched the two
+  read paths (`ClipsScreen.loadClips`, `ExportsScreen.loadExports`) to check
+  both roots, while `exportsRootDir()` remains the sole write-path resolver.
+  Device-verified: with one test clip previously exported to each root (public
+  + private, from earlier permission-toggle testing), Exports now correctly
+  lists both entries.
+- **`MediaStore` rows outliving a deleted export — fixed.** `ExportsScreen`'s
+  `performDelete` now captures the DNG paths before `deleteRecursively()`, and
+  — only when the deleted directory was under the public root
+  (`ExportPaths.isPublicRoot`) — re-scans those same (now-missing) paths via
+  `MediaScannerConnection.scanFile()` afterward, so MediaStore removes the
+  stale rows instead of a desktop still showing deleted files over MTP.
+- **`isPublicRoot()` hardening — fixed.** Was a plain `String.startsWith()`
+  prefix match against the public root path; tightened to a segment-aware
+  comparison (`path == root || path.startsWith(root + File.separator)`) so a
+  hypothetical same-prefix sibling directory can't be misclassified.
 
 ## Conclusion
 
 The feature is implemented, device-verified for every checklist item except
-the large-scale export case (no large clip available this session), and the
-final whole-branch review's two fixable findings (crash risk, permission/path
-race) are fixed and re-review-confirmed clean. Four narrow items remain,
-none blocking: the large-export stress test, the two scope-expanding gaps
-from the final review (orphaned exports across a permission toggle,
-MediaStore rows outliving a deleted export), and one non-exploitable
-hardening note. This is a "shipped, several narrow follow-ups identified"
-close, matching this project's established convention for features with
-residual, honestly-recorded edge cases rather than a false "fully clean"
-close.
+the large-scale export case (no large clip available this session), and all
+5 findings from the final whole-branch review (crash risk, permission/path
+race, orphaned exports across a permission toggle, MediaStore rows outliving
+a deleted export, and the `isPublicRoot` hardening note) are fixed. One item
+remains, non-blocking: the large-export stress test. This is a "shipped, one
+narrow follow-up identified" close, matching this project's established
+convention for features with a residual, honestly-recorded edge case rather
+than a false "fully clean" close.
