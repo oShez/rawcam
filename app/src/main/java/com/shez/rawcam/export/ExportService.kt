@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.os.IBinder
 import android.util.Log
 import com.shez.rawcam.NativeBridge
@@ -139,6 +140,19 @@ class ExportService : Service() {
                 ok -> ExportStatus.DONE
                 wasCancelled -> ExportStatus.CANCELLED
                 else -> ExportStatus.FAILED
+            }
+            // Indexes the just-written DNGs into MediaStore's generic Files
+            // collection so they show up over MTP/USB without waiting on the
+            // system's periodic scan. Only meaningful when they were written
+            // under the public ExportPaths root -- skipped otherwise, since a
+            // private-storage path isn't something the scanner can do
+            // anything useful with.
+            if (ok && ExportPaths.hasAllFilesAccess(this)) {
+                val dngPaths = File(outDir).listFiles { f -> f.name.endsWith(".dng") }
+                    ?.map { it.absolutePath }?.toTypedArray() ?: emptyArray()
+                if (dngPaths.isNotEmpty()) {
+                    MediaScannerConnection.scanFile(this, dngPaths, null, null)
+                }
             }
             // Delete the source .rawv only on a genuine successful, non-cancelled
             // completion -- never on FAILED or CANCELLED (the clip would otherwise
