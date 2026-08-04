@@ -25,9 +25,9 @@ static void writeClip(const char* path, int frames) {
   auto w = RawvWriter::create(path, testHeader());
   std::vector<uint8_t> p(16);
   for (int i = 0; i < frames; i++) {
-    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i;
+    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i; m.payloadBytes = (uint32_t)p.size();
     std::memset(p.data(), i, p.size());
-    w->writeFrame(m, p.data());
+    w->writeFrame(m, p.data(), (uint32_t)p.size());
   }
   w->finalize();
 }

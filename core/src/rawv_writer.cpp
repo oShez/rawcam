@@ -13,10 +13,11 @@ std::unique_ptr<RawvWriter> RawvWriter::create(const std::string& path, const Fi
   return std::unique_ptr<RawvWriter>(new RawvWriter(fd, h));
 }
 
-bool RawvWriter::writeFrame(const FrameMeta& meta, const uint8_t* payload) {
+bool RawvWriter::writeFrame(const FrameMeta& meta, const uint8_t* payload, uint32_t payloadBytes) {
   if (fd_ < 0 || finalized_) return false;
+  if (meta.payloadBytes != payloadBytes) return false;  // caller bug guard
   if (!io::writeAll(fd_, &meta, sizeof meta)) return false;
-  if (!io::writeAll(fd_, payload, hdr_.frameSizeBytes)) return false;
+  if (payloadBytes > 0 && !io::writeAll(fd_, payload, payloadBytes)) return false;
   frames_++;
   return true;
 }

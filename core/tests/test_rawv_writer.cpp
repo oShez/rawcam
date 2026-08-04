@@ -30,9 +30,9 @@ TEST_CASE("writer produces header + fixed records and finalizes count") {
     REQUIRE(w != nullptr);
     std::vector<uint8_t> payload(fs);
     for (uint64_t i = 0; i < 3; i++) {
-      FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = i; m.iso = 100;
+      FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = i; m.iso = 100; m.payloadBytes = fs;
       std::memset(payload.data(), (int)i, fs);
-      CHECK(w->writeFrame(m, payload.data()));
+      CHECK(w->writeFrame(m, payload.data(), fs));
     }
     CHECK(w->framesWritten() == 3);
     CHECK(w->finalize());
@@ -51,4 +51,18 @@ TEST_CASE("writer produces header + fixed records and finalizes count") {
   CHECK(m.timestampNs == 1001);
   io::closeFd(fd);
   std::remove(path);
+}
+
+TEST_CASE("writeFrame accepts a payload shorter than frameSizeBytes (compressed case)") {
+  FileHeader hdr = testHeader(1000);  // frameSizeBytes is only an allocation ceiling here
+  auto w = RawvWriter::create("test_variable_frame.rawv", hdr);
+  REQUIRE(w != nullptr);
+  FrameMeta meta{};
+  meta.frameIndex = 0;
+  meta.payloadBytes = 250;  // actual compressed size, well under the 1000 ceiling
+  meta.compressed = 1;
+  std::vector<uint8_t> payload(250, 0xAB);
+  CHECK(w->writeFrame(meta, payload.data(), 250));
+  CHECK(w->finalize());
+  std::remove("test_variable_frame.rawv");
 }

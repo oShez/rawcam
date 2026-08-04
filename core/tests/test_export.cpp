@@ -57,10 +57,10 @@ static void writePacked10Clip(const char* path, int frames) {
   std::vector<uint8_t> packed(packedSize);
   std::vector<uint16_t> px(count);
   for (int i = 0; i < frames; i++) {
-    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i;
+    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i; m.payloadBytes = packedSize;
     for (size_t p = 0; p < count; p++) px[p] = (uint16_t)((i * 10 + (int)p) & 0x3FF);
     pack10(px.data(), count, packed.data());
-    CHECK(w->writeFrame(m, packed.data()));
+    CHECK(w->writeFrame(m, packed.data(), packedSize));
   }
   CHECK(w->finalize());
 }
@@ -80,10 +80,10 @@ static void writePacked12Clip(const char* path, int frames) {
   std::vector<uint8_t> packed(packedSize);
   std::vector<uint16_t> px(count);
   for (int i = 0; i < frames; i++) {
-    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i;
+    FrameMeta m{}; m.timestampNs = 1000 + i; m.frameIndex = (uint64_t)i; m.payloadBytes = packedSize;
     for (size_t p = 0; p < count; p++) px[p] = (uint16_t)((i * 10 + (int)p) & 0xFFF);
     pack12(px.data(), count, packed.data());
-    CHECK(w->writeFrame(m, packed.data()));
+    CHECK(w->writeFrame(m, packed.data(), packedSize));
   }
   CHECK(w->finalize());
 }

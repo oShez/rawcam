@@ -8,7 +8,7 @@ namespace rawcam {
 class RawvWriter {
  public:
   static std::unique_ptr<RawvWriter> create(const std::string& path, const FileHeader& hdr);
-  bool writeFrame(const FrameMeta& meta, const uint8_t* payload);
+  bool writeFrame(const FrameMeta& meta, const uint8_t* payload, uint32_t payloadBytes);
   bool finalize();
   uint64_t framesWritten() const { return frames_; }
   ~RawvWriter();
