@@ -4,6 +4,7 @@
 #include "rawcam/rawv_reader.h"
 #include "rawcam/file_io.h"
 #include "rawcam/pack10.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -138,6 +139,55 @@ TEST_CASE("open accepts valid packed10 and clamps an overstated frameCount") {
   auto r3 = RawvReader::open("ok.rawv");
   CHECK(r3 != nullptr);
   std::remove("ok.rawv");
+}
+
+TEST_CASE("readFrame handles a mix of compressed and stored-fallback frames") {
+  const char* path = "mixed.rawv";
+  FileHeader hdr = testHeader();
+  hdr.frameSizeBytes = 1000;  // allocation ceiling, matches the compressed-mode contract
+  auto w = RawvWriter::create(path, hdr);
+  REQUIRE(w != nullptr);
+
+  // Frame 0: compressed, payloadBytes well under the ceiling.
+  FrameMeta m0{}; m0.frameIndex = 0; m0.payloadBytes = 250; m0.compressed = 1;
+  std::vector<uint8_t> c0(250, 0xAB);
+  REQUIRE(w->writeFrame(m0, c0.data(), 250));
+
+  // Frame 1: stored-fallback, payloadBytes == the ceiling.
+  FrameMeta m1{}; m1.frameIndex = 1; m1.payloadBytes = 1000; m1.compressed = 0;
+  std::vector<uint8_t> s1(1000, 0xCD);
+  REQUIRE(w->writeFrame(m1, s1.data(), 1000));
+
+  // Frame 2: compressed again, a different size than frame 0's -- proves
+  // offsets are tracked per-frame, not assumed constant after the first one.
+  FrameMeta m2{}; m2.frameIndex = 2; m2.payloadBytes = 90; m2.compressed = 1;
+  std::vector<uint8_t> c2(90, 0xEF);
+  REQUIRE(w->writeFrame(m2, c2.data(), 90));
+
+  REQUIRE(w->finalize());
+
+  auto r = RawvReader::open(path);
+  REQUIRE(r != nullptr);
+  CHECK(r->frameCount() == 3);
+
+  std::vector<uint8_t> buf(1000);  // sized to the ceiling, per readFrame's contract
+  FrameMeta out{};
+  REQUIRE(r->readFrame(0, &out, buf.data()));
+  CHECK(out.compressed == 1);
+  CHECK(out.payloadBytes == 250);
+  CHECK(std::equal(buf.begin(), buf.begin() + 250, c0.begin()));
+
+  REQUIRE(r->readFrame(1, &out, buf.data()));
+  CHECK(out.compressed == 0);
+  CHECK(out.payloadBytes == 1000);
+  CHECK(std::equal(buf.begin(), buf.begin() + 1000, s1.begin()));
+
+  REQUIRE(r->readFrame(2, &out, buf.data()));
+  CHECK(out.compressed == 1);
+  CHECK(out.payloadBytes == 90);
+  CHECK(std::equal(buf.begin(), buf.begin() + 90, c2.begin()));
+
+  std::remove(path);
 }
 
 TEST_CASE("truncated file recovers whole frames only") {

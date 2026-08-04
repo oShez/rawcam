@@ -36,10 +36,45 @@ bool headerSane(const FileHeader& h) {
       return h.rowStrideBytes >= h.width * 2 &&
              (uint64_t)h.frameSizeBytes >= (uint64_t)h.rowStrideBytes * h.height &&
              (uint64_t)h.frameSizeBytes <= kMaxFrameBytes;
+    case PackMode::CompressedPredictive:
+      // frameSizeBytes is only an allocation ceiling for this mode (Task 1) --
+      // capture.cpp sizes it to whatever Raw16 would have needed for the same
+      // geometry, so the same bound applies; the real per-frame size lives in
+      // each record's FrameMeta.payloadBytes, checked per-record in
+      // scanOffsets()/readFrame(), not here.
+      return h.rowStrideBytes >= h.width * 2 &&
+             (uint64_t)h.frameSizeBytes >= (uint64_t)h.rowStrideBytes * h.height &&
+             (uint64_t)h.frameSizeBytes <= kMaxFrameBytes;
     default:
       return false;
   }
 }
+// Sequentially walks the file from kHeaderSize, reading only each frame's
+// FrameMeta (kFrameMetaSize bytes -- cheap, not the full payload) and using
+// payloadBytes to skip to the next record. Stops at EOF or at the first
+// record that doesn't fit in the remaining file size (truncated/corrupt
+// tail, or an unfinalized crash/battery-pull file -- same "stop cleanly,
+// don't fail the whole open" behavior the old frameCount==0 scan-recovery
+// path had, now handling variable stride too since it no longer assumes a
+// constant per-frame size). `frameSizeCeiling` bounds payloadBytes the same
+// way headerSane() bounds frameSizeBytes -- readFrame()'s caller-owned
+// payload buffer is sized to this ceiling, so a crafted payloadBytes that
+// fits the file but exceeds it would otherwise overflow that buffer.
+std::vector<uint64_t> scanOffsets(int fd, uint64_t fileSize, uint32_t frameSizeCeiling) {
+  std::vector<uint64_t> offsets;
+  uint64_t pos = kHeaderSize;
+  while (pos + kFrameMetaSize <= fileSize) {
+    FrameMeta meta{};
+    if (!io::seekTo(fd, pos) || !io::readAll(fd, &meta, sizeof meta)) break;
+    if (meta.payloadBytes > frameSizeCeiling) break;  // exceeds the allocation ceiling
+    uint64_t recordEnd = pos + kFrameMetaSize + meta.payloadBytes;
+    if (recordEnd > fileSize) break;  // truncated tail -- stop here, don't include it
+    offsets.push_back(pos);
+    pos = recordEnd;
+  }
+  return offsets;
+}
+
 }  // namespace
 
 std::unique_ptr<RawvReader> RawvReader::open(const std::string& path) {
@@ -51,28 +86,21 @@ std::unique_ptr<RawvReader> RawvReader::open(const std::string& path) {
     io::closeFd(fd);
     return nullptr;
   }
-  const uint64_t rec = kFrameMetaSize + (uint64_t)h.frameSizeBytes;
-  // Whole records actually present on disk. The header's frameCount is
-  // corruption-controlled and must never be trusted beyond this: an
-  // over-stated count would let readFrame seek/read past EOF frame after frame.
   const int64_t sz = io::fileSize(fd);
-  const uint64_t capacity =
-      (sz > (int64_t)kHeaderSize) ? ((uint64_t)sz - kHeaderSize) / rec : 0;
-  uint64_t count = h.frameCount;
-  if (count == 0 || count > capacity) {
-    // count == 0: unfinalized (crash / battery pull) -> recover by scan.
-    // count > capacity: header over-claims (truncated or crafted) -> clamp.
-    count = capacity;
-  }
-  return std::unique_ptr<RawvReader>(new RawvReader(fd, h, count));
+  // The header's frameCount is corruption-controlled and is no longer
+  // trusted at all: scanOffsets() re-derives the true, on-disk frame count
+  // (and each frame's real offset) directly from the records actually
+  // present, for both fixed- and variable-stride files.
+  std::vector<uint64_t> offsets = scanOffsets(fd, sz > 0 ? (uint64_t)sz : 0, h.frameSizeBytes);
+  return std::unique_ptr<RawvReader>(new RawvReader(fd, h, std::move(offsets)));
 }
 
 bool RawvReader::readFrame(uint64_t index, FrameMeta* meta, uint8_t* payload) {
-  if (index >= count_) return false;
-  const uint64_t rec = kFrameMetaSize + (uint64_t)hdr_.frameSizeBytes;
-  if (!io::seekTo(fd_, kHeaderSize + index * rec)) return false;
+  if (index >= offsets_.size()) return false;
+  if (!io::seekTo(fd_, offsets_[index])) return false;
   if (!io::readAll(fd_, meta, sizeof *meta)) return false;
-  return io::readAll(fd_, payload, hdr_.frameSizeBytes);
+  if (meta->payloadBytes > 0 && !io::readAll(fd_, payload, meta->payloadBytes)) return false;
+  return true;
 }
 
 RawvReader::~RawvReader() { if (fd_ >= 0) io::closeFd(fd_); }
