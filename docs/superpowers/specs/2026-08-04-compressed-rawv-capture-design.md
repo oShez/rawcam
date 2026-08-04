@@ -1,7 +1,14 @@
 # Compressed `.rawv` Capture — Design Spec
 
 **Date:** 2026-08-04
-**Status:** Design
+**Status:** Implemented, but FAILS on-device throughput verification (2026-08-05) —
+real-time capture at this project's usual 4096x3072@24fps class drops ~91% of
+frames with compression on; a same-session compression-off control recording
+at identical settings dropped 0. See
+`docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md` for full
+findings. Not ready to ship; needs a codec performance pass
+(`rawv_codec.cpp`'s per-bit `BitWriter` and two-pass full-frame scan) before
+this constraint (stated below) can be met.
 **Feature:** Lossless compression of the `.rawv` capture container's per-frame RAW
 payload, cutting on-device recording storage use by a scene-dependent amount
 (ballpark ~20-50%, matching the general class of technique used by lossless-
