@@ -32,7 +32,7 @@ class Capture {
                  int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                  const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                  const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
-                 const std::string& deviceName);
+                 const std::string& deviceName, bool compressRecordings);
 
   // Records per-frame metadata keyed by exact sensor timestamp, for the writer
   // thread to match against arriving AImages. Callable from any thread.
@@ -100,7 +100,8 @@ class Capture {
   int32_t rowStride_ = 0;
   bool writerInitialized_ = false;
   bool writeFailed_ = false;  // set on first write failure; later frames drop, disk untouched
-  std::vector<uint8_t> packBuf_;  // preallocated Packed10 scratch buffer
+  std::vector<uint8_t> packBuf_;  // preallocated Packed10/Packed12 scratch buffer
+  std::vector<uint8_t> compressBuf_;  // preallocated CompressedPredictive scratch buffer
 };
 
 }  // namespace rawcam

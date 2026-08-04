@@ -478,7 +478,7 @@ class CameraController(private val context: Context) {
      */
     fun startRecording(
         path: String, fps: Int, iso: Int, exposureNs: Long, focusDiopters: Float,
-        kelvin: Int, tint: Int,
+        kelvin: Int, tint: Int, compressRecordings: Boolean = false,
     ): Boolean {
         if (recording) return false
         val preview = previewSurface ?: return false
@@ -489,7 +489,7 @@ class CameraController(private val context: Context) {
             path, spec.width, spec.height, spec.cfa, spec.whiteLevel,
             spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
-            spec.deviceName,
+            spec.deviceName, compressRecordings,
         ) ?: return false
 
         rawSurface = raw

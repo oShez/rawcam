@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "rawcam/pack10.h"
+#include "rawcam/rawv_codec.h"
 
 namespace rawcam {
 
@@ -102,6 +103,13 @@ void Capture::processImage(AImage* image) {
       case PackMode::Raw16:
         hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
         break;
+      case PackMode::CompressedPredictive:
+        // frameSizeBytes is only an allocation ceiling for this mode (Task 1)
+        // -- size it to what Raw16 would have needed, the guaranteed-safe
+        // upper bound for a frame that doesn't compress at all.
+        hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
+        compressBuf_.resize(hdr.frameSizeBytes);
+        break;
     }
     headerTemplate_ = hdr;
     writer_ = RawvWriter::create(path_, hdr);
@@ -137,9 +145,40 @@ void Capture::processImage(AImage* image) {
         pack12(srcRow, (size_t)width_, dstRow);
       }
     }
-    ok = writer_->writeFrame(meta, packBuf_.data());
+    meta.payloadBytes = headerTemplate_.frameSizeBytes;
+    meta.compressed = 0;
+    ok = writer_->writeFrame(meta, packBuf_.data(), headerTemplate_.frameSizeBytes);
+  } else if (mode == PackMode::CompressedPredictive) {
+    // whiteLevel == 0 would make __builtin_clz(0) undefined below (mirrors
+    // the same guard exporter.cpp applies before deriving bitDepth) -- fall
+    // back to storing this one frame uncompressed, same as an encode that
+    // doesn't fit the ceiling.
+    uint32_t n = 0;
+    if (headerTemplate_.whiteLevel != 0) {
+      const uint32_t rowStrideSamples = (uint32_t)rowStride_ / 2;
+      // MUST match exporter.cpp's decode-side bitDepth derivation exactly --
+      // a mismatch would corrupt the first two rows/columns of every frame.
+      const uint32_t bitDepth = 32 - __builtin_clz(headerTemplate_.whiteLevel);
+      n = encodeFrame(reinterpret_cast<const uint16_t*>(data), (uint32_t)width_,
+                       (uint32_t)height_, rowStrideSamples, bitDepth, compressBuf_.data(),
+                       (uint32_t)compressBuf_.size());
+    }
+    if (n > 0) {
+      meta.payloadBytes = n;
+      meta.compressed = 1;
+      ok = writer_->writeFrame(meta, compressBuf_.data(), n);
+    } else {
+      // Encode didn't fit the ceiling (pathological content) or whiteLevel
+      // was 0 -- fall back to storing this one frame as plain Raw16, flagged
+      // uncompressed, exactly like the existing Raw16 branch below.
+      meta.payloadBytes = headerTemplate_.frameSizeBytes;
+      meta.compressed = 0;
+      ok = writer_->writeFrame(meta, data, headerTemplate_.frameSizeBytes);
+    }
   } else {
-    ok = writer_->writeFrame(meta, data);
+    meta.payloadBytes = headerTemplate_.frameSizeBytes;
+    meta.compressed = 0;
+    ok = writer_->writeFrame(meta, data, headerTemplate_.frameSizeBytes);
   }
   if (!ok) {
     // Partial-write failure (e.g. ENOSPC mid-recording): the frame was not
@@ -177,7 +216,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
                        int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                        const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                        const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
-                       const std::string& deviceName) {
+                       const std::string& deviceName, bool compressRecordings) {
   if (reader_ != nullptr) return nullptr;  // already recording
 
   width_ = width;
@@ -221,10 +260,14 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   // rejects a non-divisible pixel count outright -- so a non-conforming width
   // would record a file that looks successful but can never be exported.
   // Raw16 is exact for any width; losing the pack ratio beats losing the clip.
+  // compressRecordings overrides the Packed10/Packed12/Raw16 choice entirely:
+  // the predictor works per-pixel with no group-size requirement, so it
+  // applies regardless of width parity (unlike Packed10/12's w4/w2 gates).
   const bool w4 = width % 4 == 0, w2 = width % 2 == 0;
-  hdr.packMode = (uint32_t)(whiteLevel <= 0x3FF && w4   ? PackMode::Packed10
-                             : whiteLevel <= 0xFFF && w2 ? PackMode::Packed12
-                                                          : PackMode::Raw16);
+  hdr.packMode = (uint32_t)(compressRecordings                ? PackMode::CompressedPredictive
+                             : whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
+                             : whiteLevel <= 0xFFF && w2       ? PackMode::Packed12
+                                                                : PackMode::Raw16);
   hdr.cfa = (uint32_t)cfa;
   hdr.whiteLevel = (uint32_t)whiteLevel;
   for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];

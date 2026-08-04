@@ -12,7 +12,7 @@ object NativeBridge {
         cfa: Int, whiteLevel: Int, blackLevel: IntArray /*4*/,
         colorMatrix1: FloatArray /*9*/, illuminant1: Int, illuminant2: Int,
         colorMatrix2: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,
-        deviceName: String): android.view.Surface?
+        deviceName: String, compressRecordings: Boolean): android.view.Surface?
     external fun nativePushFrameMeta(timestampNs: Long, iso: Int, exposureNs: Long,
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)
     // returns longArrayOf(framesWritten, framesDropped)
