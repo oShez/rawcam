@@ -24,10 +24,14 @@ class BitWriter {
   // exceeded.
   bool writeBits(uint32_t bits, uint32_t nbits) {
     if (nbits == 0) return true;
+    // Check bit-granularly upfront: total bits used (current + new) must fit
+    // in capacity_*8 bits. This prevents silently dropping trailing partial
+    // bytes when bytePos_ reaches capacity mid-remainder.
+    uint64_t bitsUsed = static_cast<uint64_t>(bytePos_) * 8 + accBits_;
+    if (bitsUsed + nbits > static_cast<uint64_t>(capacity_) * 8) return false;
     acc_ = (acc_ << nbits) | static_cast<uint64_t>(bits & maskFor(nbits));
     accBits_ += nbits;
     while (accBits_ >= 8) {
-      if (bytePos_ >= capacity_) return false;
       accBits_ -= 8;
       buf_[bytePos_++] = static_cast<uint8_t>(acc_ >> accBits_);
     }
@@ -35,9 +39,9 @@ class BitWriter {
   }
 
   // `q` one-bits, a zero bit, then `k` bits of `value`'s low bits -- the
-  // standard Golomb-Rice codeword shape, batched into at most 3 writeBits
-  // calls total per pixel (vs. up to q+1+k individual writeBit calls in the
-  // per-bit version).
+  // standard Golomb-Rice codeword shape. In normal frames (well-predicted
+  // residuals), q < 32, so this batches into at most 3 writeBits calls
+  // total per pixel; large quotients (q >= 32) drain in the while loop.
   bool writeRice(uint32_t value, uint32_t k) {
     uint32_t q = value >> k;
     while (q >= 32) {
@@ -75,7 +79,7 @@ class BitWriter {
 };
 
 // Matches BitWriter's accumulator approach on the read side. The Rice
-// remainder (up to 19 bits, see riceParamFor's k<20 cap) is read in one
+// remainder (up to 20 bits, see riceParamFor's k<20 cap) is read in one
 // batched call; the unary quotient is still read one bit at a time since
 // its expected length is ~1 bit (riceParamFor picks k so that's true for
 // any well-behaved frame) -- batching that too would add real complexity

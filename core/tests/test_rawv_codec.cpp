@@ -74,6 +74,20 @@ TEST_CASE("encodeFrame returns 0 (caller falls back) when outCapacity is too sma
   CHECK(n == 0);
 }
 
+TEST_CASE("rejects encoding when outCapacity lands in partial-byte boundary (regression: capacity-boundary bug)") {
+  // Flat 64x64 frame results in k=0, one residual bit per pixel (a zero terminator).
+  // 4096 pixels * 1 bit = 4096 bits = 512 bytes of residuals, plus 1 header byte = 513 bytes total.
+  // Setting outCapacity=512 makes BitWriter's capacity 511 bytes (3968 bits), leaving 128 bits short.
+  // The batched writeBits must reject this upfront (bit-granular check) rather than silently
+  // dropping the trailing bits. Regression test for the capacity-boundary bug fixed in Task 1.
+  auto src = makeFrame(64, 64, 16, [](uint32_t, uint32_t, uint16_t maxVal) {
+    return static_cast<uint16_t>(maxVal / 2);  // All same value -> all residuals 0 -> k=0
+  });
+  std::vector<uint8_t> tight(512);  // 1 byte too small
+  uint32_t n = encodeFrame(src.data(), 64, 64, 64, 16, tight.data(), static_cast<uint32_t>(tight.size()));
+  CHECK(n == 0);  // Must fail, not silently truncate
+}
+
 TEST_CASE("handles rowStrideSamples wider than width (padded rows)") {
   const uint32_t width = 32, height = 32, stride = 40;  // stride > width
   std::vector<uint16_t> src(static_cast<size_t>(stride) * height, 0);
