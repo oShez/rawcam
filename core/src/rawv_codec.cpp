@@ -179,13 +179,21 @@ uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
   // whole frame. Recomputing predictAt() in pass 2 is cheap integer
   // arithmetic -- far cheaper than holding a full-frame residual buffer
   // (width*height*4 bytes) alive just to avoid a second pass.
+  // Sample a strided grid (1/16th of pixels) instead of scanning every one
+  // -- this pass does no bit I/O, so its only cost is the scan itself, and
+  // real sensor noise doesn't vary pixel-to-pixel in a way uniform sampling
+  // would miss. (0,0) is always included (x=0,y=0 satisfies any stride), so
+  // count is always >= 1 for any non-empty frame -- no divide-by-zero risk
+  // even though riceParamFor doesn't divide, just compares.
+  constexpr uint32_t kSampleStride = 4;
   uint64_t sumAbs = 0;
-  uint64_t count = static_cast<uint64_t>(width) * height;
-  for (uint32_t y = 0; y < height; y++) {
-    for (uint32_t x = 0; x < width; x++) {
+  uint64_t count = 0;
+  for (uint32_t y = 0; y < height; y += kSampleStride) {
+    for (uint32_t x = 0; x < width; x += kSampleStride) {
       int32_t actual = raw16[y * rowStrideSamples + x];
       int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth);
       sumAbs += static_cast<uint64_t>(std::abs(actual - predicted));
+      count++;
     }
   }
   uint32_t k = riceParamFor(sumAbs, count);

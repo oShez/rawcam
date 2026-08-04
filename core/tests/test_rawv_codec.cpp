@@ -103,3 +103,14 @@ TEST_CASE("handles rowStrideSamples wider than width (padded rows)") {
     for (uint32_t x = 0; x < width; x++)
       CHECK(out[y * stride + x] == src[y * stride + x]);
 }
+
+TEST_CASE("round-trips dimensions not evenly divisible by the k-sampling stride") {
+  // 63x65 isn't a multiple of the 4x4 sampling stride Task 2 introduces --
+  // this pins that the sampling loop's bounds never go out of range and
+  // still produce a usable k (count is always >= 1 since (0,0) is always
+  // sampled) regardless of width/height parity.
+  auto src = makeFrame(63, 65, 12, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 17 + y * 5) ^ 0x2A) % (maxVal + 1));
+  });
+  CHECK(roundTrips(src, 63, 65, 12));
+}
