@@ -220,6 +220,12 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
                 selected = settings.oisMode,
                 onSelect = { v -> apply { it.copy(oisMode = v) } },
             )
+            ToggleRow(
+                title = "Compress recordings",
+                subtitle = "Lossless compression to shrink .rawv file size",
+                checked = settings.compressRecordings,
+                onChange = { v -> apply { it.copy(compressRecordings = v) } },
+            )
             TextFieldRow(
                 title = "Clip name prefix", value = settings.clipPrefix,
                 onCommit = { v -> apply { it.copy(clipPrefix = v) } },

@@ -898,6 +898,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 val path = File(controller.clipsDir, name).absolutePath
                 val ok = controller.startRecording(
                     path, s.fps, s.iso, exposureNs, s.focusDiopters, s.kelvin, s.tint,
+                    compressRecordings = s.settings.compressRecordings,
                 )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
