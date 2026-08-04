@@ -1,7 +1,10 @@
 #include "rawcam/rawv_codec.h"
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 namespace rawcam {
 namespace {
@@ -169,6 +172,111 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
 }
 
 }  // namespace
+
+ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint32_t threadCount)
+    : width_(width), height_(height) {
+  if (threadCount > 0) {
+    threadCount_ = threadCount;
+  } else {
+    unsigned hw = std::thread::hardware_concurrency();
+    threadCount_ = std::max<unsigned>(1, std::min<unsigned>(hw == 0 ? 4u : hw, 4u));
+  }
+  residuals_.resize(static_cast<size_t>(width_) * height_);
+  workers_.reserve(threadCount_);
+  for (uint32_t i = 0; i < threadCount_; i++) {
+    workers_.emplace_back([this, i] { workerLoop(i); });
+  }
+}
+
+ParallelFrameEncoder::~ParallelFrameEncoder() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    stopping_ = true;
+  }
+  cvStart_.notify_all();
+  for (auto& t : workers_) t.join();
+}
+
+void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
+  uint64_t seenGeneration = 0;
+  for (;;) {
+    std::unique_lock<std::mutex> lock(mu_);
+    cvStart_.wait(lock, [&] { return generation_ != seenGeneration || stopping_; });
+    if (stopping_) return;
+    seenGeneration = generation_;
+    lock.unlock();
+
+    // bandRows*threadCount_ <= height_ by construction (floor division), so
+    // every non-last band's [bandStart,bandEnd) stays within [0,height_];
+    // the last band absorbs any remainder rows up to height_ exactly.
+    uint32_t bandRows = height_ / threadCount_;
+    uint32_t bandStart = bandIndex * bandRows;
+    uint32_t bandEnd = (bandIndex + 1 == threadCount_) ? height_ : bandStart + bandRows;
+    computeBand(bandStart, bandEnd);
+
+    lock.lock();
+    if (--pending_ == 0) cvDone_.notify_one();
+  }
+}
+
+void ParallelFrameEncoder::computeBand(uint32_t bandStart, uint32_t bandEnd) {
+  for (uint32_t y = bandStart; y < bandEnd; y++) {
+    for (uint32_t x = 0; x < width_; x++) {
+      int32_t actual = jobRaw16_[y * jobRowStrideSamples_ + x];
+      int32_t predicted = predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_);
+      residuals_[y * width_ + x] = static_cast<uint32_t>(zigzagEncode(actual - predicted));
+    }
+  }
+}
+
+uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,
+                                       uint32_t bitDepth, uint8_t* out, uint32_t outCapacity) {
+  if (outCapacity < 1 || width_ == 0 || height_ == 0) return 0;
+
+  // Pass 1: same strided-sample k-selection as encodeFrame() -- unchanged,
+  // already cheap after round 2's fix.
+  constexpr uint32_t kSampleStride = 4;
+  uint64_t sumAbs = 0;
+  uint64_t count = 0;
+  for (uint32_t y = 0; y < height_; y += kSampleStride) {
+    for (uint32_t x = 0; x < width_; x += kSampleStride) {
+      int32_t actual = raw16[y * rowStrideSamples + x];
+      int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth);
+      sumAbs += static_cast<uint64_t>(std::abs(actual - predicted));
+      count++;
+    }
+  }
+  uint32_t k = riceParamFor(sumAbs, count);
+
+  // Pass 2, stage 1: dispatch the row-band predict+residual compute to the
+  // persistent worker pool and wait for it to finish.
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    jobRaw16_ = raw16;
+    jobRowStrideSamples_ = rowStrideSamples;
+    jobBitDepth_ = bitDepth;
+    pending_ = threadCount_;
+    generation_++;
+  }
+  cvStart_.notify_all();
+  {
+    std::unique_lock<std::mutex> lock(mu_);
+    cvDone_.wait(lock, [&] { return pending_ == 0; });
+  }
+
+  // Pass 2, stage 2: serial batched write over the precomputed residuals --
+  // no predictor arithmetic left here, just BitWriter::writeRice calls, in
+  // the same raster order encodeFrame() would produce them in.
+  std::memset(out, 0, outCapacity);
+  out[0] = static_cast<uint8_t>(k);
+  BitWriter bw(out + 1, outCapacity - 1);
+  for (uint32_t y = 0; y < height_; y++) {
+    for (uint32_t x = 0; x < width_; x++) {
+      if (!bw.writeRice(residuals_[y * width_ + x], k)) return 0;
+    }
+  }
+  return 1 + bw.finishedBytes();
+}
 
 uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
                       uint32_t rowStrideSamples, uint32_t bitDepth,

@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 #include "rawcam/rawv_codec.h"
+#include <algorithm>
 #include <cstdlib>
 #include <vector>
 
@@ -113,4 +114,34 @@ TEST_CASE("round-trips dimensions not evenly divisible by the k-sampling stride"
     return static_cast<uint16_t>(((x * 17 + y * 5) ^ 0x2A) % (maxVal + 1));
   });
   CHECK(roundTrips(src, 63, 65, 12));
+}
+
+TEST_CASE("ParallelFrameEncoder produces byte-identical output to encodeFrame (round 3 threading)") {
+  // 512x512 with threadCount forced to 4 guarantees a real multi-band split
+  // regardless of this host machine's actual core count -- if the row-band
+  // split or scratch-buffer merge logic has an off-by-one, this frame is
+  // large enough and the split forced enough to surface it (a tiny frame,
+  // or an unforced threadCount on a 1-core CI host, could accidentally pass
+  // with a broken split by collapsing to the single-band case).
+  auto src = makeFrame(512, 512, 14, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 31 + y * 17) ^ 0x5A) % (maxVal + 1));
+  });
+  std::vector<uint8_t> serial(static_cast<size_t>(512) * 512 * 2 + 64);
+  uint32_t serialN = encodeFrame(src.data(), 512, 512, 512, 14, serial.data(),
+                                  static_cast<uint32_t>(serial.size()));
+  REQUIRE(serialN > 0);
+
+  ParallelFrameEncoder parallel(512, 512, /*threadCount=*/4);
+  std::vector<uint8_t> parallelOut(static_cast<size_t>(512) * 512 * 2 + 64);
+  uint32_t parallelN = parallel.encode(src.data(), 512, 14, parallelOut.data(),
+                                        static_cast<uint32_t>(parallelOut.size()));
+  REQUIRE(parallelN == serialN);
+  CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
+
+  // Also confirm the parallel path's own output round-trips correctly
+  // through decodeFrame -- implied by byte-identity above, but checked
+  // directly since it's the actual contract the app relies on.
+  std::vector<uint16_t> decoded(src.size());
+  REQUIRE(decodeFrame(parallelOut.data(), parallelN, decoded.data(), 512, 512, 512, 14));
+  CHECK(decoded == src);
 }
