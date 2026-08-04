@@ -154,14 +154,13 @@ void Capture::processImage(AImage* image) {
     // back to storing this one frame uncompressed, same as an encode that
     // doesn't fit the ceiling.
     uint32_t n = 0;
-    if (headerTemplate_.whiteLevel != 0) {
+    if (headerTemplate_.whiteLevel != 0 && frameEncoder_) {
       const uint32_t rowStrideSamples = (uint32_t)rowStride_ / 2;
       // MUST match exporter.cpp's decode-side bitDepth derivation exactly --
       // a mismatch would corrupt the first two rows/columns of every frame.
       const uint32_t bitDepth = 32 - __builtin_clz(headerTemplate_.whiteLevel);
-      n = encodeFrame(reinterpret_cast<const uint16_t*>(data), (uint32_t)width_,
-                       (uint32_t)height_, rowStrideSamples, bitDepth, compressBuf_.data(),
-                       (uint32_t)compressBuf_.size());
+      n = frameEncoder_->encode(reinterpret_cast<const uint16_t*>(data), rowStrideSamples,
+                                 bitDepth, compressBuf_.data(), (uint32_t)compressBuf_.size());
     }
     if (n > 0) {
       meta.payloadBytes = n;
@@ -225,6 +224,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   writerInitialized_ = false;
   writeFailed_ = false;
   writer_.reset();
+  frameEncoder_.reset();
   path_ = path;
   dropped_.store(0);
   written_.store(0);
@@ -283,6 +283,10 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   std::snprintf(hdr.deviceName, sizeof(hdr.deviceName), "%s", deviceName.c_str());
   headerTemplate_ = hdr;
 
+  if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
+    frameEncoder_ = std::make_unique<ParallelFrameEncoder>((uint32_t)width_, (uint32_t)height_);
+  }
+
   media_status_t status = AImageReader_new(width, height, AIMAGE_FORMAT_RAW16, 12, &reader_);
   if (status != AMEDIA_OK || reader_ == nullptr) {
     reader_ = nullptr;
@@ -338,6 +342,10 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
   stopping_.store(true);
   queueCv_.notify_all();
   if (writerThread_.joinable()) writerThread_.join();
+
+  // Safe to reset only after the writer thread has joined -- it may still
+  // be mid-call to frameEncoder_->encode() while draining the queue.
+  frameEncoder_.reset();
 
   // Delete any image the callback managed to queue after the writer's final
   // drain. This MUST happen before AImageReader_delete: deleting the reader

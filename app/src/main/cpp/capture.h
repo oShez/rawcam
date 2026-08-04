@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rawcam/rawv.h"
+#include "rawcam/rawv_codec.h"
 #include "rawcam/rawv_writer.h"
 
 namespace rawcam {
@@ -102,6 +103,11 @@ class Capture {
   bool writeFailed_ = false;  // set on first write failure; later frames drop, disk untouched
   std::vector<uint8_t> packBuf_;  // preallocated Packed10/Packed12 scratch buffer
   std::vector<uint8_t> compressBuf_;  // preallocated CompressedPredictive scratch buffer
+  // Owns the persistent thread pool used by CompressedPredictive's parallel
+  // encode path (round 3 throughput fix) -- constructed in start() once
+  // packMode is known, destroyed in stop(). Null when compressRecordings is
+  // off for this session.
+  std::unique_ptr<ParallelFrameEncoder> frameEncoder_;
 };
 
 }  // namespace rawcam
