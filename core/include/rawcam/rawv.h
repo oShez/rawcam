@@ -4,7 +4,7 @@
 namespace rawcam {
 
 constexpr uint32_t kMagic = 0x56574152u;  // "RAWV" LE
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 constexpr uint32_t kHeaderSize = 512;
 constexpr uint32_t kFrameMetaSize = 64;
 
@@ -13,8 +13,11 @@ constexpr uint32_t kFrameMetaSize = 64;
 // Pixel 7 Pro, not guaranteed on other hardware). Packed12 covers sensors
 // whose white level needs up to 12 bits; anything beyond that falls back to
 // unpacked Raw16, which is exact regardless of bit depth. capture.cpp picks
-// the mode per-recording from the active lens's white level.
-enum class PackMode : uint32_t { Raw16 = 0, Packed10 = 1, Packed12 = 2 };
+// the mode per-recording from the active lens's white level. CompressedPredictive
+// losslessly compresses RAW16 samples via a MED/LOCO-I predictor + Golomb-Rice
+// coding (see rawv_codec.h); its frames are variable-stride -- see
+// FrameMeta.payloadBytes below.
+enum class PackMode : uint32_t { Raw16 = 0, Packed10 = 1, Packed12 = 2, CompressedPredictive = 3 };
 enum class Cfa : uint32_t { RGGB = 0, GRBG = 1, GBRG = 2, BGGR = 3 };
 
 #pragma pack(push, 1)
@@ -61,7 +64,17 @@ struct FrameMeta {
   float    focusDistance;    // diopters
   float    wbNeutral[3];     // AsShotNeutral estimate from AWB
   uint32_t droppedSoFar;
-  uint8_t  reserved[12];
+  // Actual on-disk bytes of this frame's payload. For Raw16/Packed10/Packed12
+  // this always equals FileHeader.frameSizeBytes (fixed stride, unchanged
+  // behavior). For CompressedPredictive, FileHeader.frameSizeBytes is only an
+  // allocation ceiling -- this field is the real per-frame stride, and the
+  // reader MUST use it (not frameSizeBytes) to find the next record.
+  uint32_t payloadBytes;
+  // 0 = payload is stored uncompressed (the compressor's fallback path for a
+  // frame that wouldn't shrink); 1 = payload is CompressedPredictive-encoded.
+  // Always 0 for Raw16/Packed10/Packed12 frames.
+  uint32_t compressed;
+  uint8_t  reserved[4];
 };
 #pragma pack(pop)
 
@@ -69,6 +82,10 @@ static_assert(sizeof(FileHeader) == kHeaderSize, "header must be 512 bytes");
 static_assert(sizeof(FrameMeta) == kFrameMetaSize, "frame meta must be 64 bytes");
 
 // On-disk layout: [FileHeader][FrameMeta+payload][FrameMeta+payload]...
-// record size = kFrameMetaSize + header.frameSizeBytes, constant per file.
+// For Raw16/Packed10/Packed12, record size = kFrameMetaSize +
+// header.frameSizeBytes, constant per file. For CompressedPredictive,
+// each record's payload is FrameMeta.payloadBytes (<= header.frameSizeBytes,
+// the allocation ceiling) -- readers must use payloadBytes, not
+// frameSizeBytes, to find the next record.
 
 }  // namespace rawcam
