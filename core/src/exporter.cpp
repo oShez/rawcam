@@ -10,6 +10,7 @@
 
 #include "rawcam/dng_writer.h"
 #include "rawcam/pack10.h"
+#include "rawcam/rawv_codec.h"
 #include "rawcam/rawv_reader.h"
 
 namespace rawcam {
@@ -28,6 +29,17 @@ bool exportFrame(RawvReader& reader, uint64_t index, PackMode mode, bool packed,
     raw16 = reinterpret_cast<const uint8_t*>(unpacked.data());
   } else if (mode == PackMode::Packed12) {
     unpack12(payload.data(), pixelCount, unpacked.data());
+    raw16 = reinterpret_cast<const uint8_t*>(unpacked.data());
+  } else if (mode == PackMode::CompressedPredictive && meta.compressed) {
+    // meta.compressed == 0 (stored-fallback) falls through to the plain-bytes
+    // else branch below, same as Raw16 -- it's already uncompressed RAW16.
+    if (dngHdr.whiteLevel == 0) return false;  // can't derive a bit depth
+    const uint32_t rowStrideSamples = dngHdr.rowStrideBytes / 2;
+    const uint32_t bitDepth = 32 - __builtin_clz(dngHdr.whiteLevel);
+    if (!decodeFrame(payload.data(), meta.payloadBytes, unpacked.data(), dngHdr.width,
+                      dngHdr.height, rowStrideSamples, bitDepth)) {
+      return false;  // corrupt/truncated compressed frame
+    }
     raw16 = reinterpret_cast<const uint8_t*>(unpacked.data());
   } else {
     raw16 = payload.data();
@@ -93,7 +105,16 @@ bool exportClip(const std::string& rawvPath, const std::string& outDir,
     auto reader = RawvReader::open(rawvPath);
     std::vector<uint8_t> payload(srcHdr.frameSizeBytes);
     std::vector<uint16_t> unpacked;
-    if (packed) unpacked.resize(pixelCount);
+    if (packed) {
+      unpacked.resize(pixelCount);
+    } else if (mode == PackMode::CompressedPredictive) {
+      // Decode target must match the ORIGINAL (possibly stride-padded) frame
+      // layout the encoder used -- not pixelCount -- since decodeFrame's
+      // predictor addresses samples via rowStrideSamples, same as the
+      // dngHdr.rowStrideBytes this mode deliberately leaves untouched below
+      // (unlike Packed10/12, which synthesize a contiguous width*2 stride).
+      unpacked.resize(srcHdr.frameSizeBytes / 2);
+    }
 
     bool localFailed = !reader;
     if (reader) {

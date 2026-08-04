@@ -3,9 +3,11 @@
 #include "rawcam/exporter.h"
 #include "rawcam/rawv_writer.h"
 #include "rawcam/pack10.h"
+#include "rawcam/rawv_codec.h"
 #include "rawcam/file_io.h"
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <utility>
 #include <vector>
 #ifdef _WIN32
@@ -86,6 +88,139 @@ static void writePacked12Clip(const char* path, int frames) {
     CHECK(w->writeFrame(m, packed.data(), packedSize));
   }
   CHECK(w->finalize());
+}
+
+// Minimal TIFF/IFD tag reader, mirroring test_dng_writer.cpp's parseIfd --
+// this project's DNG writer output can't be opened by Pillow, so exported
+// pixel content is verified by hand-parsing the IFD instead.
+struct TagVal { uint16_t type; uint32_t count; uint32_t valueOrOffset; };
+
+static std::map<uint16_t, TagVal> parseIfd(const std::vector<uint8_t>& b) {
+  REQUIRE(b.size() > 8);
+  REQUIRE(b[0] == 'I'); REQUIRE(b[1] == 'I');  // little-endian TIFF
+  uint32_t ifdOff; std::memcpy(&ifdOff, &b[4], 4);
+  uint16_t n; std::memcpy(&n, &b[ifdOff], 2);
+  std::map<uint16_t, TagVal> tags;
+  for (uint16_t i = 0; i < n; i++) {
+    const uint8_t* e = &b[ifdOff + 2 + i * 12];
+    uint16_t tag, type; uint32_t count, val;
+    std::memcpy(&tag, e, 2); std::memcpy(&type, e + 2, 2);
+    std::memcpy(&count, e + 4, 4); std::memcpy(&val, e + 8, 4);
+    tags[tag] = {type, count, val};
+  }
+  return tags;
+}
+
+// Mirrors capture.cpp's CompressedPredictive geometry contract: rowStrideBytes
+// is the real (here, unpadded) sensor stride, and frameSizeBytes is only an
+// allocation ceiling -- the real per-frame size lives in FrameMeta.payloadBytes.
+static FileHeader compressedHeader(uint32_t width, uint32_t height, uint32_t frameSizeCeiling) {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = width; h.height = height; h.rowStrideBytes = width * 2;
+  h.packMode = (uint32_t)PackMode::CompressedPredictive;
+  h.cfa = (uint32_t)Cfa::RGGB;
+  h.whiteLevel = 1023;
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 64;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.fpsNum = 24; h.fpsDen = 1;
+  h.frameSizeBytes = frameSizeCeiling;
+  std::strcpy(h.deviceName, "hosttest");
+  return h;
+}
+
+TEST_CASE("exportClip decodes a CompressedPredictive frame to match the original source") {
+  const char* clipPath = "export_compressed.rawv";
+  const char* outDir = "export_compressed_out";
+  const uint32_t width = 8, height = 4;
+  const uint32_t rowStrideSamples = width;  // no padding, for a simple index check below
+  const uint32_t ceiling = width * 2 * height;
+
+  std::vector<uint16_t> src(width * height);
+  for (uint32_t y = 0; y < height; y++)
+    for (uint32_t x = 0; x < width; x++)
+      src[y * width + x] = (uint16_t)(((x + y) * 37) % 1024);
+
+  std::vector<uint8_t> compressed(ceiling + 64);
+  uint32_t n = encodeFrame(src.data(), width, height, rowStrideSamples, /*bitDepth=*/10,
+                            compressed.data(), (uint32_t)compressed.size());
+  REQUIRE(n > 0);
+
+  auto w = RawvWriter::create(clipPath, compressedHeader(width, height, ceiling));
+  REQUIRE(w != nullptr);
+  FrameMeta m{};
+  m.frameIndex = 0; m.payloadBytes = n; m.compressed = 1;
+  m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  CHECK(w->writeFrame(m, compressed.data(), n));
+  CHECK(w->finalize());
+
+  makeDir(outDir);
+  bool ok = exportClip(clipPath, outDir, [](uint64_t, uint64_t) { return true; });
+  CHECK(ok);
+
+  char name[64];
+  std::snprintf(name, sizeof name, "%s/%06d.dng", outDir, 0);
+  int fd = io::openRead(name);
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+
+  auto tags = parseIfd(b);
+  uint32_t off = tags.at(273).valueOrOffset;
+  for (uint32_t y = 0; y < height; y++) {
+    for (uint32_t x = 0; x < width; x++) {
+      uint16_t px;
+      std::memcpy(&px, &b[off + (y * width + x) * 2], 2);
+      CHECK(px == src[y * width + x]);
+    }
+  }
+
+  std::remove(name);
+  std::remove(clipPath);
+  removeDir(outDir);
+}
+
+TEST_CASE("exportClip passes a stored-fallback CompressedPredictive frame through unchanged") {
+  const char* clipPath = "export_stored_fallback.rawv";
+  const char* outDir = "export_stored_fallback_out";
+  const uint32_t width = 4, height = 2;
+  const uint32_t ceiling = width * 2 * height;
+
+  std::vector<uint16_t> src(width * height);
+  for (uint32_t i = 0; i < width * height; i++) src[i] = (uint16_t)(i * 11 + 3);
+
+  auto w = RawvWriter::create(clipPath, compressedHeader(width, height, ceiling));
+  REQUIRE(w != nullptr);
+  FrameMeta m{};
+  m.frameIndex = 0; m.payloadBytes = ceiling; m.compressed = 0;  // encode fell back to stored
+  m.wbNeutral[0] = 0.5f; m.wbNeutral[1] = 1.0f; m.wbNeutral[2] = 0.7f;
+  CHECK(w->writeFrame(m, reinterpret_cast<const uint8_t*>(src.data()), ceiling));
+  CHECK(w->finalize());
+
+  makeDir(outDir);
+  bool ok = exportClip(clipPath, outDir, [](uint64_t, uint64_t) { return true; });
+  CHECK(ok);
+
+  char name[64];
+  std::snprintf(name, sizeof name, "%s/%06d.dng", outDir, 0);
+  int fd = io::openRead(name);
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+
+  auto tags = parseIfd(b);
+  uint32_t off = tags.at(273).valueOrOffset;
+  for (uint32_t i = 0; i < width * height; i++) {
+    uint16_t px;
+    std::memcpy(&px, &b[off + i * 2], 2);
+    CHECK(px == src[i]);
+  }
+
+  std::remove(name);
+  std::remove(clipPath);
+  removeDir(outDir);
 }
 
 TEST_CASE("exportClip writes one DNG per frame (Packed12 unpack path)") {
