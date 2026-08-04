@@ -48,6 +48,18 @@ TEST_CASE("round-trips pseudo-random noise at 10-bit depth (exercises worst-case
   CHECK(roundTrips(src, 64, 64, 10));
 }
 
+TEST_CASE("round-trips a frame with one extreme residual spike (forces multi-chunk Rice quotients)") {
+  // Flat content picks a small Rice k (near 0), then one pixel jumps to
+  // maxVal -- its residual is large enough that q = residual >> k exceeds
+  // 32, exercising the batched BitWriter/BitReader's chunk-draining loop
+  // (Task 1 drains 32 bits at a time for large quotients), a boundary the
+  // original per-bit implementation has no equivalent of.
+  auto src = makeFrame(64, 64, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return (x == 40 && y == 40) ? maxVal : static_cast<uint16_t>(maxVal / 2);
+  });
+  CHECK(roundTrips(src, 64, 64, 16));
+}
+
 TEST_CASE("round-trips a single-row and single-column frame (edge-only prediction)") {
   auto row = makeFrame(64, 1, 16, [](uint32_t x, uint32_t, uint16_t) { return static_cast<uint16_t>(x * 37 % 65536); });
   CHECK(roundTrips(row, 64, 1, 16));

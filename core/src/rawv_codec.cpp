@@ -6,73 +6,122 @@
 namespace rawcam {
 namespace {
 
-// MSB-first bit writer over a caller-owned, pre-zeroed buffer. write*()
-// returns false (and stops writing) once `capacity` would be exceeded --
-// encodeFrame uses that as its "won't fit" signal.
+// MSB-first bit writer over a caller-owned, pre-zeroed buffer, using a
+// 64-bit accumulator so multi-bit fields (the Rice remainder, and runs of
+// quotient one-bits) are packed with one shift+OR instead of one function
+// call per bit. The per-bit version was the throughput bottleneck at real
+// camera resolution (~91% dropped frames at 4096x3072@24fps on-device,
+// 2026-08-05) -- see docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md.
+// Produces the byte-for-byte IDENTICAL bitstream the per-bit version did;
+// this is a performance refactor, not a new format.
 class BitWriter {
  public:
   BitWriter(uint8_t* buf, uint32_t capacity) : buf_(buf), capacity_(capacity) {}
 
-  bool writeBit(uint32_t bit) {
-    if (bytePos_ >= capacity_) return false;
-    buf_[bytePos_] |= static_cast<uint8_t>((bit & 1u) << (7 - bitPos_));
-    if (++bitPos_ == 8) { bitPos_ = 0; bytePos_++; }
-    return true;
-  }
-
-  // `q` one-bits, a zero bit, then `k` bits of `value`'s low bits MSB-first --
-  // the standard Golomb-Rice codeword shape.
-  bool writeRice(uint32_t value, uint32_t k) {
-    uint32_t q = value >> k;
-    for (uint32_t i = 0; i < q; i++) if (!writeBit(1)) return false;
-    if (!writeBit(0)) return false;
-    for (uint32_t i = 0; i < k; i++) {
-      if (!writeBit((value >> (k - 1 - i)) & 1u)) return false;
+  // Writes the low `nbits` bits of `bits` (nbits in [0,32]), most
+  // significant of those bits first, immediately after any bits already
+  // written. Returns false (and stops writing) once `capacity` would be
+  // exceeded.
+  bool writeBits(uint32_t bits, uint32_t nbits) {
+    if (nbits == 0) return true;
+    acc_ = (acc_ << nbits) | static_cast<uint64_t>(bits & maskFor(nbits));
+    accBits_ += nbits;
+    while (accBits_ >= 8) {
+      if (bytePos_ >= capacity_) return false;
+      accBits_ -= 8;
+      buf_[bytePos_++] = static_cast<uint8_t>(acc_ >> accBits_);
     }
     return true;
   }
 
-  uint32_t finishedBytes() const { return bitPos_ == 0 ? bytePos_ : bytePos_ + 1; }
+  // `q` one-bits, a zero bit, then `k` bits of `value`'s low bits -- the
+  // standard Golomb-Rice codeword shape, batched into at most 3 writeBits
+  // calls total per pixel (vs. up to q+1+k individual writeBit calls in the
+  // per-bit version).
+  bool writeRice(uint32_t value, uint32_t k) {
+    uint32_t q = value >> k;
+    while (q >= 32) {
+      if (!writeBits(0xFFFFFFFFu, 32)) return false;
+      q -= 32;
+    }
+    // q one-bits followed by a terminating zero bit, as one (q+1)-bit field.
+    uint32_t qval = (q == 0) ? 0u : (((1u << q) - 1u) << 1);
+    if (!writeBits(qval, q + 1)) return false;
+    if (k > 0 && !writeBits(value, k)) return false;
+    return true;
+  }
+
+  // Flushes any partial byte (zero-padded, matching the pre-zeroed-buffer
+  // padding semantics the per-bit version relied on) and returns the total
+  // bytes written. Not const: the flush is a real write, deferred from
+  // writeBits() until now since fewer than 8 bits may still be pending.
+  uint32_t finishedBytes() {
+    if (accBits_ > 0 && bytePos_ < capacity_) {
+      buf_[bytePos_++] = static_cast<uint8_t>(acc_ << (8 - accBits_));
+      accBits_ = 0;
+    }
+    return bytePos_;
+  }
 
  private:
+  static uint32_t maskFor(uint32_t nbits) {
+    return nbits >= 32 ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+  }
   uint8_t* buf_;
   uint32_t capacity_;
   uint32_t bytePos_ = 0;
-  uint32_t bitPos_ = 0;
+  uint64_t acc_ = 0;
+  uint32_t accBits_ = 0;
 };
 
+// Matches BitWriter's accumulator approach on the read side. The Rice
+// remainder (up to 19 bits, see riceParamFor's k<20 cap) is read in one
+// batched call; the unary quotient is still read one bit at a time since
+// its expected length is ~1 bit (riceParamFor picks k so that's true for
+// any well-behaved frame) -- batching that too would add real complexity
+// for a part that's already cheap on average. Decode speed was not the
+// throughput blocker Task 8 found (capture/encode was); this still speeds
+// up export of compressed clips via the now-batched remainder reads.
 class BitReader {
  public:
   BitReader(const uint8_t* buf, uint32_t size) : buf_(buf), size_(size) {}
 
-  bool readBit(uint32_t* bit) {
-    if (bytePos_ >= size_) return false;
-    *bit = (buf_[bytePos_] >> (7 - bitPos_)) & 1u;
-    if (++bitPos_ == 8) { bitPos_ = 0; bytePos_++; }
+  // Reads `nbits` bits (nbits in [0,32]) MSB-first into the low bits of
+  // *out. Returns false if not enough bits remain in the buffer.
+  bool readBits(uint32_t nbits, uint32_t* out) {
+    if (nbits == 0) { *out = 0; return true; }
+    while (accBits_ < nbits) {
+      if (bytePos_ >= size_) return false;
+      acc_ = (acc_ << 8) | buf_[bytePos_++];
+      accBits_ += 8;
+    }
+    accBits_ -= nbits;
+    *out = static_cast<uint32_t>((acc_ >> accBits_) & maskFor(nbits));
     return true;
   }
 
   bool readRice(uint32_t k, uint32_t* value) {
     uint32_t q = 0, bit = 0;
     while (true) {
-      if (!readBit(&bit)) return false;
+      if (!readBits(1, &bit)) return false;
       if (bit == 0) break;
       if (++q > (1u << 24)) return false;  // corrupt-stream guard
     }
     uint32_t remainder = 0;
-    for (uint32_t i = 0; i < k; i++) {
-      if (!readBit(&bit)) return false;
-      remainder = (remainder << 1) | bit;
-    }
+    if (k > 0 && !readBits(k, &remainder)) return false;
     *value = (q << k) + remainder;
     return true;
   }
 
  private:
+  static uint32_t maskFor(uint32_t nbits) {
+    return nbits >= 32 ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+  }
   const uint8_t* buf_;
   uint32_t size_;
+  uint64_t acc_ = 0;
+  uint32_t accBits_ = 0;
   uint32_t bytePos_ = 0;
-  uint32_t bitPos_ = 0;
 };
 
 inline uint32_t zigzagEncode(int32_t v) {
