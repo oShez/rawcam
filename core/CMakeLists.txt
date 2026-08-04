@@ -7,6 +7,7 @@ add_library(rawcam_core STATIC
   src/rawv_writer.cpp
   src/rawv_reader.cpp
   src/pack10.cpp
+  src/rawv_codec.cpp
   src/dng_writer.cpp
   src/exporter.cpp)
 target_include_directories(rawcam_core PUBLIC include)
