@@ -334,6 +334,80 @@ above may have changed the balance. Stage 2's design should be informed by
 real round-4 numbers, not round 3's phase breakdown extrapolated through
 estimates as done here.
 
+## Round 4 stage 1 re-profiling — 2026-08-05, post-merge-optimization
+
+Per the previous section's recommendation and the user's explicit "re-profile
+first" choice before scoping stage 2: added temporary `std::chrono`-based
+timing instrumentation around `ParallelFrameEncoder::encode()`'s current
+phases (k-selection scan, dispatch+wait -- now doing fused predict+residual+
+Rice-pack per band, `mergeBitstreams()`) and around `capture.cpp`'s disk
+write, logged via `__android_log_print`. Built, installed, recorded a ~40s
+diagnostic clip (same device, same 4096x3072@24fps, compression confirmed ON
+via the in-app toast reporting "1091 frames, 719 dropped" -- consistent with
+compression being active, not a toggle mixup), pulled logcat, computed
+averages, then reverted the instrumentation (not committed -- throwaway
+evidence-gathering code only, same convention as the original profiling run).
+**1091 frame samples captured, all consistent:**
+
+| Phase | Avg | % of (encode()+diskWrite) |
+|---|---|---|
+| k-selection scan | 2.79ms | 4.0% |
+| dispatch+wait (fused predict+residual+pack per band) | 48.44ms | 69.7% |
+| merge (`mergeBitstreams()`, post-optimization) | 12.04ms | 17.3% |
+| **`encode()` total** | **63.27ms** | 91.0% |
+| disk write (`RawvWriter::writeFrame`, separate from `encode()`) | 6.26ms | 9.0% |
+| **encode() + disk write (serial, single writer thread)** | **69.53ms** | 100% |
+
+Real-time budget: ~41.6ms/frame at 24fps. 69.53ms actual / 41.6ms budget ≈
+1.67x over -- predicted landing rate 1/1.67 ≈ 59.8%, closely matching this
+diagnostic clip's own observed landing rate (1091 written / (1091+719)
+arrived ≈ 60.3%), confirming the same budget-vs-actual relationship
+established in the original profiling run.
+
+**This diagnostic clip's ~60% landing is notably better than the formal
+round 4 stage 1 checkpoint's ~41.8%** (same device/resolution/fps, compression
+confirmed ON both times). The most likely explanation: this run was a short
+~40s diagnostic clip vs. the checkpoint's ~2:06 sustained recording, and a
+within-run first-half/second-half comparison of this diagnostic's own samples
+shows mild upward drift (first half avg total 59.7ms, second half 66.8ms) --
+consistent with thermal throttling that would compound further over a longer
+sustained recording. Scene content (this diagnostic pointed at a static
+blurry indoor scene, not necessarily representative of the checkpoint's
+content) may also contribute via k-selection picking a different Rice
+parameter. Treat this run's numbers as the current *phase proportions*
+(reliable) more than an exact absolute landing-rate prediction (optimistic
+vs. a longer sustained recording).
+
+**What this confirms about stage 2's design:**
+- The merge optimization (memcpy+word-at-a-time, commit `bc577bf`) worked:
+  12.04ms is far below the ~192ms per-frame cost the *entire* write pass used
+  to take pre-round-4, and also below the rough ~65ms "pack+merge" estimate
+  the stage 1 checkpoint inferred from landing-rate arithmetic alone.
+- **Dispatch+wait (48.44ms, fused predict+residual+pack per band) is now
+  overwhelmingly the dominant cost (69.7%)** -- not k-selection, not disk
+  write, not merge. This differs from the "34.4ms fixed-overhead trio" framing
+  used at the end of round 3 and carried into the stage 1 checkpoint's
+  estimate: that framing no longer applies as-is, since round 4 moved the
+  actual Rice-packing work *into* the per-band dispatch step (it used to be a
+  separate serial pass). k-selection (2.79ms) and disk write (6.26ms) really
+  are now small, leaving dispatch+merge (60.48ms, 87% of the total) as
+  virtually the whole remaining cost.
+- This reframes what stage 2 (the Compute/Finish pipeline) can realistically
+  buy: overlapping disk write (6.26ms) and next-frame dispatch with the
+  current frame's finish work only hides ~6-18ms per frame (disk write alone,
+  or disk write + merge if merge moves to the Finish thread) behind the next
+  frame's Compute -- valuable, but dispatch+wait's 48.44ms is Compute-stage
+  work that pipelining across frames does NOT shrink by itself, since the
+  worker pool is the same shared resource being pipelined into, not new
+  capacity. Stage 2 alone, as designed, would not be expected to close the
+  gap to 0-dropped; it would need to be paired with either speeding up
+  dispatch+wait itself (the ~192ms-style bottleneck from round 3 has moved,
+  not disappeared -- it now lives inside the per-band worker loop) or
+  reserving a core for the Finish thread (e.g. dropping the dispatch pool
+  from 4 workers to 3 on a 4-core device) so Finish's own CPU time doesn't
+  contend with the same cores dispatch+wait needs, trading some per-band
+  parallelism for pipeline overlap instead of getting both for free.
+
 ## Conclusion
 
 **Still not ready to ship**, after four rounds of work. The codec is
