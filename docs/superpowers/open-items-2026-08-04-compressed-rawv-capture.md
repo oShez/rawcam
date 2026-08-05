@@ -442,6 +442,19 @@ landing is a **~20 percentage point jump from pipelining alone**, matching
 this round's own predicted ~78-81% (derived from removing merge+disk-write,
 ~18.3ms, from the per-frame serial critical path) almost exactly.
 
+**Caveat on the "same duration" framing (raised by the final whole-plan
+review):** the two clips' total arrivals don't actually match as closely as
+"same ~40s" implies — the stage-1 diagnostic saw 1810 total arrivals, this
+stage-2 checkpoint saw 1655, an ~8.6% difference despite both being ~40s
+recordings. This doesn't undermine the landing-rate conclusion itself
+(landing rate is a ratio, so duration differences mostly cancel out, and
+both this checkpoint's 80.6% and the prior diagnostic's 60.3% independently
+match the separately-measured phase-timing model to within ~1 percentage
+point — strong evidence the improvement is real and attributable to the
+pipeline, not an artifact of clip length). But the comparison's precision
+was overstated; treat "~20pp improvement" as directionally solid, not as
+precise to the decimal.
+
 **Comparison against the longer, formal round 4 stage 1 checkpoint** (1437
 written / 2003 dropped over ~2:06, 41.8% landing): also a large improvement,
 though this checkpoint's shorter ~40s duration means it may not fully
@@ -462,6 +475,22 @@ NEON — both aimed at dispatch+wait itself, the actual remaining bottleneck.
 `compressedFallbacks()` was not checked this session (not wired into the
 UI/logcat by default; would need temporary instrumentation to read, and the
 checkpoint's own numbers already give a clear enough signal without it).
+
+**Final whole-plan review** (most capable available model, full plan diff)
+found one genuine Critical bug beyond what either task's individual review
+caught: `finishLoop()`'s write-failure path discarded a queued frame without
+releasing its `ParallelFrameEncoder` compute slot, which — since only 2
+slots exist — would eventually deadlock the writer thread and hang
+`Capture::stop()` forever after any disk write failure (e.g. `ENOSPC`
+mid-recording). A second occurrence of the same root cause existed in a
+currently-unreachable teardown path. Both fixed in one fix wave (commit
+`6129a30`), independently re-verified ADDRESSED with no new breakage. Three
+further Minor findings (per-frame ~25MB allocation churn from the raw-copy
+fix, `frameEncoder_`'s pre-existing construction-before-fallible-calls
+ordering, and the arrival-count caveat above) were deliberately parked, not
+fixed — recorded with rulings in this plan's ledger
+(`.superpowers/sdd/2026-08-05-rawv-codec-round4-compute-finish-pipeline/progress.md`),
+none load-bearing for this plan's correctness.
 
 ## Conclusion
 
