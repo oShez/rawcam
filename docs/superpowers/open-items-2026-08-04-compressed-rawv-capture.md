@@ -197,6 +197,54 @@ remaining gap on its own, since NEON only speeds up the same predict step
 threading was supposed to parallelize — if that step wasn't the
 bottleneck, NEON may show the same flat result threading just did.
 
+## Root cause found — 2026-08-05, direct on-device profiling
+
+Per `superpowers:systematic-debugging`: added temporary `std::chrono`-based
+timing instrumentation around `ParallelFrameEncoder::encode()`'s three
+phases (k-selection scan, parallel dispatch+wait, serial `writeRice`
+write) and around `capture.cpp`'s encode-vs-disk-write split and queue
+backlog, logged via `__android_log_print`. Built, installed, recorded a
+short diagnostic clip (same device/resolution/fps), pulled logcat, then
+reverted the instrumentation (not committed — throwaway evidence-gathering
+code only). **615 frame samples captured, all consistent:**
+
+| Phase | Avg | % of encode() total |
+|---|---|---|
+| k-selection scan | 3.83ms | 1.8% |
+| dispatch+wait (the threaded predict+residual step) | 21.15ms | 9.7% |
+| **serial `writeRice` write** | **192.44ms** | **88.5%** |
+| **`encode()` total** | **217.43ms** | — |
+| disk write (`RawvWriter::writeFrame`) | 9.38ms | (separate from encode()) |
+
+Queue backlog was saturated (7/8 slots full) in 606 of 615 samples —
+consistent with `encode()` averaging ~217ms against a ~41.6ms arrival
+budget (~5.2x over budget), which lines up almost exactly with the
+observed ~19-22% frame-landing rate (1/5.2 ≈ 19%).
+
+**Root cause: the serial Golomb-Rice bit-packing loop (`BitWriter::writeRice`,
+called 12.6M times per frame) is the actual bottleneck — not the
+predict+residual step round 3 parallelized.** That step (`dispatch_wait`)
+averages only 21ms, a small fraction of the total; threading it correctly
+sped it up, but it was never the dominant cost, which is why round 3's
+on-device result was flat versus round 2. Round 2's own assumption that
+the batched write pass was "already cheap" (stated when scoping that
+round) was never verified at real camera resolution — only at host tests'
+64×64 synthetic frames — and turns out to be wrong: at 12.6M calls/frame,
+even the batched per-call overhead (branchy `while (q >= 32)` loop,
+multiple `writeBits` calls, non-trivial per-pixel work) adds up to ~192ms.
+
+**This reframes Task 4 (NEON).** NEON vectorizes the predict+residual step
+— the ~21ms slice, not the ~192ms one. Proceeding to Task 4 as originally
+scoped would very likely reproduce round 3's flat result a second time.
+Any further optimization work needs to target the write pass itself, not
+the predict step: either speeding up `writeRice`/`writeBits` per-call
+overhead in place (format-preserving, no bitstream change), or accepting a
+bitstream format change to parallelize the write across bands too (each
+band writing its own byte-aligned sub-bitstream with a small per-band
+offset table — the design consciously avoided this in round 3 to keep
+`kVersion` unchanged, but the profiling data now shows the write pass is
+where parallelism would actually pay off, not the predict step).
+
 ## Conclusion
 
 **Still not ready to ship**, after three rounds of work. The codec is
@@ -206,16 +254,14 @@ plumbing chain builds clean. The design spec's explicit acceptance bar — no
 dropped frames at 4096×3072@24fps — has now been tested three times and
 failed three times: ~91% loss originally, ~75-79% loss after round 2
 (batched bit writer + strided k-sampling), ~78.0% loss after round 3's
-threading alone (statistically flat vs. round 2, not the expected further
-improvement).
+threading alone (statistically flat vs. round 2 — now explained: threading
+targeted the wrong phase).
 
-**Open decision for the user, sharper than before:** round 3's own premise
-(the predict+residual step is the bottleneck, so parallelizing it helps)
-didn't hold up against the on-device measurement. Continuing to Task 4
-(NEON, which vectorizes that same step) without first understanding *why*
-threading didn't help risks repeating this exact outcome for a second time
-at higher implementation cost. Worth deciding explicitly: profile first to
-find the real bottleneck before writing more optimization code, proceed to
-NEON anyway on the chance it behaves differently from threading, or step
-back to the ship-OFF-by-default/pull-the-feature options from the original
-open decision.
+**Open decision for the user, now with a confirmed root cause instead of a
+guess:** the serial `writeRice` write pass, not the predict+residual step,
+is what needs to speed up or parallelize next. A round 4 plan would need
+to be scoped around that finding specifically (not NEON-on-predict as
+originally planned) — worth deciding explicitly whether that's worth
+pursuing given three rounds have now landed short of the bar, or whether
+to step back to the ship-OFF-by-default/pull-the-feature options from the
+original open decision.
