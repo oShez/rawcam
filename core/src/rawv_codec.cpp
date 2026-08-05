@@ -81,6 +81,27 @@ class BitWriter {
     return static_cast<uint64_t>(bytePos_) * 8 + accBits_;
   }
 
+  // True if the next write starts at a byte boundary (no partial byte
+  // pending in the accumulator). Lets appendBits() below pick a bulk
+  // memcpy fast path instead of a shift-and-OR merge -- always true for the
+  // very first band merged into a fresh BitWriter, and true again for any
+  // later band whenever the running total lands on a byte multiple.
+  bool isByteAligned() const { return accBits_ == 0; }
+
+  // Bulk-copies `nBytes` already byte-aligned, MSB-first-packed bytes
+  // straight into the output buffer. Only valid to call when
+  // isByteAligned() is true (accBits_ == 0, i.e. no partial byte pending) --
+  // appendBits() guarantees this. Returns false (state unchanged) if
+  // `nBytes` would not fit in the remaining capacity, same bit-granular
+  // contract as writeBits().
+  bool appendAlignedBytes(const uint8_t* src, uint64_t nBytes) {
+    uint64_t bitsUsed = static_cast<uint64_t>(bytePos_) * 8;
+    if (bitsUsed + nBytes * 8 > static_cast<uint64_t>(capacity_) * 8) return false;
+    std::memcpy(buf_ + bytePos_, src, nBytes);
+    bytePos_ += static_cast<uint32_t>(nBytes);
+    return true;
+  }
+
  private:
   static uint32_t maskFor(uint32_t nbits) {
     return nbits >= 32 ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
@@ -93,14 +114,50 @@ class BitWriter {
 };
 
 // Appends `bitCount` real bits from a byte-aligned, MSB-first packed local
-// buffer onto `bw` -- byte-at-a-time (not bit-at-a-time) since this may need
-// to move a whole band's worth of already-packed bits. `src` must have at
-// least ceil(bitCount/8) valid bytes (guaranteed by BitWriter::finishedBytes()
-// having flushed the source before this is called).
+// buffer onto `bw` -- in bulk, not bit-at-a-time or byte-at-a-time, since
+// this may need to move a whole band's worth of already-packed bits (up to
+// ~12-15M individual bits at 4K resolution -- byte-at-a-time here was a
+// measured serial-critical-path cost, see this file's history). `src` must
+// have at least ceil(bitCount/8) valid bytes (guaranteed by
+// BitWriter::finishedBytes() having flushed the source before this is
+// called). Produces byte-for-byte identical output to the old
+// byte-at-a-time version: a 32-bit shift+OR into the accumulator is exactly
+// equivalent to four sequential 8-bit ones in the same MSB-first order,
+// since writeBits()'s accumulator update (acc_ = (acc_<<n)|bits) is
+// associative under bit concatenation.
 inline bool appendBits(BitWriter& bw, const uint8_t* src, uint64_t bitCount) {
+  if (bitCount == 0) return true;
   uint64_t fullBytes = bitCount / 8;
   uint32_t trailingBits = static_cast<uint32_t>(bitCount % 8);
-  for (uint64_t i = 0; i < fullBytes; i++) {
+
+  if (bw.isByteAligned()) {
+    // Fast path: the destination write position is byte-aligned -- always
+    // true for the first band merged, and possibly true for later bands
+    // too whenever the running total so far happens to land on a byte
+    // multiple. Move the full bytes with one memcpy instead of one
+    // writeBits() call per byte.
+    if (fullBytes > 0 && !bw.appendAlignedBytes(src, fullBytes)) return false;
+    if (trailingBits > 0) {
+      uint32_t lastBits = src[fullBytes] >> (8 - trailingBits);
+      if (!bw.writeBits(lastBits, trailingBits)) return false;
+    }
+    return true;
+  }
+
+  // Slower path: destination position is mid-byte (the common case for
+  // every band after the first). Move the source 32 bits (4 bytes) at a
+  // time -- each becomes one shift+OR into bw's accumulator via a single
+  // writeBits() call, instead of four. Only the leading/trailing partial
+  // word falls back to a per-byte or per-bit call.
+  uint64_t fullWords = fullBytes / 4;
+  uint64_t wordBytes = fullWords * 4;
+  for (uint64_t w = 0; w < fullWords; w++) {
+    const uint8_t* p = src + w * 4;
+    uint32_t word = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+                     (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+    if (!bw.writeBits(word, 32)) return false;
+  }
+  for (uint64_t i = wordBytes; i < fullBytes; i++) {
     if (!bw.writeBits(src[i], 8)) return false;
   }
   if (trailingBits > 0) {
@@ -248,6 +305,7 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
   bandBufs_.resize(threadCount_);
   for (auto& buf : bandBufs_) buf.resize(bandCapacity);
   bandBits_.resize(threadCount_, 0);
+  bandPtrs_.resize(threadCount_);
 
   workers_.reserve(threadCount_);
   for (uint32_t i = 0; i < threadCount_; i++) {
@@ -348,9 +406,8 @@ uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideS
   // Merge: concatenate the per-band local bitstreams into one bit-exact
   // contiguous stream, same header convention as before (leading k byte).
   out[0] = static_cast<uint8_t>(k);
-  std::vector<const uint8_t*> bandPtrs(threadCount_);
-  for (uint32_t i = 0; i < threadCount_; i++) bandPtrs[i] = bandBufs_[i].data();
-  uint32_t merged = mergeBitstreams(bandPtrs.data(), bandBits_.data(), threadCount_,
+  for (uint32_t i = 0; i < threadCount_; i++) bandPtrs_[i] = bandBufs_[i].data();
+  uint32_t merged = mergeBitstreams(bandPtrs_.data(), bandBits_.data(), threadCount_,
                                      out + 1, outCapacity - 1);
   if (merged == 0) return 0;
   return 1 + merged;

@@ -170,6 +170,7 @@ void Capture::processImage(AImage* image) {
       // Encode didn't fit the ceiling (pathological content) or whiteLevel
       // was 0 -- fall back to storing this one frame as plain Raw16, flagged
       // uncompressed, exactly like the existing Raw16 branch below.
+      compressedFallbacks_.fetch_add(1, std::memory_order_relaxed);
       meta.payloadBytes = headerTemplate_.frameSizeBytes;
       meta.compressed = 0;
       ok = writer_->writeFrame(meta, data, headerTemplate_.frameSizeBytes);
@@ -228,6 +229,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   path_ = path;
   dropped_.store(0);
   written_.store(0);
+  compressedFallbacks_.store(0);
   lastKnown_ = FrameMeta{};
   {
     std::lock_guard<std::mutex> lock(metaMutex_);

@@ -47,7 +47,9 @@ class ParallelFrameEncoder {
   // threadCount: 0 (default) auto-picks min(hardware_concurrency(), 4); a
   // nonzero value forces exactly that many worker threads -- used by tests
   // to force a deterministic multi-band split regardless of the host
-  // machine's actual core count.
+  // machine's actual core count (hardware_concurrency() can report 1 in a
+  // CI/sandboxed environment, which would silently collapse every band
+  // test down to a single band and defeat the point of testing the merge).
   explicit ParallelFrameEncoder(uint32_t width, uint32_t height, uint32_t threadCount = 0);
   ~ParallelFrameEncoder();
   ParallelFrameEncoder(const ParallelFrameEncoder&) = delete;
@@ -73,6 +75,11 @@ class ParallelFrameEncoder {
   // encode()'s merge step once all workers finish.
   std::vector<std::vector<uint8_t>> bandBufs_;
   std::vector<uint64_t> bandBits_;
+  // Scratch array of per-band buffer pointers, rebuilt (not reallocated --
+  // sized once here) at the top of each encode() call for mergeBitstreams().
+  // A member instead of a local so the real-time encode() hot path never
+  // allocates.
+  std::vector<const uint8_t*> bandPtrs_;
 
   // Current job, set by encode() before waking workers -- see round 3's
   // original comment on this pattern: only touched while mu_ is held by

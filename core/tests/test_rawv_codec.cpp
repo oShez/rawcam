@@ -189,19 +189,83 @@ TEST_CASE("ParallelFrameEncoder fails the whole frame (not a partial/corrupt res
     return static_cast<uint16_t>(maxVal / 2);
   });
   ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  // `out` is sized to width*height*2+64 -- comfortably large enough that a
+  // MERGE/outCapacity failure can't happen here; the only way this test's
+  // `n == 0` assertion can pass is a genuine per-band local-buffer overflow.
+  // If you ever shrink `out`, re-verify that invariant still holds.
   std::vector<uint8_t> out(static_cast<size_t>(width) * height * 2 + 64);
   uint32_t n = enc.encode(src.data(), width, 16, out.data(), static_cast<uint32_t>(out.size()));
   CHECK(n == 0);
 }
 
+TEST_CASE("ParallelFrameEncoder correctly handles multiple frames reused on one instance, including overflow-then-recover (regression: stale jobOverflowed_/bandBits_ state)") {
+  // Every other ParallelFrameEncoder test constructs a fresh instance per
+  // encode() call. This test pins the stateful, concurrency-sensitive reuse
+  // path instead: one instance, three different frames, in sequence --
+  // specifically including a call that overflows immediately followed by a
+  // normal call, to pin that jobOverflowed_ (and each band's bandBits_) get
+  // reset between generations rather than leaking stale state from the
+  // previous encode() into the next one.
+  const uint32_t width = 16, height = 16;
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 2 + 64);
+  std::vector<uint8_t> serial(static_cast<size_t>(width) * height * 2 + 64);
+
+  auto checkNormalFrame = [&](const std::vector<uint16_t>& src) {
+    uint32_t serialN = encodeFrame(src.data(), width, height, width, 16, serial.data(),
+                                    static_cast<uint32_t>(serial.size()));
+    REQUIRE(serialN > 0);
+    uint32_t n = enc.encode(src.data(), width, 16, out.data(), static_cast<uint32_t>(out.size()));
+    REQUIRE(n == serialN);
+    CHECK(std::equal(serial.begin(), serial.begin() + serialN, out.begin()));
+  };
+
+  // Frame 1: normal content.
+  auto frame1 = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x11) % (maxVal + 1));
+  });
+  checkNormalFrame(frame1);
+
+  // Frame 2: deliberately overflows band 0's local buffer -- same adversarial
+  // pattern as the dedicated overflow test above (rows y%4 in {1,3} are
+  // invisible to k-selection, so k stays near 0 while band 0's real content
+  // is near-maxVal noise on those rows).
+  auto frame2 = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    if (y % 4 == 1 || y % 4 == 3) return (x % 2 == 0) ? static_cast<uint16_t>(0) : maxVal;
+    return static_cast<uint16_t>(maxVal / 2);
+  });
+  uint32_t n2 = enc.encode(frame2.data(), width, 16, out.data(), static_cast<uint32_t>(out.size()));
+  CHECK(n2 == 0);
+
+  // Frame 3: normal content again, immediately after the overflow, on the
+  // SAME instance -- this is the regression pin. If jobOverflowed_ (or any
+  // other per-band state) weren't reset for the new generation, this call
+  // would incorrectly fail or produce corrupt output even though frame 3's
+  // content alone doesn't overflow anything.
+  auto frame3 = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 7 + y * 19) ^ 0x22) % (maxVal + 1));
+  });
+  checkNormalFrame(frame3);
+}
+
 TEST_CASE("ParallelFrameEncoder handles last-band capacity correctly (regression: height % threadCount >= 2)") {
-  // Regression test for buffer capacity fix: height=15, threadCount=4
-  // means the last band gets floor(15/4)+remainder=3+3=6 rows, but the old
-  // formula's ceil(15/4)=4 rows only provisioned capacity for 4. With the
-  // new formula using floor+threadCount-1, capacity is sized for 3+3=6 rows,
-  // correctly accommodating the last band's actual row count. This test
-  // verifies the encoder succeeds and produces byte-identical output even
-  // with a remainder >= 2.
+  // Regression test for buffer capacity fix. threadCount=8, height=15,
+  // width=32 is chosen specifically because it DISCRIMINATES between the
+  // old (buggy) and new (fixed) capacity formula for this content -- an
+  // earlier version of this test (threadCount=4) didn't: its content landed
+  // on a small enough Rice k that every band's real bit usage stayed well
+  // under BOTH formulas, so it passed either way and didn't actually guard
+  // against a regression.
+  //
+  // With threadCount=8: the last band absorbs floor(15/8)+(15%8) = 1+7 = 8
+  // rows. Old formula (ceil(height/threadCount)*width*4 + 64):
+  // ceil(15/8)*32*4+64 = 2*128+64 = 320 bytes -- under-provisions the last
+  // band, which needs roughly 8 rows * 32px * ~12 bits/px / 8 =~ 384 bytes
+  // for this content's Rice k, causing the OLD code to overflow that band's
+  // local buffer and fail. New formula ((floor(h/tc)+tc-1)*width*4 + 64):
+  // (1+7)*32*4+64 = 1024+64 = 1088 bytes -- comfortably covers it. This was
+  // confirmed empirically against the current (fixed) code, not just from
+  // the arithmetic above.
   const uint32_t width = 32, height = 15;
   auto src = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
     return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x7A) % (maxVal + 1));
@@ -211,7 +275,7 @@ TEST_CASE("ParallelFrameEncoder handles last-band capacity correctly (regression
                                   static_cast<uint32_t>(serial.size()));
   REQUIRE(serialN > 0);
 
-  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/8);
   std::vector<uint8_t> parallelOut(static_cast<size_t>(width) * height * 2 + 64);
   uint32_t parallelN = enc.encode(src.data(), width, 16, parallelOut.data(),
                                    static_cast<uint32_t>(parallelOut.size()));

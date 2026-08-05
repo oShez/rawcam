@@ -51,6 +51,19 @@ class Capture {
     return {written_.load(std::memory_order_relaxed), dropped_.load(std::memory_order_relaxed)};
   }
 
+  // How many CompressedPredictive frames this session fell back to storing
+  // uncompressed because ParallelFrameEncoder::encode() returned 0 (a
+  // per-band local buffer overflowed -- see rawv_codec.h's ParallelFrameEncoder
+  // doc). Not currently wired into the UI/JNI layer -- deliberately minimal,
+  // intended to be read via a debugger or a temporary logcat print during a
+  // future on-device check of how often this happens on real footage (open
+  // question flagged in docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md
+  // about whether the per-band capacity's 2x safety margin is right). Lock-free,
+  // same pattern as stats() above.
+  uint64_t compressedFallbacks() const {
+    return compressedFallbacks_.load(std::memory_order_relaxed);
+  }
+
  private:
   Capture() = default;
   Capture(const Capture&) = delete;
@@ -92,6 +105,9 @@ class Capture {
   // the JNI/UI thread without touching the writer_ pointer itself (which is
   // only ever safely accessed from the writer thread while recording).
   std::atomic<uint64_t> written_{0};
+  // Counts CompressedPredictive frames that fell back to uncompressed
+  // storage because encode() returned 0 -- see compressedFallbacks() above.
+  std::atomic<uint64_t> compressedFallbacks_{0};
 
   std::unique_ptr<RawvWriter> writer_;
   FileHeader headerTemplate_{};

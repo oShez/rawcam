@@ -285,23 +285,77 @@ that remaining fixed overhead, and per the design doc's own staged-
 verification recommendation, should now be scoped as its own follow-up plan
 informed by this real number rather than planned speculatively beforehand.
 
+**Caveat on the 34.4ms "fixed overhead" figure above:** that number is
+round 3's profiling, taken before this round's `mergeBitstreams()` step
+existed. Round 4 replaced round 3's single serial `writeRice` write pass
+with per-band fused predict+residual+pack (inside dispatch+wait) plus a new
+serial merge pass concatenating the per-band bitstreams -- a cost that
+simply didn't exist when the 34.4ms figure was measured. So "34.4ms fixed
+overhead + X ms for pack" is not quite right for round 4; it should really
+be "34.4ms fixed overhead + pack (now inside dispatch+wait) + merge (new)".
+A post-hoc review of round 4 (2026-08-05) found the initial merge
+implementation was a serial byte-at-a-time loop (one `writeBits()` call per
+byte moved across all bands, on the order of ~12-15M calls/frame at this
+project's usual 4096x3072 resolution -- roughly the same order of magnitude
+as the original per-bit `writeRice` bottleneck this whole investigation
+started from) and rewrote it to a bulk memcpy / word-at-a-time merge
+instead (see `mergeBitstreams()` / `appendBits()` in `rawv_codec.cpp`). The
+merge should be meaningfully
+cheaper post-optimization than the original byte-at-a-time version would
+have been, but this has **not been re-measured on-device** -- the reasoning
+above is inference from the implementation, not a fresh profiling run.
+
+**Does band-parallel write hit the design's ~3-4x pack-step target?**
+Back-of-envelope, yes, roughly, though this is an estimate derived from
+landing rates, not a direct on-device phase measurement of round 4 the way
+round 3's 34.4ms breakdown was. Treating landing rate as budget/actual-
+frame-time (the same relationship round 3's own profiling data confirmed:
+~217ms actual / ~41.6ms budget ≈ 5.2x over, 1/5.2 ≈ 19% landing, matching
+the ~19-22% observed): round 3's 22.0% landing implies ~41.6/0.22 ≈ 189ms
+actual per frame; round 4's 41.8% landing implies ~41.6/0.418 ≈ 99ms actual
+per frame. Netting out the ~34.4ms fixed-overhead trio (k-selection +
+dispatch/wait's non-pack portion + disk write) from round 4's ~99ms leaves
+roughly **~65ms for the fused pack+merge step, versus round 3's ~192ms
+serial `writeRice` write** -- close to a 3x reduction, at the low end of
+the ~3-4x band-parallelism target rather than solidly inside it. Two
+reasons this is a rough estimate rather than a confirmed number: (1) it's
+derived from landing-rate arithmetic, not a direct phase-by-phase profiling
+run of round 4 itself; (2) the 34.4ms fixed-overhead figure being netted
+out is itself round 3's, and dispatch+wait's cost profile changed in round
+4 (each band now does pack work too, not just predict+residual), so the
+true fixed-overhead split for round 4 is not actually known yet.
+
+**Recommendation before scoping stage 2:** re-run on-device phase profiling
+(the same kind of temporary `std::chrono`/`__android_log_print`
+instrumentation used to find the original root cause, see "Root cause
+found" above) to get a clean, current measurement of pack-time vs.
+merge-time vs. the fixed-overhead trio, now that the merge optimization
+above may have changed the balance. Stage 2's design should be informed by
+real round-4 numbers, not round 3's phase breakdown extrapolated through
+estimates as done here.
+
 ## Conclusion
 
-**Still not ready to ship**, after three rounds of work. The codec is
+**Still not ready to ship**, after four rounds of work. The codec is
 correct (host-tested round-trips, confirmed correct on real sensor data
 with an in-spec compression ratio across all rounds), and the whole
 plumbing chain builds clean. The design spec's explicit acceptance bar — no
-dropped frames at 4096×3072@24fps — has now been tested three times and
-failed three times: ~91% loss originally, ~75-79% loss after round 2
+dropped frames at 4096×3072@24fps — has now been tested four times and
+failed four times: ~91% loss originally, ~75-79% loss after round 2
 (batched bit writer + strided k-sampling), ~78.0% loss after round 3's
-threading alone (statistically flat vs. round 2 — now explained: threading
-targeted the wrong phase).
+threading alone (statistically flat vs. round 2 — explained by the root-
+cause profiling as threading the wrong phase), and **~58.2% loss after
+round 4 stage 1's band-parallel write** — the first genuine improvement
+since round 2 (loss roughly halved, landing rate very nearly doubled versus
+round 3), but still well short of the 0-dropped bar.
 
-**Open decision for the user, now with a confirmed root cause instead of a
-guess:** the serial `writeRice` write pass, not the predict+residual step,
-is what needs to speed up or parallelize next. A round 4 plan would need
-to be scoped around that finding specifically (not NEON-on-predict as
-originally planned) — worth deciding explicitly whether that's worth
-pursuing given three rounds have now landed short of the bar, or whether
-to step back to the ship-OFF-by-default/pull-the-feature options from the
-original open decision.
+**Open decision for the user, now with a confirmed root cause and a real
+measured improvement from acting on it:** band-parallel write meaningfully
+helped but didn't close the gap alone, consistent with the design doc's own
+expectation that the ~34.4ms fixed-overhead trio (k-selection, dispatch
+wait, disk write) — untouched by stage 1 — would still remain. Stage 2 (the
+Compute/Finish pipeline) is designed to address exactly that remaining
+overhead and is the natural next step if this feature is still worth
+pursuing. Worth deciding explicitly whether four rounds in is still worth a
+fifth, or whether to step back to the ship-OFF-by-default/pull-the-feature
+options from the original open decision.
