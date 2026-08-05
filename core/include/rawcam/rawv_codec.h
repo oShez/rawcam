@@ -32,24 +32,22 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
 
 // Parallel drop-in replacement for encodeFrame(), for real-time capture
-// throughput (round 3, see
-// docs/superpowers/specs/2026-08-05-rawv-codec-round3-throughput-design.md).
-// Splits the frame into row-bands processed by a persistent pool of worker
-// threads (created once at construction, not per encode() call -- thread
-// creation cost is too high to pay every frame at real-time rates),
-// producing the SAME bitstream encodeFrame() would for the same input: same
-// predictor, same k-selection, same Golomb-Rice coding, just computed with
-// the predict+residual step parallelized across cores instead of done
-// serially. width/height are fixed for the life of the encoder (matches one
-// recording session, which has one fixed resolution).
+// throughput. Round 4: fuses predict+residual+Rice-pack into each row-band's
+// worker (round 3 only parallelized predict+residual, leaving the actual
+// bottleneck -- the serial write pass, ~88.5% of encode() cost per on-device
+// profiling, 2026-08-05 -- untouched). Each band packs directly into its own
+// local buffer; a cheap serial merge (see mergeBitstreams() in
+// rawv_codec.cpp) concatenates them into one bit-exact stream, identical to
+// what encodeFrame() produces for the same input. See
+// docs/superpowers/specs/2026-08-05-rawv-codec-round4-pipeline-design.md.
+// width/height are fixed for the life of the encoder (matches one recording
+// session, which has one fixed resolution).
 class ParallelFrameEncoder {
  public:
   // threadCount: 0 (default) auto-picks min(hardware_concurrency(), 4); a
   // nonzero value forces exactly that many worker threads -- used by tests
   // to force a deterministic multi-band split regardless of the host
-  // machine's actual core count (hardware_concurrency() could report 1 in
-  // some CI/sandbox environments, which would silently collapse the encoder
-  // to a single band and defeat the point of a "spans multiple bands" test).
+  // machine's actual core count.
   explicit ParallelFrameEncoder(uint32_t width, uint32_t height, uint32_t threadCount = 0);
   ~ParallelFrameEncoder();
   ParallelFrameEncoder(const ParallelFrameEncoder&) = delete;
@@ -57,29 +55,34 @@ class ParallelFrameEncoder {
 
   // Same contract as encodeFrame(): returns encoded size in bytes, or 0 if
   // it would not fit in outCapacity (caller falls back to uncompressed).
-  // width/height are fixed at construction; rowStrideSamples/bitDepth may
-  // vary per call (they don't, in practice, within one recording session,
-  // but nothing here assumes that).
   uint32_t encode(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth,
                    uint8_t* out, uint32_t outCapacity);
 
  private:
   void workerLoop(uint32_t bandIndex);
-  void computeBand(uint32_t bandStart, uint32_t bandEnd);
+  // Computes predict+residual+Rice-pack for this band directly into its
+  // local buffer -- fused, no shared residual buffer.
+  void computeAndPackBand(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd);
 
   uint32_t width_;
   uint32_t height_;
   uint32_t threadCount_;
-  std::vector<uint32_t> residuals_;  // width_*height_, zigzag(residual) per pixel, raster order
 
-  // Current job, set by encode() before waking workers. Only ever touched
-  // while mu_ is held by the sole caller of encode() (this project's single
-  // dedicated writer thread) between generation bumps -- workers only read
-  // these after observing a new generation_, which happens-after encode()'s
-  // write under the same mutex.
+  // Per-band local pack buffers (sized once at construction) and each
+  // band's exact bit count after the last encode() call -- read by
+  // encode()'s merge step once all workers finish.
+  std::vector<std::vector<uint8_t>> bandBufs_;
+  std::vector<uint64_t> bandBits_;
+
+  // Current job, set by encode() before waking workers -- see round 3's
+  // original comment on this pattern: only touched while mu_ is held by
+  // the sole caller of encode(), workers only read after observing a new
+  // generation_, which happens-after encode()'s write under the same mutex.
   const uint16_t* jobRaw16_ = nullptr;
   uint32_t jobRowStrideSamples_ = 0;
   uint32_t jobBitDepth_ = 0;
+  uint32_t jobK_ = 0;
+  bool jobOverflowed_ = false;  // true if any band's local buffer couldn't hold its content
 
   std::vector<std::thread> workers_;
   std::mutex mu_;

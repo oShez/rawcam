@@ -70,6 +70,17 @@ class BitWriter {
     return bytePos_;
   }
 
+  // Exact number of REAL bits written so far, excluding the zero-padding
+  // finishedBytes() adds to byte-align a trailing partial byte. Must be
+  // called BEFORE finishedBytes() -- finishedBytes() advances bytePos_ and
+  // resets accBits_, so calling this after would return an inflated,
+  // byte-rounded count instead of the true bit count. Used by
+  // mergeBitstreams() to merge multiple independently-packed local
+  // bitstreams without including any of their individual trailing padding.
+  uint64_t totalBits() const {
+    return static_cast<uint64_t>(bytePos_) * 8 + accBits_;
+  }
+
  private:
   static uint32_t maskFor(uint32_t nbits) {
     return nbits >= 32 ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
@@ -80,6 +91,47 @@ class BitWriter {
   uint64_t acc_ = 0;
   uint32_t accBits_ = 0;
 };
+
+// Appends `bitCount` real bits from a byte-aligned, MSB-first packed local
+// buffer onto `bw` -- byte-at-a-time (not bit-at-a-time) since this may need
+// to move a whole band's worth of already-packed bits. `src` must have at
+// least ceil(bitCount/8) valid bytes (guaranteed by BitWriter::finishedBytes()
+// having flushed the source before this is called).
+inline bool appendBits(BitWriter& bw, const uint8_t* src, uint64_t bitCount) {
+  uint64_t fullBytes = bitCount / 8;
+  uint32_t trailingBits = static_cast<uint32_t>(bitCount % 8);
+  for (uint64_t i = 0; i < fullBytes; i++) {
+    if (!bw.writeBits(src[i], 8)) return false;
+  }
+  if (trailingBits > 0) {
+    uint32_t lastBits = src[fullBytes] >> (8 - trailingBits);
+    if (!bw.writeBits(lastBits, trailingBits)) return false;
+  }
+  return true;
+}
+
+// Concatenates `bandCount` independently-packed local bitstreams (each
+// produced by a per-band BitWriter, flushed via finishedBytes() with its
+// REAL bit count captured beforehand via totalBits()) into one bit-exact
+// contiguous stream written into `out`. Produces byte-for-byte identical
+// output to what a single BitWriter packing the same sequence of
+// writeRice() calls in raster order would have produced -- a Rice
+// codeword's bits depend only on its own value and k, never on prior
+// accumulator state, so only the byte OFFSET at which a band's bits land
+// differs between "packed alone" (byte-aligned start) and "packed as a
+// continuation of the previous band" (usually mid-byte), which this
+// corrects band-by-band via appendBits(). Returns the merged byte count
+// (matching BitWriter::finishedBytes()'s contract), or 0 if it doesn't fit
+// outCapacity -- caller falls back to storing the frame uncompressed, same
+// as encodeFrame()'s existing contract.
+uint32_t mergeBitstreams(const uint8_t* const* bandBufs, const uint64_t* bandBits,
+                          uint32_t bandCount, uint8_t* out, uint32_t outCapacity) {
+  BitWriter bw(out, outCapacity);
+  for (uint32_t b = 0; b < bandCount; b++) {
+    if (!appendBits(bw, bandBufs[b], bandBits[b])) return 0;
+  }
+  return bw.finishedBytes();
+}
 
 // Matches BitWriter's accumulator approach on the read side. The Rice
 // remainder (up to 20 bits, see riceParamFor's k<20 cap) is read in one
@@ -181,7 +233,20 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
     unsigned hw = std::thread::hardware_concurrency();
     threadCount_ = std::max<unsigned>(1, std::min<unsigned>(hw == 0 ? 4u : hw, 4u));
   }
-  residuals_.resize(static_cast<size_t>(width_) * height_);
+  // Per-band local pack buffer capacity: worst-case Raw16 bytes for this
+  // band's share of rows (width_*2 bytes/row), doubled as headroom for
+  // uneven noise distribution across bands -- real sensor content rarely
+  // needs more than its proportional share, but a band covering an
+  // unusually noisy region legitimately could exceed a tight
+  // 1/threadCount_ split. A uniform ceiling (sized off the largest
+  // possible band, rows rounded up) comfortably covers every band,
+  // including the last one, which can absorb a few extra remainder rows.
+  uint32_t rowsPerBand = (height_ + threadCount_ - 1) / threadCount_;
+  uint32_t bandCapacity = rowsPerBand * width_ * 2 * 2 + 64;
+  bandBufs_.resize(threadCount_);
+  for (auto& buf : bandBufs_) buf.resize(bandCapacity);
+  bandBits_.resize(threadCount_, 0);
+
   workers_.reserve(threadCount_);
   for (uint32_t i = 0; i < threadCount_; i++) {
     workers_.emplace_back([this, i] { workerLoop(i); });
@@ -212,29 +277,40 @@ void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
     uint32_t bandRows = height_ / threadCount_;
     uint32_t bandStart = bandIndex * bandRows;
     uint32_t bandEnd = (bandIndex + 1 == threadCount_) ? height_ : bandStart + bandRows;
-    computeBand(bandStart, bandEnd);
+    computeAndPackBand(bandIndex, bandStart, bandEnd);
 
     lock.lock();
     if (--pending_ == 0) cvDone_.notify_one();
   }
 }
 
-void ParallelFrameEncoder::computeBand(uint32_t bandStart, uint32_t bandEnd) {
-  for (uint32_t y = bandStart; y < bandEnd; y++) {
+void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandStart,
+                                               uint32_t bandEnd) {
+  BitWriter bw(bandBufs_[bandIndex].data(), static_cast<uint32_t>(bandBufs_[bandIndex].size()));
+  bool ok = true;
+  for (uint32_t y = bandStart; y < bandEnd && ok; y++) {
     for (uint32_t x = 0; x < width_; x++) {
       int32_t actual = jobRaw16_[y * jobRowStrideSamples_ + x];
       int32_t predicted = predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_);
-      residuals_[y * width_ + x] = static_cast<uint32_t>(zigzagEncode(actual - predicted));
+      uint32_t z = zigzagEncode(actual - predicted);
+      if (!bw.writeRice(z, jobK_)) { ok = false; break; }
     }
   }
+  // Capture the exact bit count BEFORE finishedBytes() -- see this file's
+  // Global Constraints on why the order matters.
+  uint64_t bits = ok ? bw.totalBits() : 0;
+  if (ok) bw.finishedBytes();
+  std::lock_guard<std::mutex> lock(mu_);
+  bandBits_[bandIndex] = bits;
+  if (!ok) jobOverflowed_ = true;
 }
 
 uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,
                                        uint32_t bitDepth, uint8_t* out, uint32_t outCapacity) {
   if (outCapacity < 1 || width_ == 0 || height_ == 0) return 0;
 
-  // Pass 1: same strided-sample k-selection as encodeFrame() -- unchanged,
-  // already cheap after round 2's fix.
+  // Pass 1: same strided-sample k-selection as before -- unchanged, already
+  // cheap (avg 3.83ms on-device per round 3's profiling).
   constexpr uint32_t kSampleStride = 4;
   uint64_t sumAbs = 0;
   uint64_t count = 0;
@@ -248,13 +324,15 @@ uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideS
   }
   uint32_t k = riceParamFor(sumAbs, count);
 
-  // Pass 2, stage 1: dispatch the row-band predict+residual compute to the
-  // persistent worker pool and wait for it to finish.
+  // Dispatch: each band's worker computes predict+residual+Rice-pack
+  // directly into its own local buffer -- fused, no shared residual buffer.
   {
     std::lock_guard<std::mutex> lock(mu_);
     jobRaw16_ = raw16;
     jobRowStrideSamples_ = rowStrideSamples;
     jobBitDepth_ = bitDepth;
+    jobK_ = k;
+    jobOverflowed_ = false;
     pending_ = threadCount_;
     generation_++;
   }
@@ -263,19 +341,17 @@ uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideS
     std::unique_lock<std::mutex> lock(mu_);
     cvDone_.wait(lock, [&] { return pending_ == 0; });
   }
+  if (jobOverflowed_) return 0;
 
-  // Pass 2, stage 2: serial batched write over the precomputed residuals --
-  // no predictor arithmetic left here, just BitWriter::writeRice calls, in
-  // the same raster order encodeFrame() would produce them in.
-  std::memset(out, 0, outCapacity);
+  // Merge: concatenate the per-band local bitstreams into one bit-exact
+  // contiguous stream, same header convention as before (leading k byte).
   out[0] = static_cast<uint8_t>(k);
-  BitWriter bw(out + 1, outCapacity - 1);
-  for (uint32_t y = 0; y < height_; y++) {
-    for (uint32_t x = 0; x < width_; x++) {
-      if (!bw.writeRice(residuals_[y * width_ + x], k)) return 0;
-    }
-  }
-  return 1 + bw.finishedBytes();
+  std::vector<const uint8_t*> bandPtrs(threadCount_);
+  for (uint32_t i = 0; i < threadCount_; i++) bandPtrs[i] = bandBufs_[i].data();
+  uint32_t merged = mergeBitstreams(bandPtrs.data(), bandBits_.data(), threadCount_,
+                                     out + 1, outCapacity - 1);
+  if (merged == 0) return 0;
+  return 1 + merged;
 }
 
 uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,

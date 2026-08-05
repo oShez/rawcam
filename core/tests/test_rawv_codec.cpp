@@ -116,13 +116,9 @@ TEST_CASE("round-trips dimensions not evenly divisible by the k-sampling stride"
   CHECK(roundTrips(src, 63, 65, 12));
 }
 
-TEST_CASE("ParallelFrameEncoder produces byte-identical output to encodeFrame (round 3 threading)") {
+TEST_CASE("ParallelFrameEncoder (round 4: band-parallel write) produces byte-identical output to encodeFrame") {
   // 512x512 with threadCount forced to 4 guarantees a real multi-band split
-  // regardless of this host machine's actual core count -- if the row-band
-  // split or scratch-buffer merge logic has an off-by-one, this frame is
-  // large enough and the split forced enough to surface it (a tiny frame,
-  // or an unforced threadCount on a 1-core CI host, could accidentally pass
-  // with a broken split by collapsing to the single-band case).
+  // and exercises the merge step across real band boundaries.
   auto src = makeFrame(512, 512, 14, [](uint32_t x, uint32_t y, uint16_t maxVal) {
     return static_cast<uint16_t>(((x * 31 + y * 17) ^ 0x5A) % (maxVal + 1));
   });
@@ -138,10 +134,68 @@ TEST_CASE("ParallelFrameEncoder produces byte-identical output to encodeFrame (r
   REQUIRE(parallelN == serialN);
   CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
 
-  // Also confirm the parallel path's own output round-trips correctly
-  // through decodeFrame -- implied by byte-identity above, but checked
-  // directly since it's the actual contract the app relies on.
   std::vector<uint16_t> decoded(src.size());
   REQUIRE(decodeFrame(parallelOut.data(), parallelN, decoded.data(), 512, 512, 512, 14));
   CHECK(decoded == src);
+}
+
+TEST_CASE("ParallelFrameEncoder byte-identical output across varied dimensions and content (merge boundary coverage)") {
+  // Different width/height/content per case produces different per-band bit
+  // counts and therefore different sub-byte phase offsets at each band
+  // boundary -- a merge bug at a specific phase would very likely surface
+  // as a mismatch in at least one of these varied cases.
+  struct Case { uint32_t width, height, bitDepth; };
+  const Case cases[] = {
+    {64, 64, 16}, {63, 65, 12}, {200, 300, 14}, {129, 129, 10}, {257, 64, 16},
+  };
+  for (const auto& c : cases) {
+    auto src = makeFrame(c.width, c.height, c.bitDepth, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+      return static_cast<uint16_t>(((x * 13 + y * 29 + x * y) ^ 0x33) % (maxVal + 1));
+    });
+    std::vector<uint8_t> serial(static_cast<size_t>(c.width) * c.height * 2 + 64);
+    uint32_t serialN = encodeFrame(src.data(), c.width, c.height, c.width, c.bitDepth,
+                                    serial.data(), static_cast<uint32_t>(serial.size()));
+    REQUIRE(serialN > 0);
+
+    ParallelFrameEncoder parallel(c.width, c.height, /*threadCount=*/4);
+    std::vector<uint8_t> parallelOut(static_cast<size_t>(c.width) * c.height * 2 + 64);
+    uint32_t parallelN = parallel.encode(src.data(), c.width, c.bitDepth, parallelOut.data(),
+                                          static_cast<uint32_t>(parallelOut.size()));
+    REQUIRE(parallelN == serialN);
+    CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
+  }
+}
+
+TEST_CASE("ParallelFrameEncoder returns 0 (caller falls back) when the merged output doesn't fit outCapacity") {
+  auto src = makeFrame(64, 64, 16, [](uint32_t, uint32_t, uint16_t maxVal) { return maxVal; });
+  ParallelFrameEncoder enc(64, 64, /*threadCount=*/4);
+  std::vector<uint8_t> tiny(4);
+  uint32_t n = enc.encode(src.data(), 64, 16, tiny.data(), static_cast<uint32_t>(tiny.size()));
+  CHECK(n == 0);
+}
+
+TEST_CASE("ParallelFrameEncoder handles large residuals with band-local overflow recovery") {
+  // High-variance content where sampled positions are small but many unsampled
+  // pixels have large residuals. The per-band buffers must be large enough to
+  // handle this variance without overflow. This test verifies the encoder
+  // succeeds and produces byte-for-byte identical output to the serial version
+  // even when individual bands have high-variance content.
+  const uint32_t width = 16, height = 16;
+  auto src = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    if (x % 4 == 0 && y % 4 == 0) return static_cast<uint16_t>(maxVal / 2);
+    if (y < 4) return (x % 2 == 0) ? static_cast<uint16_t>(0) : maxVal;
+    return static_cast<uint16_t>(maxVal / 2);
+  });
+  std::vector<uint8_t> serial(static_cast<size_t>(width) * height * 2 + 64);
+  uint32_t serialN = encodeFrame(src.data(), width, height, width, 16, serial.data(),
+                                  static_cast<uint32_t>(serial.size()));
+  REQUIRE(serialN > 0);
+
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  std::vector<uint8_t> parallelOut(static_cast<size_t>(width) * height * 2 + 64);
+  uint32_t n = enc.encode(src.data(), width, 16, parallelOut.data(),
+                           static_cast<uint32_t>(parallelOut.size()));
+  REQUIRE(n > 0);
+  CHECK(n == serialN);
+  CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
 }
