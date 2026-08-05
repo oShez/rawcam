@@ -124,11 +124,19 @@ void Capture::processImage(AImage* image) {
   }
 
   FrameMeta meta = matchMeta(timestampNs);
-  meta.frameIndex = writer_->framesWritten();
+  const PackMode mode = (PackMode)headerTemplate_.packMode;
+  // For CompressedPredictive, frameIndex is assigned later by finishLoop()
+  // (the Finish thread), not here -- writer_->framesWritten() reads
+  // RawvWriter::frames_, a plain non-atomic counter that the Finish thread
+  // also writes via writeFrame(). Computing it here too would race on that
+  // counter across threads, and the value would be discarded anyway (see
+  // finishLoop()'s own frameIndex assignment).
+  if (mode != PackMode::CompressedPredictive) {
+    meta.frameIndex = writer_->framesWritten();
+  }
   meta.droppedSoFar = (uint32_t)dropped_.load();
 
   bool ok;
-  const PackMode mode = (PackMode)headerTemplate_.packMode;
   if (mode == PackMode::Packed10 || mode == PackMode::Packed12) {
     // De-stride while packing: address each row via the original sensor
     // stride, pack exactly `width_` pixels per row into the contiguous
@@ -366,14 +374,6 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
     frameEncoder_ = std::make_unique<ParallelFrameEncoder>((uint32_t)width_, (uint32_t)height_);
   }
-  if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
-    finishStopping_.store(false);
-    {
-      std::lock_guard<std::mutex> lock(finishMutex_);
-      finishQueue_.clear();
-    }
-    finishThread_ = std::thread(&Capture::finishLoop, this);
-  }
 
   media_status_t status = AImageReader_new(width, height, AIMAGE_FORMAT_RAW16, 12, &reader_);
   if (status != AMEDIA_OK || reader_ == nullptr) {
@@ -394,6 +394,20 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   }
 
   jobject surface = ANativeWindow_toSurface(env, window);
+
+  // finishThread_ must only start on this guaranteed-success path -- same
+  // reasoning as writerThread_ below. Starting it any earlier (before the
+  // two fallible AImageReader_* calls above) risks leaking it on failure
+  // and calling std::terminate() on the next start() attempt (assigning to
+  // an already-joinable std::thread).
+  if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
+    finishStopping_.store(false);
+    {
+      std::lock_guard<std::mutex> lock(finishMutex_);
+      finishQueue_.clear();
+    }
+    finishThread_ = std::thread(&Capture::finishLoop, this);
+  }
 
   stopping_.store(false);
   writerThread_ = std::thread(&Capture::writerLoop, this);
