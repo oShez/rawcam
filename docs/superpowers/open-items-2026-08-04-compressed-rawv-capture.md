@@ -148,30 +148,74 @@ back on before the check. The `.rawv` file's own header (`packMode`) is
 the only fully reliable way to confirm which code path a given recording
 actually exercised — a live frame counter alone doesn't reveal that.
 
+## Round 3 checkpoint A — threading alone, 2026-08-05
+
+Plan: `docs/superpowers/plans/2026-08-05-rawv-codec-round3-throughput.md`,
+design: `docs/superpowers/specs/2026-08-05-rawv-codec-round3-throughput-design.md`.
+Tasks 1-2: new `ParallelFrameEncoder` class (persistent thread pool,
+`min(hardware_concurrency(), 4)` workers, row-band-parallel predict+residual
+into a scratch buffer, serial batched `writeRice` pass), wired into
+`Capture` replacing the old serial `encodeFrame()` call. Host-tested (8/8
+suites, including a new byte-identity equivalence test vs. the serial
+encoder), both tasks task-reviewed clean (no Critical/Important findings).
+
+Re-ran the same on-device check (same device, same 4096×3072@24fps,
+compression confirmed genuinely ON via the recorded file's own header —
+`packMode=3`):
+
+- **942 written / 3339 dropped** over ~2:35 elapsed (~78.0% loss, 22.0%
+  landing) — **statistically indistinguishable from round 2's ~75-79% loss
+  baseline (426 written / ~1359+ dropped, ~21-25% landing).** Threading
+  alone did not measurably move the needle beyond what round 2's batched
+  bit-writer + strided sampling already achieved.
+
+**This is a real, unexpected result, not yet explained.** The row-band
+split itself is verified correct (host equivalence test, task review's
+manual trace of the split arithmetic and the generation-counter dispatch's
+happens-before chains, both clean) — the *mechanism* works, but produced no
+measurable throughput gain on-device. Candidate explanations, none
+confirmed by profiling yet:
+- The predict+residual step (the part this round parallelized) may not
+  actually be the dominant per-frame cost — if the serial `writeRice` pass,
+  or the k-selection pass, or thread wake/dispatch latency (one
+  condvar-notify round trip per frame, every ~41.6ms) dominates instead,
+  parallelizing only the predict step wouldn't show up in the total.
+- `std::thread::hardware_concurrency()` on this device may return fewer
+  usable cores than assumed, or the OS scheduler may not be giving the
+  worker threads real concurrent execution time against the camera
+  pipeline's other threads (capture callback, writer thread, JNI/UI thread)
+  under this load.
+- Condvar wake latency itself (kernel futex round-trip, ~tens of
+  microseconds typically, but not verified on this device) could be
+  eating a nontrivial fraction of the ~41.6ms budget per frame if it's
+  worse than assumed.
+
+None of this was profiled with systrace/perfetto — reasoned from the
+result, not measured at that level of detail. That would be the natural
+next step before trusting NEON (Task 4, not yet run) to close the
+remaining gap on its own, since NEON only speeds up the same predict step
+threading was supposed to parallelize — if that step wasn't the
+bottleneck, NEON may show the same flat result threading just did.
+
 ## Conclusion
 
-**Still not ready to ship**, after two rounds of work. The codec is
+**Still not ready to ship**, after three rounds of work. The codec is
 correct (host-tested round-trips, confirmed correct on real sensor data
-with an in-spec compression ratio in both rounds), and the whole plumbing
-chain builds clean. The design spec's explicit acceptance bar — no dropped
-frames at 4096×3072@24fps — has now been tested twice and failed twice:
-~91% loss originally, ~75-79% loss after the first optimization pass
-(batched bit writer + strided k-sampling). Real progress, not enough.
+with an in-spec compression ratio across all rounds), and the whole
+plumbing chain builds clean. The design spec's explicit acceptance bar — no
+dropped frames at 4096×3072@24fps — has now been tested three times and
+failed three times: ~91% loss originally, ~75-79% loss after round 2
+(batched bit writer + strided k-sampling), ~78.0% loss after round 3's
+threading alone (statistically flat vs. round 2, not the expected further
+improvement).
 
-**Recommended next step, scoped as its own follow-up plan** (per the
-throughput-fix plan's own explicit instruction not to speculatively design
-this until measurement showed it was still needed — it now has):
-parallelize `encodeFrame` across the device's available CPU cores (e.g.
-split the frame into row-bands, encode each band on its own thread, since
-the MED predictor only looks 2 samples back so band boundaries just need a
-2-row overlap or a fixed edge-baseline seam), and/or NEON-vectorize the
-predictor+residual computation. Either is a meaningfully larger effort
-than this round's fix (real concurrency or SIMD work, not a
-transcription-level change) and deserves its own brainstorming/design pass
-rather than being bolted onto this plan reactively.
-
-A decision the user should make explicitly before further engineering
-investment: is the ~3x improvement + further optimization work worth
-pursuing to get this feature production-ready, or should
-`compressRecordings` ship OFF-by-default (or be pulled entirely) while
-that decision is made separately?
+**Open decision for the user, sharper than before:** round 3's own premise
+(the predict+residual step is the bottleneck, so parallelizing it helps)
+didn't hold up against the on-device measurement. Continuing to Task 4
+(NEON, which vectorizes that same step) without first understanding *why*
+threading didn't help risks repeating this exact outcome for a second time
+at higher implementation cost. Worth deciding explicitly: profile first to
+find the real bottleneck before writing more optimization code, proceed to
+NEON anyway on the chance it behaves differently from threading, or step
+back to the ship-OFF-by-default/pull-the-feature options from the original
+open decision.
