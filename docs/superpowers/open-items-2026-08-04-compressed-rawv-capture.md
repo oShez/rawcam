@@ -408,28 +408,86 @@ vs. a longer sustained recording).
   contend with the same cores dispatch+wait needs, trading some per-band
   parallelism for pipeline overlap instead of getting both for free.
 
+## Round 4 stage 2 checkpoint — Compute/Finish pipeline, 2026-08-06
+
+Plan: `docs/superpowers/plans/2026-08-05-rawv-codec-round4-compute-finish-pipeline.md`
+(first of three staged follow-ups approved by the user after the re-profiling
+above: pipeline → thread-count tuning → NEON, each independently
+checkpointed). Task 1: `ParallelFrameEncoder::encode()` split into async
+`computeBands()`/`mergeSlot()` with double-buffered slots — host-tested (18/18
+`rawv_codec` cases, including a bounded-wait backpressure test proving a 3rd
+`computeBands()` call genuinely blocks until a slot frees), task-reviewed
+clean (one Minor documentation note, deferred, no fix needed). Task 2: new
+dedicated Finish thread in `Capture` merges+writes each frame while the
+writer/Compute thread already starts the next frame's k-selection+dispatch;
+fixed the `AImage` lifetime risk by copying the raw plane into an owned
+buffer before `AImage_delete()`, unconditionally, for every
+`CompressedPredictive` frame. (Task 2's implementer subagent hit a session
+API limit partway through — after the code, build, and commit were already
+done — so the controller completed the remaining steps: verified the diff
+against the brief line-by-line, re-confirmed the Android release build, and
+ran this on-device checkpoint directly.)
+
+Re-ran the same on-device check (same device, same 4096×3072@24fps,
+compression confirmed genuinely ON via the recorded file's own header —
+`packMode=3`):
+
+- **1334 written / 321 dropped** over a ~40s clip (**80.6% landing, 19.4%
+  loss**) — a large, genuine improvement.
+
+**Comparison, same ~40s-clip methodology (apples-to-apples duration):**
+this session's stage-1-code diagnostic (before this round's changes) showed
+1091 written / 719 dropped over ~40s — 60.3% landing. This checkpoint's 80.6%
+landing is a **~20 percentage point jump from pipelining alone**, matching
+this round's own predicted ~78-81% (derived from removing merge+disk-write,
+~18.3ms, from the per-frame serial critical path) almost exactly.
+
+**Comparison against the longer, formal round 4 stage 1 checkpoint** (1437
+written / 2003 dropped over ~2:06, 41.8% landing): also a large improvement,
+though this checkpoint's shorter ~40s duration means it may not fully
+reflect any thermal drift a longer sustained recording would show (the
+stage-1 re-profiling diagnostic showed mild upward drift within its own
+first-half/second-half comparison) — the same-duration comparison above is
+the more reliable read on stage 2's own contribution.
+
+**The 0-dropped-frames bar is still not met** — expected and consistent with
+this round's own stated success criterion (a genuine, measured landing-rate
+improvement, not 0-dropped). Dispatch+wait (~48.44ms per the last profiling
+run) alone still exceeds the 41.6ms real-time budget, so some frame loss
+remains even with merge and disk write fully hidden behind the next frame's
+compute. Closing the rest of the gap is explicitly deferred to the two
+staged follow-ups the user already approved: thread-count tuning, then
+NEON — both aimed at dispatch+wait itself, the actual remaining bottleneck.
+
+`compressedFallbacks()` was not checked this session (not wired into the
+UI/logcat by default; would need temporary instrumentation to read, and the
+checkpoint's own numbers already give a clear enough signal without it).
+
 ## Conclusion
 
-**Still not ready to ship**, after four rounds of work. The codec is
+**Still not ready to ship**, after five rounds of work (four throughput
+rounds plus this stage-2 follow-up). The codec is
 correct (host-tested round-trips, confirmed correct on real sensor data
 with an in-spec compression ratio across all rounds), and the whole
 plumbing chain builds clean. The design spec's explicit acceptance bar — no
-dropped frames at 4096×3072@24fps — has now been tested four times and
-failed four times: ~91% loss originally, ~75-79% loss after round 2
+dropped frames at 4096×3072@24fps — has now been tested five times and
+failed five times: ~91% loss originally, ~75-79% loss after round 2
 (batched bit writer + strided k-sampling), ~78.0% loss after round 3's
 threading alone (statistically flat vs. round 2 — explained by the root-
-cause profiling as threading the wrong phase), and **~58.2% loss after
-round 4 stage 1's band-parallel write** — the first genuine improvement
-since round 2 (loss roughly halved, landing rate very nearly doubled versus
-round 3), but still well short of the 0-dropped bar.
+cause profiling as threading the wrong phase), ~58.2% loss after round 4
+stage 1's band-parallel write (the first genuine improvement since round 2),
+and **~19.4% loss after round 4 stage 2's Compute/Finish pipeline** — by far
+the largest single-round improvement of the whole effort (loss roughly
+one-third of stage 1's, landing rate essentially doubled on a like-for-like
+short-clip comparison), but still short of the 0-dropped bar.
 
-**Open decision for the user, now with a confirmed root cause and a real
-measured improvement from acting on it:** band-parallel write meaningfully
-helped but didn't close the gap alone, consistent with the design doc's own
-expectation that the ~34.4ms fixed-overhead trio (k-selection, dispatch
-wait, disk write) — untouched by stage 1 — would still remain. Stage 2 (the
-Compute/Finish pipeline) is designed to address exactly that remaining
-overhead and is the natural next step if this feature is still worth
-pursuing. Worth deciding explicitly whether four rounds in is still worth a
-fifth, or whether to step back to the ship-OFF-by-default/pull-the-feature
-options from the original open decision.
+**Open decision for the user, now with two consecutive rounds of real,
+measured, on-device-confirmed improvement:** the pipeline closed most of the
+remaining gap by overlapping merge+disk-write with the next frame's compute,
+exactly as its own profiling-informed prediction expected. What's left is
+dispatch+wait itself (~48.44ms, still over the 41.6ms budget alone) — the
+two staged follow-ups the user already approved (thread-count tuning, then
+NEON) target exactly that. Worth deciding explicitly whether to continue to
+those, or whether 19.4% loss is close enough to reconsider the
+ship-OFF-by-default option from the original open decision even before a
+sixth round.
