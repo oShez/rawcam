@@ -153,28 +153,40 @@ void Capture::processImage(AImage* image) {
     // the same guard exporter.cpp applies before deriving bitDepth) -- fall
     // back to storing this one frame uncompressed, same as an encode that
     // doesn't fit the ceiling.
-    uint32_t n = 0;
+    FinishJob job;
+    job.metaBase = meta;  // frameIndex/droppedSoFar filled in by Finish -- see finishLoop()
     if (headerTemplate_.whiteLevel != 0 && frameEncoder_) {
       const uint32_t rowStrideSamples = (uint32_t)rowStride_ / 2;
       // MUST match exporter.cpp's decode-side bitDepth derivation exactly --
       // a mismatch would corrupt the first two rows/columns of every frame.
       const uint32_t bitDepth = 32 - __builtin_clz(headerTemplate_.whiteLevel);
-      n = frameEncoder_->encode(reinterpret_cast<const uint16_t*>(data), rowStrideSamples,
-                                 bitDepth, compressBuf_.data(), (uint32_t)compressBuf_.size());
+      job.slot = frameEncoder_->computeBands(reinterpret_cast<const uint16_t*>(data),
+                                              rowStrideSamples, bitDepth);
+      job.hasSlot = true;
     }
-    if (n > 0) {
-      meta.payloadBytes = n;
-      meta.compressed = 1;
-      ok = writer_->writeFrame(meta, compressBuf_.data(), n);
-    } else {
-      // Encode didn't fit the ceiling (pathological content) or whiteLevel
-      // was 0 -- fall back to storing this one frame as plain Raw16, flagged
-      // uncompressed, exactly like the existing Raw16 branch below.
-      compressedFallbacks_.fetch_add(1, std::memory_order_relaxed);
-      meta.payloadBytes = headerTemplate_.frameSizeBytes;
-      meta.compressed = 0;
-      ok = writer_->writeFrame(meta, data, headerTemplate_.frameSizeBytes);
+
+    // AImage lifetime fix (round 4 stage 2): copy the raw plane into an
+    // OWNED buffer before AImage_delete(), for every frame -- not just ones
+    // already known to need the uncompressed fallback. Whether this frame's
+    // compression fits is only known once the Finish thread calls
+    // mergeSlot(), which happens after this AImage would otherwise have been
+    // recycled. This keeps AImage recycling exactly as fast as today, not
+    // entangled with Finish's pace: a stalled Finish stage must never starve
+    // the camera's own buffer pool.
+    job.rawCopy.assign(data, data + headerTemplate_.frameSizeBytes);
+
+    AImage_delete(image);
+
+    {
+      std::unique_lock<std::mutex> lock(finishMutex_);
+      finishCv_.wait(lock, [this] {
+        return finishQueue_.size() < kFinishQueueCap || finishStopping_.load();
+      });
+      if (finishStopping_.load()) return;  // tearing down; drop this last job
+      finishQueue_.push_back(std::move(job));
     }
+    finishCv_.notify_all();
+    return;  // the Finish thread now owns disk write + written_/dropped_ for this frame
   } else {
     meta.payloadBytes = headerTemplate_.frameSizeBytes;
     meta.compressed = 0;
@@ -207,6 +219,72 @@ void Capture::writerLoop() {
       queueCount_--;
     }
     processImage(image);
+  }
+}
+
+// --- Finish thread (round 4 stage 2): merges + writes CompressedPredictive
+// frames, overlapped with the writer/Compute thread already computing the
+// NEXT frame's bands. ---------------------------------------------------
+
+void Capture::finishLoop() {
+  for (;;) {
+    FinishJob job;
+    {
+      std::unique_lock<std::mutex> lock(finishMutex_);
+      finishCv_.wait(lock, [this] { return !finishQueue_.empty() || finishStopping_.load(); });
+      if (finishQueue_.empty()) {
+        if (finishStopping_.load()) break;
+        continue;
+      }
+      job = std::move(finishQueue_.front());
+      finishQueue_.pop_front();
+    }
+    finishCv_.notify_all();  // wake the writer/Compute thread if it was waiting for queue space
+
+    // Same early-exit as processImage(): once a write has failed, stop
+    // pounding the disk, but still drain (and silently drop) queued jobs so
+    // the queue empties and this loop can exit cleanly on stop().
+    if (writeFailed_.load()) {
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+
+    // frameIndex must be assigned here, not at Compute time -- only Finish
+    // knows the true sequential write order (Compute may already be working
+    // on frame N+2's bands while this is frame N's write).
+    FrameMeta meta = job.metaBase;
+    meta.frameIndex = writer_->framesWritten();
+    meta.droppedSoFar = (uint32_t)dropped_.load();
+
+    uint32_t n = 0;
+    if (job.hasSlot) {
+      n = frameEncoder_->mergeSlot(job.slot, compressBuf_.data(), (uint32_t)compressBuf_.size());
+    }
+
+    bool ok;
+    if (n > 0) {
+      meta.payloadBytes = n;
+      meta.compressed = 1;
+      ok = writer_->writeFrame(meta, compressBuf_.data(), n);
+    } else {
+      // Compute already knew this would overflow (job.hasSlot == false), or
+      // mergeSlot() found the merged output didn't fit outCapacity -- either
+      // way, fall back to the raw copy made before this frame's AImage was
+      // recycled.
+      compressedFallbacks_.fetch_add(1, std::memory_order_relaxed);
+      meta.payloadBytes = headerTemplate_.frameSizeBytes;
+      meta.compressed = 0;
+      ok = writer_->writeFrame(meta, job.rawCopy.data(), headerTemplate_.frameSizeBytes);
+    }
+
+    if (!ok) {
+      // Partial-write failure (e.g. ENOSPC mid-recording): the frame was not
+      // durably written, so count it as dropped and stop writing for good.
+      writeFailed_.store(true);
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      written_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -288,6 +366,14 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
     frameEncoder_ = std::make_unique<ParallelFrameEncoder>((uint32_t)width_, (uint32_t)height_);
   }
+  if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {
+    finishStopping_.store(false);
+    {
+      std::lock_guard<std::mutex> lock(finishMutex_);
+      finishQueue_.clear();
+    }
+    finishThread_ = std::thread(&Capture::finishLoop, this);
+  }
 
   media_status_t status = AImageReader_new(width, height, AIMAGE_FORMAT_RAW16, 12, &reader_);
   if (status != AMEDIA_OK || reader_ == nullptr) {
@@ -345,8 +431,18 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
   queueCv_.notify_all();
   if (writerThread_.joinable()) writerThread_.join();
 
-  // Safe to reset only after the writer thread has joined -- it may still
-  // be mid-call to frameEncoder_->encode() while draining the queue.
+  // Drain any remaining Compute->Finish handoff work before tearing down --
+  // finishLoop() keeps processing until ITS OWN queue is empty (same
+  // drain-then-exit pattern as writerThread_ above), only then exits.
+  if (finishThread_.joinable()) {
+    finishStopping_.store(true);
+    finishCv_.notify_all();
+    finishThread_.join();
+  }
+
+  // Safe to reset only after BOTH threads have joined -- the Finish thread
+  // may still be mid-call to frameEncoder_->mergeSlot() while draining its
+  // queue.
   frameEncoder_.reset();
 
   // Delete any image the callback managed to queue after the writer's final

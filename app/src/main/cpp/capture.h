@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -116,7 +117,12 @@ class Capture {
   int32_t height_ = 0;
   int32_t rowStride_ = 0;
   bool writerInitialized_ = false;
-  bool writeFailed_ = false;  // set on first write failure; later frames drop, disk untouched
+  // Set on first write failure (by the Finish thread, for CompressedPredictive
+  // recordings); read by the writer/Compute thread at the top of every
+  // processImage() call to stop attempting further writes once one fails.
+  // Atomic because Finish and Compute are different threads once the
+  // pipeline (round 4 stage 2) is active.
+  std::atomic<bool> writeFailed_{false};
   std::vector<uint8_t> packBuf_;  // preallocated Packed10/Packed12 scratch buffer
   std::vector<uint8_t> compressBuf_;  // preallocated CompressedPredictive scratch buffer
   // Owns the persistent thread pool used by CompressedPredictive's parallel
@@ -124,6 +130,29 @@ class Capture {
   // packMode is known, destroyed in stop(). Null when compressRecordings is
   // off for this session.
   std::unique_ptr<ParallelFrameEncoder> frameEncoder_;
+
+  // --- Round 4 stage 2: Compute/Finish pipeline (CompressedPredictive only) --
+
+  // One frame's worth of work handed from the writer/Compute thread to the
+  // Finish thread. rawCopy is an OWNED copy of this frame's raw16 plane
+  // bytes, made before AImage_delete() -- see this task's "AImage lifetime"
+  // doc comment on finishLoop() below for why every frame needs this, not
+  // just ones already known to need the fallback.
+  struct FinishJob {
+    uint32_t slot = 0;
+    bool hasSlot = false;  // false when whiteLevel==0 or frameEncoder_ is null -- go straight to rawCopy
+    FrameMeta metaBase{};  // frameIndex/droppedSoFar are filled in by Finish, not set here
+    std::vector<uint8_t> rawCopy;
+  };
+
+  void finishLoop();
+
+  static constexpr size_t kFinishQueueCap = 2;
+  std::mutex finishMutex_;
+  std::condition_variable finishCv_;
+  std::deque<FinishJob> finishQueue_;
+  std::thread finishThread_;
+  std::atomic<bool> finishStopping_{false};
 };
 
 }  // namespace rawcam
