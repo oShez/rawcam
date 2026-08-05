@@ -238,11 +238,13 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
   // uneven noise distribution across bands -- real sensor content rarely
   // needs more than its proportional share, but a band covering an
   // unusually noisy region legitimately could exceed a tight
-  // 1/threadCount_ split. A uniform ceiling (sized off the largest
-  // possible band, rows rounded up) comfortably covers every band,
-  // including the last one, which can absorb a few extra remainder rows.
-  uint32_t rowsPerBand = (height_ + threadCount_ - 1) / threadCount_;
-  uint32_t bandCapacity = rowsPerBand * width_ * 2 * 2 + 64;
+  // 1/threadCount_ split. Size off the last band's true worst-case row
+  // count: floor(height_/threadCount_) + (threadCount_-1) remainder rows,
+  // to ensure no band is under-provisioned. A uniform capacity (sized off
+  // this worst-case ceiling) comfortably covers every band.
+  uint32_t floorBandRows = height_ / threadCount_;
+  uint32_t maxBandRows = floorBandRows + threadCount_ - 1;
+  uint32_t bandCapacity = maxBandRows * width_ * 2 * 2 + 64;
   bandBufs_.resize(threadCount_);
   for (auto& buf : bandBufs_) buf.resize(bandCapacity);
   bandBits_.resize(threadCount_, 0);

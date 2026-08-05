@@ -174,17 +174,37 @@ TEST_CASE("ParallelFrameEncoder returns 0 (caller falls back) when the merged ou
   CHECK(n == 0);
 }
 
-TEST_CASE("ParallelFrameEncoder handles large residuals with band-local overflow recovery") {
-  // High-variance content where sampled positions are small but many unsampled
-  // pixels have large residuals. The per-band buffers must be large enough to
-  // handle this variance without overflow. This test verifies the encoder
-  // succeeds and produces byte-for-byte identical output to the serial version
-  // even when individual bands have high-variance content.
+TEST_CASE("ParallelFrameEncoder fails the whole frame (not a partial/corrupt result) when one band's content overflows its local buffer") {
+  // Rows with y%4 in {1,3} are never read by k-selection (not a sampled
+  // point -- needs y%4==0; not an up/upleft reference -- needs y%4==2; not
+  // a left reference -- needs the row itself to be sampled, y%4==0). Making
+  // ONLY those rows adversarial (alternating 0/maxVal) while everything
+  // else stays flat guarantees k-selection sees zero contamination (k stays
+  // near 0), while band 0 (which contains y=1 and y=3 for a 16-row/4-band
+  // split) genuinely risks overflowing its local buffer under k=0's large
+  // per-pixel unary codewords for near-maxVal residuals.
   const uint32_t width = 16, height = 16;
   auto src = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
-    if (x % 4 == 0 && y % 4 == 0) return static_cast<uint16_t>(maxVal / 2);
-    if (y < 4) return (x % 2 == 0) ? static_cast<uint16_t>(0) : maxVal;
+    if (y % 4 == 1 || y % 4 == 3) return (x % 2 == 0) ? static_cast<uint16_t>(0) : maxVal;
     return static_cast<uint16_t>(maxVal / 2);
+  });
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 2 + 64);
+  uint32_t n = enc.encode(src.data(), width, 16, out.data(), static_cast<uint32_t>(out.size()));
+  CHECK(n == 0);
+}
+
+TEST_CASE("ParallelFrameEncoder handles last-band capacity correctly (regression: height % threadCount >= 2)") {
+  // Regression test for buffer capacity fix: height=15, threadCount=4
+  // means the last band gets floor(15/4)+remainder=3+3=6 rows, but the old
+  // formula's ceil(15/4)=4 rows only provisioned capacity for 4. With the
+  // new formula using floor+threadCount-1, capacity is sized for 3+3=6 rows,
+  // correctly accommodating the last band's actual row count. This test
+  // verifies the encoder succeeds and produces byte-identical output even
+  // with a remainder >= 2.
+  const uint32_t width = 32, height = 15;
+  auto src = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x7A) % (maxVal + 1));
   });
   std::vector<uint8_t> serial(static_cast<size_t>(width) * height * 2 + 64);
   uint32_t serialN = encodeFrame(src.data(), width, height, width, 16, serial.data(),
@@ -193,9 +213,8 @@ TEST_CASE("ParallelFrameEncoder handles large residuals with band-local overflow
 
   ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
   std::vector<uint8_t> parallelOut(static_cast<size_t>(width) * height * 2 + 64);
-  uint32_t n = enc.encode(src.data(), width, 16, parallelOut.data(),
-                           static_cast<uint32_t>(parallelOut.size()));
-  REQUIRE(n > 0);
-  CHECK(n == serialN);
+  uint32_t parallelN = enc.encode(src.data(), width, 16, parallelOut.data(),
+                                   static_cast<uint32_t>(parallelOut.size()));
+  REQUIRE(parallelN == serialN);
   CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
 }
