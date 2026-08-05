@@ -32,13 +32,12 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
 
 // Parallel drop-in replacement for encodeFrame(), for real-time capture
-// throughput. Round 4: fuses predict+residual+Rice-pack into each row-band's
-// worker (round 3 only parallelized predict+residual, leaving the actual
-// bottleneck -- the serial write pass, ~88.5% of encode() cost per on-device
-// profiling, 2026-08-05 -- untouched). Each band packs directly into its own
-// local buffer; a cheap serial merge (see mergeBitstreams() in
-// rawv_codec.cpp) concatenates them into one bit-exact stream, identical to
-// what encodeFrame() produces for the same input. See
+// throughput. Round 4 stage 1: fuses predict+residual+Rice-pack into each
+// row-band's worker. Round 4 stage 2: splits encode() into computeBands()
+// (k-selection + per-band pack, the expensive ~48ms/frame step) and
+// mergeSlot() (merge, ~12ms/frame) so a caller can pipeline them across
+// frames -- computeBands() for frame N+1 can run while a DIFFERENT thread
+// calls mergeSlot() for frame N. See
 // docs/superpowers/specs/2026-08-05-rawv-codec-round4-pipeline-design.md.
 // width/height are fixed for the life of the encoder (matches one recording
 // session, which has one fixed resolution).
@@ -55,47 +54,99 @@ class ParallelFrameEncoder {
   ParallelFrameEncoder(const ParallelFrameEncoder&) = delete;
   ParallelFrameEncoder& operator=(const ParallelFrameEncoder&) = delete;
 
-  // Same contract as encodeFrame(): returns encoded size in bytes, or 0 if
-  // it would not fit in outCapacity (caller falls back to uncompressed).
+  // Same contract as before: returns encoded size in bytes, or 0 if it would
+  // not fit in outCapacity (caller falls back to uncompressed). Implemented
+  // as computeBands() immediately followed by mergeSlot() on the same
+  // thread -- kept for callers that don't need pipelining (all existing host
+  // tests use this).
   uint32_t encode(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth,
                    uint8_t* out, uint32_t outCapacity);
 
+  // Async split of encode() for pipelining: computeBands() does k-selection +
+  // per-band predict+residual+Rice-pack (the CPU-heavy step) and returns a
+  // SLOT index; mergeSlot() does the merge into a final contiguous bitstream
+  // for that slot, and is safe to call from a DIFFERENT thread than
+  // computeBands() -- this is what lets a dedicated "Finish" thread
+  // merge+write frame N while computeBands() already starts on frame N+1's
+  // k-selection+dispatch. See this file's history and the design doc's
+  // "Pipelining" section.
+  //
+  // Exactly kSlotCount (2) frames' worth of computed-but-not-yet-merged band
+  // buffers can be outstanding at once. If both slots are already holding
+  // unmerged bands, a third computeBands() call BLOCKS until mergeSlot() is
+  // called for one of them -- this is the pipeline's backpressure (mirrors
+  // this project's existing bounded-queue drop-when-full pattern one level
+  // up, at the camera capture callback).
+  //
+  // Only ever call computeBands() from one thread and mergeSlot() from one
+  // (possibly different) thread -- neither is safe to call concurrently with
+  // itself.
+  uint32_t computeBands(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth);
+
+  // Merges the given slot's bands (from a prior computeBands() call) into
+  // `out`, same return contract as encode(). ALWAYS releases the slot before
+  // returning, whether it succeeds, fails to fit outCapacity, or that slot's
+  // Compute already overflowed. The caller MUST call this exactly once for
+  // every computeBands() call -- skipping it leaks a slot and eventually
+  // deadlocks every future computeBands() call waiting for backpressure to
+  // clear.
+  uint32_t mergeSlot(uint32_t slot, uint8_t* out, uint32_t outCapacity);
+
  private:
+  static constexpr uint32_t kSlotCount = 2;
+
   void workerLoop(uint32_t bandIndex);
-  // Computes predict+residual+Rice-pack for this band directly into its
-  // local buffer -- fused, no shared residual buffer.
-  void computeAndPackBand(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd);
+  // Computes predict+residual+Rice-pack for this band directly into this
+  // slot's local buffer -- fused, no shared residual buffer.
+  void computeAndPackBand(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd, uint32_t slot);
 
   uint32_t width_;
   uint32_t height_;
   uint32_t threadCount_;
 
-  // Per-band local pack buffers (sized once at construction) and each
-  // band's exact bit count after the last encode() call -- read by
-  // encode()'s merge step once all workers finish.
-  std::vector<std::vector<uint8_t>> bandBufs_;
-  std::vector<uint64_t> bandBits_;
-  // Scratch array of per-band buffer pointers, rebuilt (not reallocated --
-  // sized once here) at the top of each encode() call for mergeBitstreams().
-  // A member instead of a local so the real-time encode() hot path never
-  // allocates.
-  std::vector<const uint8_t*> bandPtrs_;
+  // Per-slot (double-buffered), per-band local pack buffers and each band's
+  // exact bit count after computeBands() -- read by mergeSlot() once that
+  // slot's workers have finished. bandPtrs_ is per-slot merge scratch,
+  // rebuilt (not reallocated) at the top of each mergeSlot() call.
+  std::vector<std::vector<uint8_t>> bandBufs_[kSlotCount];
+  std::vector<uint64_t> bandBits_[kSlotCount];
+  std::vector<const uint8_t*> bandPtrs_[kSlotCount];
+  // Set by computeBands() (Compute thread), read by mergeSlot() (possibly
+  // the Finish thread). Safe without their own lock: the Compute->Finish
+  // handoff in Capture always goes through a mutex lock/unlock (the finish
+  // job queue's mutex) between computeBands() returning and mergeSlot()
+  // being called for that slot, which establishes happens-before per the
+  // C++ memory model even though these fields aren't directly guarded by
+  // that mutex.
+  uint32_t slotK_[kSlotCount] = {0, 0};
+  bool slotOverflowed_[kSlotCount] = {false, false};
 
-  // Current job, set by encode() before waking workers -- see round 3's
-  // original comment on this pattern: only touched while mu_ is held by
-  // the sole caller of encode(), workers only read after observing a new
-  // generation_, which happens-after encode()'s write under the same mutex.
+  // Slot availability -- a separate mutex from the worker-dispatch mu_ below
+  // so waiting for a free slot never contends with the hot per-frame
+  // dispatch path. slotBusy_[s] is true from the moment computeBands()
+  // claims slot s until mergeSlot() releases it.
+  std::mutex slotMu_;
+  std::condition_variable slotCv_;
+  bool slotBusy_[kSlotCount] = {false, false};
+  uint32_t nextSlot_ = 0;
+
+  // Current job, set by computeBands() before waking workers -- only touched
+  // while mu_ is held by the sole in-flight computeBands() caller; workers
+  // only read after observing a new generation_, which happens-after
+  // computeBands()'s write under the same mutex (same reasoning as round 3's
+  // original dispatch design).
   const uint16_t* jobRaw16_ = nullptr;
   uint32_t jobRowStrideSamples_ = 0;
   uint32_t jobBitDepth_ = 0;
   uint32_t jobK_ = 0;
+  uint32_t jobSlot_ = 0;
   bool jobOverflowed_ = false;  // true if any band's local buffer couldn't hold its content
 
   std::vector<std::thread> workers_;
   std::mutex mu_;
   std::condition_variable cvStart_;
   std::condition_variable cvDone_;
-  uint64_t generation_ = 0;  // bumped by encode() to wake workers for a new job
+  uint64_t generation_ = 0;  // bumped by computeBands() to wake workers for a new job
   uint32_t pending_ = 0;     // workers remaining to finish this generation
   bool stopping_ = false;
 };

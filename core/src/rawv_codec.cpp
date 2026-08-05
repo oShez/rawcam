@@ -290,22 +290,17 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
     unsigned hw = std::thread::hardware_concurrency();
     threadCount_ = std::max<unsigned>(1, std::min<unsigned>(hw == 0 ? 4u : hw, 4u));
   }
-  // Per-band local pack buffer capacity: worst-case Raw16 bytes for this
-  // band's share of rows (width_*2 bytes/row), doubled as headroom for
-  // uneven noise distribution across bands -- real sensor content rarely
-  // needs more than its proportional share, but a band covering an
-  // unusually noisy region legitimately could exceed a tight
-  // 1/threadCount_ split. Size off the last band's true worst-case row
-  // count: floor(height_/threadCount_) + (threadCount_-1) remainder rows,
-  // to ensure no band is under-provisioned. A uniform capacity (sized off
-  // this worst-case ceiling) comfortably covers every band.
+  // Per-band local pack buffer capacity -- unchanged sizing from round 4
+  // stage 1, just allocated twice now (once per slot) for double-buffering.
   uint32_t floorBandRows = height_ / threadCount_;
   uint32_t maxBandRows = floorBandRows + threadCount_ - 1;
   uint32_t bandCapacity = maxBandRows * width_ * 2 * 2 + 64;
-  bandBufs_.resize(threadCount_);
-  for (auto& buf : bandBufs_) buf.resize(bandCapacity);
-  bandBits_.resize(threadCount_, 0);
-  bandPtrs_.resize(threadCount_);
+  for (uint32_t s = 0; s < kSlotCount; s++) {
+    bandBufs_[s].resize(threadCount_);
+    for (auto& buf : bandBufs_[s]) buf.resize(bandCapacity);
+    bandBits_[s].resize(threadCount_, 0);
+    bandPtrs_[s].resize(threadCount_);
+  }
 
   workers_.reserve(threadCount_);
   for (uint32_t i = 0; i < threadCount_; i++) {
@@ -329,6 +324,7 @@ void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
     cvStart_.wait(lock, [&] { return generation_ != seenGeneration || stopping_; });
     if (stopping_) return;
     seenGeneration = generation_;
+    uint32_t slot = jobSlot_;
     lock.unlock();
 
     // bandRows*threadCount_ <= height_ by construction (floor division), so
@@ -337,7 +333,7 @@ void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
     uint32_t bandRows = height_ / threadCount_;
     uint32_t bandStart = bandIndex * bandRows;
     uint32_t bandEnd = (bandIndex + 1 == threadCount_) ? height_ : bandStart + bandRows;
-    computeAndPackBand(bandIndex, bandStart, bandEnd);
+    computeAndPackBand(bandIndex, bandStart, bandEnd, slot);
 
     lock.lock();
     if (--pending_ == 0) cvDone_.notify_one();
@@ -345,8 +341,9 @@ void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
 }
 
 void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandStart,
-                                               uint32_t bandEnd) {
-  BitWriter bw(bandBufs_[bandIndex].data(), static_cast<uint32_t>(bandBufs_[bandIndex].size()));
+                                               uint32_t bandEnd, uint32_t slot) {
+  BitWriter bw(bandBufs_[slot][bandIndex].data(),
+               static_cast<uint32_t>(bandBufs_[slot][bandIndex].size()));
   bool ok = true;
   for (uint32_t y = bandStart; y < bandEnd && ok; y++) {
     for (uint32_t x = 0; x < width_; x++) {
@@ -361,16 +358,26 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
   uint64_t bits = ok ? bw.totalBits() : 0;
   if (ok) bw.finishedBytes();
   std::lock_guard<std::mutex> lock(mu_);
-  bandBits_[bandIndex] = bits;
+  bandBits_[slot][bandIndex] = bits;
   if (!ok) jobOverflowed_ = true;
 }
 
-uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,
-                                       uint32_t bitDepth, uint8_t* out, uint32_t outCapacity) {
-  if (outCapacity < 1 || width_ == 0 || height_ == 0) return 0;
+uint32_t ParallelFrameEncoder::computeBands(const uint16_t* raw16, uint32_t rowStrideSamples,
+                                             uint32_t bitDepth) {
+  // Claim a free slot -- blocks here if both are still holding a previous
+  // computeBands() call's unmerged bands (the pipeline's backpressure).
+  uint32_t slot;
+  {
+    std::unique_lock<std::mutex> lock(slotMu_);
+    slot = nextSlot_;
+    slotCv_.wait(lock, [&] { return !slotBusy_[slot]; });
+    slotBusy_[slot] = true;
+    nextSlot_ = (nextSlot_ + 1) % kSlotCount;
+  }
 
   // Pass 1: same strided-sample k-selection as before -- unchanged, already
-  // cheap (avg 3.83ms on-device per round 3's profiling).
+  // cheap (avg 2.79ms on-device per round 4 stage 2's re-profiling,
+  // docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md).
   constexpr uint32_t kSampleStride = 4;
   uint64_t sumAbs = 0;
   uint64_t count = 0;
@@ -385,13 +392,15 @@ uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideS
   uint32_t k = riceParamFor(sumAbs, count);
 
   // Dispatch: each band's worker computes predict+residual+Rice-pack
-  // directly into its own local buffer -- fused, no shared residual buffer.
+  // directly into this slot's local buffers -- fused, no shared residual
+  // buffer.
   {
     std::lock_guard<std::mutex> lock(mu_);
     jobRaw16_ = raw16;
     jobRowStrideSamples_ = rowStrideSamples;
     jobBitDepth_ = bitDepth;
     jobK_ = k;
+    jobSlot_ = slot;
     jobOverflowed_ = false;
     pending_ = threadCount_;
     generation_++;
@@ -401,16 +410,40 @@ uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideS
     std::unique_lock<std::mutex> lock(mu_);
     cvDone_.wait(lock, [&] { return pending_ == 0; });
   }
-  if (jobOverflowed_) return 0;
 
-  // Merge: concatenate the per-band local bitstreams into one bit-exact
-  // contiguous stream, same header convention as before (leading k byte).
-  out[0] = static_cast<uint8_t>(k);
-  for (uint32_t i = 0; i < threadCount_; i++) bandPtrs_[i] = bandBufs_[i].data();
-  uint32_t merged = mergeBitstreams(bandPtrs_.data(), bandBits_.data(), threadCount_,
-                                     out + 1, outCapacity - 1);
-  if (merged == 0) return 0;
-  return 1 + merged;
+  slotK_[slot] = k;
+  slotOverflowed_[slot] = jobOverflowed_;
+  return slot;
+}
+
+uint32_t ParallelFrameEncoder::mergeSlot(uint32_t slot, uint8_t* out, uint32_t outCapacity) {
+  uint32_t result = 0;
+  if (!slotOverflowed_[slot] && outCapacity >= 1) {
+    // Merge: concatenate this slot's per-band local bitstreams into one
+    // bit-exact contiguous stream, same header convention as before
+    // (leading k byte).
+    out[0] = static_cast<uint8_t>(slotK_[slot]);
+    for (uint32_t i = 0; i < threadCount_; i++) bandPtrs_[slot][i] = bandBufs_[slot][i].data();
+    uint32_t merged = mergeBitstreams(bandPtrs_[slot].data(), bandBits_[slot].data(), threadCount_,
+                                       out + 1, outCapacity - 1);
+    result = (merged == 0) ? 0 : 1 + merged;
+  }
+  // Always release the slot -- see the header doc comment: the caller must
+  // call this exactly once per computeBands() call, or a slot leaks and
+  // every future computeBands() call eventually deadlocks.
+  {
+    std::lock_guard<std::mutex> lock(slotMu_);
+    slotBusy_[slot] = false;
+  }
+  slotCv_.notify_all();
+  return result;
+}
+
+uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,
+                                       uint32_t bitDepth, uint8_t* out, uint32_t outCapacity) {
+  if (outCapacity < 1 || width_ == 0 || height_ == 0) return 0;
+  uint32_t slot = computeBands(raw16, rowStrideSamples, bitDepth);
+  return mergeSlot(slot, out, outCapacity);
 }
 
 uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,

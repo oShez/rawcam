@@ -2,7 +2,9 @@
 #include "doctest.h"
 #include "rawcam/rawv_codec.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <future>
 #include <vector>
 
 using namespace rawcam;
@@ -281,4 +283,85 @@ TEST_CASE("ParallelFrameEncoder handles last-band capacity correctly (regression
                                    static_cast<uint32_t>(parallelOut.size()));
   REQUIRE(parallelN == serialN);
   CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
+}
+
+TEST_CASE("ParallelFrameEncoder computeBands()+mergeSlot() produce byte-identical output to encode(), called sequentially across 3 frames") {
+  // Pins that the async split behaves identically to the old synchronous
+  // encode() when used the simplest way: compute, then immediately merge,
+  // one frame at a time, never overlapping two in-flight frames. This is
+  // exactly the pattern encode() itself now uses internally.
+  const uint32_t width = 64, height = 64;
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  std::vector<uint8_t> serial(static_cast<size_t>(width) * height * 2 + 64);
+  std::vector<uint8_t> split(static_cast<size_t>(width) * height * 2 + 64);
+
+  auto checkFrame = [&](const std::vector<uint16_t>& src) {
+    uint32_t serialN = encodeFrame(src.data(), width, height, width, 16, serial.data(),
+                                    static_cast<uint32_t>(serial.size()));
+    REQUIRE(serialN > 0);
+    uint32_t slot = enc.computeBands(src.data(), width, 16);
+    uint32_t splitN = enc.mergeSlot(slot, split.data(), static_cast<uint32_t>(split.size()));
+    REQUIRE(splitN == serialN);
+    CHECK(std::equal(serial.begin(), serial.begin() + serialN, split.begin()));
+  };
+
+  checkFrame(makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x11) % (maxVal + 1));
+  }));
+  checkFrame(makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 7 + y * 19) ^ 0x22) % (maxVal + 1));
+  }));
+  checkFrame(makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 31 + y * 3) ^ 0x33) % (maxVal + 1));
+  }));
+}
+
+TEST_CASE("ParallelFrameEncoder computeBands() allows 2 outstanding unmerged slots before blocking") {
+  // The pipeline design relies on double-buffering: Compute can finish frame
+  // N+1's bands while Finish hasn't yet merged frame N's. Two back-to-back
+  // computeBands() calls with NEITHER merged yet must both return promptly
+  // (not deadlock), using two distinct slots.
+  const uint32_t width = 64, height = 64;
+  auto frame = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x11) % (maxVal + 1));
+  });
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+
+  uint32_t slot0 = enc.computeBands(frame.data(), width, 16);
+  uint32_t slot1 = enc.computeBands(frame.data(), width, 16);
+  CHECK(slot0 != slot1);
+
+  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 2 + 64);
+  CHECK(enc.mergeSlot(slot0, out.data(), static_cast<uint32_t>(out.size())) > 0);
+  CHECK(enc.mergeSlot(slot1, out.data(), static_cast<uint32_t>(out.size())) > 0);
+}
+
+TEST_CASE("ParallelFrameEncoder computeBands() blocks when both slots are busy, unblocks after mergeSlot()") {
+  // Backpressure: a 3rd computeBands() call with both prior slots still
+  // unmerged must BLOCK (not silently drop or corrupt) until mergeSlot()
+  // frees one. Run the 3rd call on a background thread with a bounded
+  // std::future wait so a broken implementation fails this test instead of
+  // hanging it forever.
+  const uint32_t width = 64, height = 64;
+  auto frame = makeFrame(width, height, 16, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 13 + y * 29) ^ 0x11) % (maxVal + 1));
+  });
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+
+  uint32_t slot0 = enc.computeBands(frame.data(), width, 16);
+  uint32_t slot1 = enc.computeBands(frame.data(), width, 16);
+
+  auto fut = std::async(std::launch::async,
+                         [&] { return enc.computeBands(frame.data(), width, 16); });
+  CHECK(fut.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout);
+
+  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 2 + 64);
+  CHECK(enc.mergeSlot(slot0, out.data(), static_cast<uint32_t>(out.size())) > 0);
+
+  CHECK(fut.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready);
+  uint32_t slot2 = fut.get();
+  CHECK(slot2 == slot0);  // the freed slot gets reused
+
+  CHECK(enc.mergeSlot(slot1, out.data(), static_cast<uint32_t>(out.size())) > 0);
+  CHECK(enc.mergeSlot(slot2, out.data(), static_cast<uint32_t>(out.size())) > 0);
 }
