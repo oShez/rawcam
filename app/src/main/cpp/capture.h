@@ -53,9 +53,11 @@ class Capture {
   }
 
   // How many CompressedPredictive frames this session fell back to storing
-  // uncompressed because ParallelFrameEncoder::encode() returned 0 (a
-  // per-band local buffer overflowed -- see rawv_codec.h's ParallelFrameEncoder
-  // doc). Not currently wired into the UI/JNI layer -- deliberately minimal,
+  // uncompressed because finishLoop() saw ParallelFrameEncoder::mergeSlot()
+  // return 0 (the merged output didn't fit outCapacity), or because
+  // job.hasSlot was already false (whiteLevel==0 or no encoder) -- see
+  // rawv_codec.h's ParallelFrameEncoder doc. Not currently wired into the
+  // UI/JNI layer -- deliberately minimal,
   // intended to be read via a debugger or a temporary logcat print during a
   // future on-device check of how often this happens on real footage (open
   // question flagged in docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md
@@ -141,7 +143,9 @@ class Capture {
   struct FinishJob {
     uint32_t slot = 0;
     bool hasSlot = false;  // false when whiteLevel==0 or frameEncoder_ is null -- go straight to rawCopy
-    FrameMeta metaBase{};  // frameIndex/droppedSoFar are filled in by Finish, not set here
+    FrameMeta metaBase{};  // only frameIndex needs Finish's involvement for correctness
+                           // (droppedSoFar is set at Compute time but cheaply re-read/
+                           // overwritten by Finish anyway, alongside frameIndex)
     std::vector<uint8_t> rawCopy;
   };
 

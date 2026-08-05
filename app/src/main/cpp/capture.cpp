@@ -190,7 +190,16 @@ void Capture::processImage(AImage* image) {
       finishCv_.wait(lock, [this] {
         return finishQueue_.size() < kFinishQueueCap || finishStopping_.load();
       });
-      if (finishStopping_.load()) return;  // tearing down; drop this last job
+      if (finishStopping_.load()) {
+        // Tearing down before this job could be enqueued -- release its
+        // slot (mergeSlot() is the only thing that does; skipping it leaks
+        // the slot, same contract as finishLoop()'s write-failure path) and
+        // count it as dropped so written_+dropped_ still reconciles against
+        // frames that arrived.
+        if (job.hasSlot) frameEncoder_->mergeSlot(job.slot, nullptr, 0);
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
       finishQueue_.push_back(std::move(job));
     }
     finishCv_.notify_all();
@@ -251,8 +260,13 @@ void Capture::finishLoop() {
 
     // Same early-exit as processImage(): once a write has failed, stop
     // pounding the disk, but still drain (and silently drop) queued jobs so
-    // the queue empties and this loop can exit cleanly on stop().
+    // the queue empties and this loop can exit cleanly on stop(). MUST still
+    // release job.slot via mergeSlot() even when dropping -- skipping it
+    // leaks the slot and eventually deadlocks every future computeBands()
+    // call (see rawv_codec.h's documented contract). Passing outCapacity=0
+    // makes mergeSlot() skip its real merge work and just release the slot.
     if (writeFailed_.load()) {
+      if (job.hasSlot) frameEncoder_->mergeSlot(job.slot, nullptr, 0);
       dropped_.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
