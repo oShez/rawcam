@@ -245,6 +245,46 @@ offset table — the design consciously avoided this in round 3 to keep
 `kVersion` unchanged, but the profiling data now shows the write pass is
 where parallelism would actually pay off, not the predict step).
 
+## Round 4 stage 1 checkpoint — band-parallel write, 2026-08-05
+
+Plan: `docs/superpowers/plans/2026-08-05-rawv-codec-round4-band-parallel-write.md`,
+design: `docs/superpowers/specs/2026-08-05-rawv-codec-round4-pipeline-design.md`
+(this checkpoint covers stage 1 only — band-parallel write — stage 2, the
+Compute/Finish pipeline, is a deliberately separate follow-up). Task 1:
+`ParallelFrameEncoder` rewritten to fuse predict+residual+Rice-pack per
+row-band (each band packs directly into its own local buffer via its own
+`BitWriter`, no shared `residuals_` buffer), with a new bit-exact
+`mergeBitstreams()` concatenating the per-band bitstreams into output
+identical to the unchanged serial `encodeFrame()`. Host-tested (8/8 suites,
+14 `rawv_codec` test cases including bit-identity, merge-boundary-phase
+coverage, and a genuine per-band overflow test), task-reviewed with one fix
+round (two plan-mandated bugs found and fixed: the original overflow test
+didn't actually trigger overflow due to a flawed k-selection assumption,
+and the last-band buffer capacity formula under-provisioned for
+`height % threadCount >= 2` — both traced to authoring mistakes in the plan
+itself, fixed and re-review-verified clean).
+
+Re-ran the same on-device check (same device, same 4096×3072@24fps,
+compression confirmed genuinely ON via the recorded file's own header —
+`packMode=3`):
+
+- **1437 written / 2003 dropped** over ~2:06 elapsed (~58.2% loss, 41.8%
+  landing) — a real, meaningful improvement over round 3's ~78.0% loss
+  (22.0% landing): loss roughly halved, landing rate very nearly doubled.
+
+**Still not ready to ship** — the 0-dropped bar isn't met — but this is the
+first round since round 2 to show genuine, substantial improvement rather
+than a flat result. Consistent with the design doc's own expectation:
+band-parallel write alone was never expected to close the whole gap by
+itself, since k-selection (3.83ms) + dispatch+wait (21.15ms) + disk write
+(9.38ms) — none of which this stage touches — already summed to ~34.4ms of
+the ~41.6ms budget on their own (round 3's profiling). Stage 2 (the
+Compute/Finish pipeline, overlapping disk I/O and the next frame's compute
+with the current frame's finish work) is designed specifically to address
+that remaining fixed overhead, and per the design doc's own staged-
+verification recommendation, should now be scoped as its own follow-up plan
+informed by this real number rather than planned speculatively beforehand.
+
 ## Conclusion
 
 **Still not ready to ship**, after three rounds of work. The codec is
