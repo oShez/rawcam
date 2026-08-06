@@ -299,6 +299,14 @@ std::vector<int> selectWorkerCores(const std::vector<long>& maxFreqKhzPerCore) {
   return result;
 }
 
+uint32_t workerThreadCount(std::size_t clusterCoreCount, uint32_t defaultCap) {
+  if (clusterCoreCount == 0) return defaultCap;  // detection failed -> today's behavior
+  uint32_t clusterBased = clusterCoreCount > 1
+                              ? static_cast<uint32_t>(clusterCoreCount - 1)
+                              : 1u;
+  return std::max(clusterBased, defaultCap);
+}
+
 ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint32_t threadCount)
     : width_(width), height_(height) {
   if (threadCount > 0) {

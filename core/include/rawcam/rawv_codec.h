@@ -1,5 +1,6 @@
 #pragma once
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <thread>
@@ -39,6 +40,14 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
 // ANY -1 entry (a partial read must not be half-trusted), or fewer than two
 // distinct frequencies (uniform -- no big.LITTLE split visible). Pure; no I/O.
 std::vector<int> selectWorkerCores(const std::vector<long>& maxFreqKhzPerCore);
+
+// Final worker-thread count from a detected big+mid cluster size and today's
+// default cap (min(hardware_concurrency(), 4)). clusterCoreCount == 0 means
+// "detection failed" -> returns defaultCap unchanged. Otherwise returns
+// max(max(1, clusterCoreCount - 1), defaultCap): one core left free for the
+// unpinned writer/Finish/camera threads (the margin), floored at defaultCap so
+// topology-aware sizing can only ADD workers vs. today, never remove them.
+uint32_t workerThreadCount(std::size_t clusterCoreCount, uint32_t defaultCap);
 
 // Parallel drop-in replacement for encodeFrame(), for real-time capture
 // throughput. Round 4 stage 1: fuses predict+residual+Rice-pack into each

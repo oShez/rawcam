@@ -403,3 +403,26 @@ TEST_CASE("selectWorkerCores: empty input returns empty") {
   std::vector<long> freqs;
   CHECK(selectWorkerCores(freqs).empty());
 }
+
+TEST_CASE("workerThreadCount: empty cluster falls back to defaultCap") {
+  CHECK(workerThreadCount(0, 4) == 4u);
+  CHECK(workerThreadCount(0, 1) == 1u);
+}
+
+TEST_CASE("workerThreadCount: 6-core cluster gives 5 (size-1 margin) above the floor") {
+  // This device: 6 big+mid cores -> 5 workers, one core left free.
+  CHECK(workerThreadCount(6, 4) == 5u);
+}
+
+TEST_CASE("workerThreadCount: regression floor -- never fewer than defaultCap") {
+  // A hypothetical 3-big-core device: size-1 = 2, but floor keeps it at 4.
+  CHECK(workerThreadCount(3, 4) == 4u);
+  // 2-big-core: size-1 = 1, floor keeps it at 4.
+  CHECK(workerThreadCount(2, 4) == 4u);
+}
+
+TEST_CASE("workerThreadCount: single big core clamps margin to 1, then floor applies") {
+  // clusterCoreCount 1 -> max(1, 0) = 1, floored at defaultCap.
+  CHECK(workerThreadCount(1, 4) == 4u);
+  CHECK(workerThreadCount(1, 1) == 1u);
+}
