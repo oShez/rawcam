@@ -168,6 +168,27 @@ TEST_CASE("ParallelFrameEncoder byte-identical output across varied dimensions a
   }
 }
 
+TEST_CASE("default-constructed ParallelFrameEncoder matches serial encodeFrame byte-for-byte") {
+  const uint32_t width = 128, height = 96, bitDepth = 12;
+  auto src = makeFrame(width, height, bitDepth, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 3 + y * 5) * 11) % (maxVal + 1));
+  });
+
+  std::vector<uint8_t> serial(static_cast<size_t>(width) * height * 2 + 64);
+  uint32_t sn = encodeFrame(src.data(), width, height, width, bitDepth,
+                            serial.data(), static_cast<uint32_t>(serial.size()));
+  REQUIRE(sn > 0);
+
+  // threadCount = 0 -> exercises the new default sizing path (falls back to
+  // min(hw,4) on this host since sysfs topology paths don't exist off-device).
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/0);
+  std::vector<uint8_t> par(static_cast<size_t>(width) * height * 2 + 64);
+  uint32_t pn = enc.encode(src.data(), width /*rowStrideSamples*/, bitDepth,
+                           par.data(), static_cast<uint32_t>(par.size()));
+  REQUIRE(pn == sn);
+  CHECK(std::equal(serial.begin(), serial.begin() + sn, par.begin()));
+}
+
 TEST_CASE("ParallelFrameEncoder returns 0 (caller falls back) when the merged output doesn't fit outCapacity") {
   auto src = makeFrame(64, 64, 16, [](uint32_t, uint32_t, uint16_t maxVal) { return maxVal; });
   ParallelFrameEncoder enc(64, 64, /*threadCount=*/4);

@@ -117,10 +117,17 @@ class ParallelFrameEncoder {
   // Computes predict+residual+Rice-pack for this band directly into this
   // slot's local buffer -- fused, no shared residual buffer.
   void computeAndPackBand(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd, uint32_t slot);
+  // Pins every worker thread to the shared big+mid core mask in workerCores_.
+  // No-op when workerCores_ is empty. Best-effort: a failed affinity syscall is
+  // logged and ignored (the thread keeps running unpinned). Android-only body.
+  void applyWorkerAffinity();
 
   uint32_t width_;
   uint32_t height_;
   uint32_t threadCount_;
+  // Big+mid core indices to pin workers to (from selectWorkerCores()); empty
+  // means "no confident topology" -> no affinity applied, default sizing used.
+  std::vector<int> workerCores_;
 
   // Per-slot (double-buffered), per-band local pack buffers and each band's
   // exact bit count after computeBands() -- read by mergeSlot() once that

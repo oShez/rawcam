@@ -6,6 +6,14 @@
 #include <mutex>
 #include <thread>
 
+#ifdef __ANDROID__
+#include <sched.h>
+#include <pthread.h>
+#include <android/log.h>
+#include <cstdio>
+#include <cerrno>
+#endif
+
 namespace rawcam {
 namespace {
 
@@ -280,6 +288,30 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
   return k;
 }
 
+#ifdef __ANDROID__
+// Reads /sys/.../cpuN/cpufreq/cpuinfo_max_freq for each core [0, hw). Returns
+// one entry per core in kHz, or -1 for any core whose file is missing/
+// unreadable/non-numeric. Empty if hardware_concurrency() reports 0.
+std::vector<long> readMaxFreqPerCore() {
+  unsigned hw = std::thread::hardware_concurrency();
+  if (hw == 0) return {};
+  std::vector<long> freqs;
+  freqs.reserve(hw);
+  for (unsigned i = 0; i < hw; i++) {
+    char path[128];
+    std::snprintf(path, sizeof(path),
+                  "/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", i);
+    std::FILE* f = std::fopen(path, "r");
+    if (!f) { freqs.push_back(-1); continue; }
+    long val = -1;
+    if (std::fscanf(f, "%ld", &val) != 1) val = -1;
+    std::fclose(f);
+    freqs.push_back(val);
+  }
+  return freqs;
+}
+#endif
+
 }  // namespace
 
 std::vector<int> selectWorkerCores(const std::vector<long>& maxFreqKhzPerCore) {
@@ -313,7 +345,13 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
     threadCount_ = threadCount;
   } else {
     unsigned hw = std::thread::hardware_concurrency();
-    threadCount_ = std::max<unsigned>(1, std::min<unsigned>(hw == 0 ? 4u : hw, 4u));
+    uint32_t defaultCap = std::max<unsigned>(1, std::min<unsigned>(hw == 0 ? 4u : hw, 4u));
+#ifdef __ANDROID__
+    workerCores_ = selectWorkerCores(readMaxFreqPerCore());
+    threadCount_ = workerThreadCount(workerCores_.size(), defaultCap);
+#else
+    threadCount_ = defaultCap;  // host/non-Android: byte-for-byte today's behavior
+#endif
   }
   // Per-band local pack buffer capacity -- unchanged sizing from round 4
   // stage 1, just allocated twice now (once per slot) for double-buffering.
@@ -331,6 +369,27 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
   for (uint32_t i = 0; i < threadCount_; i++) {
     workers_.emplace_back([this, i] { workerLoop(i); });
   }
+  applyWorkerAffinity();  // no-op unless Android + a confident cluster was found
+}
+
+void ParallelFrameEncoder::applyWorkerAffinity() {
+#ifdef __ANDROID__
+  // Bionic (Android's libc) doesn't provide the glibc extension
+  // pthread_setaffinity_np -- use its own pthread_gettid_np() to resolve the
+  // kernel tid, then the POSIX sched_setaffinity() that IS available.
+  if (workerCores_.empty()) return;
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (int core : workerCores_) CPU_SET(core, &set);
+  for (auto& t : workers_) {
+    pid_t tid = pthread_gettid_np(t.native_handle());
+    int rc = sched_setaffinity(tid, sizeof(set), &set);
+    if (rc != 0) {
+      __android_log_print(ANDROID_LOG_WARN, "rawv_codec",
+                          "sched_setaffinity failed (errno=%d), worker unpinned", errno);
+    }
+  }
+#endif
 }
 
 ParallelFrameEncoder::~ParallelFrameEncoder() {
