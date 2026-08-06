@@ -31,6 +31,15 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint16_t* out, uint32_t width, uint32_t height,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
 
+// Given each CPU core's max frequency in kHz (one entry per core; -1 for a
+// core whose frequency couldn't be read), returns the indices of every core
+// NOT in the lowest-frequency cluster -- i.e. the "big + middle" cores worth
+// running compute workers on, excluding the slow efficiency cluster. Returns
+// an empty vector when topology can't be determined confidently: empty input,
+// ANY -1 entry (a partial read must not be half-trusted), or fewer than two
+// distinct frequencies (uniform -- no big.LITTLE split visible). Pure; no I/O.
+std::vector<int> selectWorkerCores(const std::vector<long>& maxFreqKhzPerCore);
+
 // Parallel drop-in replacement for encodeFrame(), for real-time capture
 // throughput. Round 4 stage 1: fuses predict+residual+Rice-pack into each
 // row-band's worker. Round 4 stage 2: splits encode() into computeBands()

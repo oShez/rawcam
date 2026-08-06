@@ -365,3 +365,41 @@ TEST_CASE("ParallelFrameEncoder computeBands() blocks when both slots are busy, 
   CHECK(enc.mergeSlot(slot1, out.data(), static_cast<uint32_t>(out.size())) > 0);
   CHECK(enc.mergeSlot(slot2, out.data(), static_cast<uint32_t>(out.size())) > 0);
 }
+
+TEST_CASE("selectWorkerCores: 3-cluster big.LITTLE returns prime+performance only") {
+  // Snapdragon-8-Gen-3-shaped: 1 prime (3.3GHz), 5 performance (3.2GHz),
+  // 2 efficiency (2.3GHz). Indices 0..7. Only the 2.3GHz pair is excluded.
+  std::vector<long> freqs = {3300000, 3200000, 3200000, 3200000,
+                             3200000, 3200000, 2300000, 2300000};
+  std::vector<int> got = selectWorkerCores(freqs);
+  std::vector<int> want = {0, 1, 2, 3, 4, 5};
+  CHECK(got == want);
+}
+
+TEST_CASE("selectWorkerCores: 2-cluster split excludes the lower cluster") {
+  std::vector<long> freqs = {2800000, 2800000, 2800000, 2800000,
+                             1800000, 1800000, 1800000, 1800000};
+  std::vector<int> got = selectWorkerCores(freqs);
+  std::vector<int> want = {0, 1, 2, 3};
+  CHECK(got == want);
+}
+
+TEST_CASE("selectWorkerCores: uniform frequencies return empty (no confident split)") {
+  std::vector<long> freqs = {2000000, 2000000, 2000000, 2000000};
+  CHECK(selectWorkerCores(freqs).empty());
+}
+
+TEST_CASE("selectWorkerCores: any unreadable core (-1) invalidates the whole set") {
+  std::vector<long> freqs = {3200000, 3200000, -1, 2300000};
+  CHECK(selectWorkerCores(freqs).empty());
+}
+
+TEST_CASE("selectWorkerCores: single core returns empty") {
+  std::vector<long> freqs = {2000000};
+  CHECK(selectWorkerCores(freqs).empty());
+}
+
+TEST_CASE("selectWorkerCores: empty input returns empty") {
+  std::vector<long> freqs;
+  CHECK(selectWorkerCores(freqs).empty());
+}

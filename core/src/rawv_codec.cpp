@@ -282,6 +282,23 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
 
 }  // namespace
 
+std::vector<int> selectWorkerCores(const std::vector<long>& maxFreqKhzPerCore) {
+  if (maxFreqKhzPerCore.empty()) return {};
+  for (long f : maxFreqKhzPerCore) {
+    if (f < 0) return {};  // any unreadable core invalidates the whole set
+  }
+  std::vector<long> distinct(maxFreqKhzPerCore.begin(), maxFreqKhzPerCore.end());
+  std::sort(distinct.begin(), distinct.end());
+  distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+  if (distinct.size() < 2) return {};  // uniform -> no confident split
+  long lowest = distinct.front();  // ascending sort -> front is the lowest cluster
+  std::vector<int> result;
+  for (int i = 0; i < static_cast<int>(maxFreqKhzPerCore.size()); i++) {
+    if (maxFreqKhzPerCore[i] != lowest) result.push_back(i);
+  }
+  return result;
+}
+
 ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint32_t threadCount)
     : width_(width), height_(height) {
   if (threadCount > 0) {
