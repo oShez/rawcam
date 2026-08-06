@@ -492,6 +492,78 @@ fixed — recorded with rulings in this plan's ledger
 (`.superpowers/sdd/2026-08-05-rawv-codec-round4-compute-finish-pipeline/progress.md`),
 none load-bearing for this plan's correctness.
 
+## Round 4 stage 3 checkpoint — thread-topology tuning, 2026-08-06
+
+Plan: `docs/superpowers/plans/2026-08-06-rawv-codec-round4-thread-topology-tuning.md`
+(second of the three staged follow-ups: pipeline → **thread-count tuning** →
+NEON). Code shipped on `main` as commits `59d49af` (pure `selectWorkerCores()`
+big.LITTLE cluster detection), `0243f4f` (pure `workerThreadCount()` margin +
+regression floor), `e97c8a8` (constructor wiring + Android-only `cpuinfo_max_freq`
+sysfs read + `sched_setaffinity` worker pinning). All three task-reviewed clean;
+final whole-branch review APPROVE FOR MERGE; host byte-identity preserved; arm64
+`assembleDebug`/`assembleRelease` build clean. (The plan's original
+`pthread_setaffinity_np` is glibc-only and absent from Android Bionic; it was
+swapped during implementation to `pthread_gettid_np()` + `sched_setaffinity()`,
+which is what the design spec itself specified — more spec-faithful than the plan.)
+
+**Device topology actually read on-device** (validates the frequency-based design
+over any hardcoded core-index guess): `cpuinfo_max_freq` = cpu0/1 @ 2.27 GHz
+(efficiency, lowest cluster → excluded), cpu5/6 @ 2.96 GHz, cpu2/3/4 @ 3.15 GHz,
+cpu7 @ 3.30 GHz (prime). `selectWorkerCores()` → `{2,3,4,5,6,7}` (6 non-efficiency
+cores) → `workerThreadCount(6,4)` = **5 workers pinned to those 6 cores**, the two
+efficiency cores untouched — exactly as designed. Note the spec/plan had *assumed*
+efficiency = cpu6/7 and prime = cpu0; this chip is the reverse. Because selection
+keys on frequency, not index, it still picked the right cluster — a hardcoded-index
+approach would have pinned to the wrong cores here.
+
+Same methodology as prior rounds (same device `24030PN60G`, same 4096×3072@24fps,
+compression confirmed genuinely ON via each recorded file's own `packMode=3`
+header, written frame count read from the finalized `frameCount` header field):
+
+- **Run 1: 805 written / 218 dropped** (1023 arrivals, ~43s) — **78.7% landing**.
+- **Run 2: 714 written / 230 dropped** (944 arrivals, ~40s) — **75.6% landing**.
+- Both: `packMode=3`, 4096×3072, 24/1 fps, finalized `frameCount` matches the
+  in-app toast, no native crash (`logcat -b crash` clean for `com.shez.rawcam`;
+  the only tombstone in the session was an unrelated Instagram crash), and no
+  `sched_setaffinity` failure logged (the best-effort pin applied without error;
+  the code logs only on failure).
+
+**Result: no measured landing-rate improvement over stage 2** (~77% avg vs stage
+2's 80.6% — flat to marginally lower).
+
+**Major confound — the comparison is NOT apples-to-apples.** Both stage-3 runs saw
+a **stable arrival rate of ~24 frames/s** (1023/43 and 944/40), whereas the
+stage-2 baseline saw **~41 frames/s** (1655 arrivals / ~40s). The whole
+capture+encode pipeline delivered far fewer frames this session — i.e. it was
+globally throttled: device at **~38 °C / 19 % battery / actively charging**, with
+background-app notifications arriving mid-run. Under global throttling the camera's
+delivery rate and the encoder's write rate scale down together, which roughly
+preserves the landing *ratio* — consistent with the observed ~flat landing despite
+a much lighter (and non-comparable) input load. Encoder write throughput was ~18
+frames/s this session vs stage 2's ~33/s, but that gap is dominated by the
+throttled state, not attributable to the code change.
+
+**What can be concluded:**
+- The topology detection + affinity pinning works correctly on real hardware (right
+  cluster selected by frequency, applied without error, no crash, output still a
+  valid `packMode=3` compressed clip).
+- This checkpoint did **not** demonstrate the intended throughput gain, but neither
+  can it cleanly *rule one out*: the device was throttled to ~24 fps arrivals
+  (~half stage 2's ~41 fps), so the 5-worker pinned pool was never exercised under
+  a comparable saturating load.
+- Suggestive (not conclusive) read, echoing round 3's "threading alone was flat":
+  adding a 5th worker + big-core affinity did not visibly help, consistent with
+  dispatch+wait being **memory-bandwidth-bound rather than core-count-bound**. If
+  that holds, NEON (the last approved round — it cuts the per-band *arithmetic*
+  itself) is a better remaining lever than more parallelism.
+
+**Recommended before a firm verdict / before scoping NEON:** re-run this checkpoint
+on a **cool, unplugged device** (to restore the ~41 fps arrival load and remove
+thermal throttling), or add temporary `std::chrono` dispatch+wait phase
+instrumentation to measure per-frame compute time directly with 5 pinned workers
+vs the old 4 unpinned. Either separates "topology tuning genuinely doesn't help"
+from "this session was throttled." **The 0-dropped-frames bar remains unmet.**
+
 ## Conclusion
 
 **Still not ready to ship**, after five rounds of work (four throughput
