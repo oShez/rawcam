@@ -564,6 +564,30 @@ instrumentation to measure per-frame compute time directly with 5 pinned workers
 vs the old 4 unpinned. Either separates "topology tuning genuinely doesn't help"
 from "this session was throttled." **The 0-dropped-frames bar remains unmet.**
 
+### Phase-profiling follow-up — STAGED, blocked on device (2026-08-07)
+
+User chose "add dispatch+wait phase profiling first" (over an immediate cool-device
+re-run, proceeding to NEON, or reconsidering shipping). Temporary `std::chrono`
+instrumentation was written into `core/src/rawv_codec.cpp`: it times the exact
+dispatch+wait phase in `computeBands()` (the job-setup → `cvStart_.notify_all()` →
+`cvDone_.wait()` span, excluding the slot-claim backpressure wait above it) and
+logs a cumulative average every 50 frames under logcat tag `rawv_prof`, plus a
+runtime A/B toggle via the Android debug property `debug.rawv.legacy` (`0` = shipped
+5-workers-pinned config, `1` = legacy 4-workers-unpinned) read in the constructor.
+Instrumented `assembleRelease` built successfully. **The `24030PN60G` then dropped
+off USB before the APK could be installed, so neither A/B pass ran** — no per-frame
+numbers were collected this session.
+
+The instrumentation was reverted so `main` stays clean at `d3f1859`; the exact diff
+is saved as `.superpowers/sdd/2026-08-06-rawv-codec-round4-thread-topology-tuning/phase-profiling-instrumentation.patch`.
+**To resume:** reconnect + unlock the device, `git apply` that patch (or reuse the
+already-built instrumented `app-release.apk` if still present), then for each config
+`adb shell setprop debug.rawv.legacy 0|1` → force-stop → relaunch → record ~30s →
+read the `rawv_prof` "dispatch+wait avg" line (and the `ctor threadCount=` line to
+confirm 5 vs 4). A meaningfully lower per-frame dispatch+wait at 5-pinned ⇒
+core-count-bound (topology tuning helps, was masked by throttling); ≈ equal ⇒
+memory-bandwidth-bound (NEON is the better remaining lever than more parallelism).
+
 ## Conclusion
 
 **Still not ready to ship**, after five rounds of work (four throughput
