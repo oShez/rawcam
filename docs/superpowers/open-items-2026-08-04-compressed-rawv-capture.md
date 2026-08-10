@@ -588,6 +588,59 @@ confirm 5 vs 4). A meaningfully lower per-frame dispatch+wait at 5-pinned ⇒
 core-count-bound (topology tuning helps, was masked by throttling); ≈ equal ⇒
 memory-bandwidth-bound (NEON is the better remaining lever than more parallelism).
 
+### Phase-profiling A/B — RUN, result: pinning helps ~5-6%, near a bandwidth ceiling (2026-08-11)
+
+The device (`24030PN60G` = **Xiaomi 14 Ultra**, Snapdragon 8 Gen 3, the same
+hardware) reconnected and the A/B ran to completion. Main cam confirmed 14-bit
+(`whiteLevel=16383`), `packMode=3`, 4096×3072@24fps, compression on.
+
+**Two obstacles had to be cleared first (note for future on-device work):**
+1. **HyperOS drops third-party apps' own logcat tags.** The `rawv_prof`
+   `__android_log_print` lines never appeared (a shell-emitted `rawv_prof` line
+   did, and the app's ART-runtime logs did — only the app's *own* tag was
+   dropped). Worked around by having the instrumentation also write each line to
+   a file, `…/files/clips/rawv_prof.log`, pulled via adb. Note: a plain
+   `fopen(...,"a")` (`O_APPEND|O_WRONLY`) silently failed on this device's FUSE
+   mount; a raw `open(O_CREAT|O_TRUNC|O_WRONLY,0644)` (the clip writer's flags)
+   succeeded. Also, `::open` fails to compile under Bionic `_FORTIFY_SOURCE=2`
+   (open is a fortify macro) — use unqualified `open`.
+2. **Settings → "Compress recordings" was OFF**, so early runs recorded Raw16
+   (`packMode=0`) with no encoder constructed and no profiling output at all.
+   Had to toggle it back on (left on). Always verify `packMode@20 == 3` on the
+   recorded clip before trusting an encoder measurement.
+
+**Numbers (cumulative dispatch+wait average, same scene, back-to-back ~35s clips):**
+
+| frames | A: 4 unpinned (`legacy=1`, ctor `threadCount=4 pinnedCores=0`) | B: 5 pinned (`legacy=0`, ctor `threadCount=5 pinnedCores=6`) |
+|---|---|---|
+| 50  | 45.66 ms | **42.78 ms** |
+| 200 | 46.13 ms | 44.82 ms |
+| 400 | 47.41 ms | 45.89 ms |
+| 600 | 49.21 ms | 47.11 ms |
+
+**B (the shipped 5-pinned config) is faster at every matched frame count by
+~2-3 ms/frame (~5-6%)** — and B ran with a *thermal handicap* (immediately after
+A, starting already saturated at ~90 °C on CPU2-4), so ~2-3 ms is a conservative
+lower bound. The within-run upward drift (both sides) is live throttling.
+
+**Interpretation — this resolves the "flat stage 3" question:**
+- Stage 3 (topology tuning) is a **real gain**, not flat. The 2026-08-06 on-device
+  checkpoint that showed ~no improvement was throttling + the noisy landing-rate
+  ratio masking a genuine ~5-6% compute win. **Keep 5-pinned shipped.**
+- But the gain is **strongly sublinear**: +25% workers (4→5) bought only ~5-6%,
+  with diminishing returns already visible on the 5th worker. That is the
+  signature of a **memory-bandwidth ceiling**, not core starvation — so adding
+  more threads (6th worker, efficiency cores) will not close the gap. Both configs
+  still exceed the 41.6 ms budget (B: 42.8 ms cold → 47 ms hot).
+- **Decision the data supports:** the remaining levers must cut *work/data per
+  sample*, not core count. **NEON** on the fused predict+residual+Rice inner loop
+  is the right next round; **12-bit truncation** (drop 2 LSBs → ~2 fewer bits/sample
+  for the Rice coder, est. ~20-25% smaller output *and* less encode work, lossy but
+  near-visually-lossless at base ISO) stacks on top. More parallelism is a dead end.
+
+Instrumentation reverted (main clean); device restored to the shipped
+non-instrumented APK; test clips + `rawv_prof.log` deleted.
+
 ## Conclusion
 
 **Still not ready to ship**, after five rounds of work (four throughput
