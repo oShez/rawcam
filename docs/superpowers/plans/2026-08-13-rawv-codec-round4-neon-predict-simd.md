@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Vectorize the MED predict + residual + zigzag in the compressed-`.rawv`
-encoder's hot loop with ARM NEON (host-tested via an `ARM_NEON_2_SSE` shim), as a pure
+encoder's hot loop with ARM NEON (host-tested via an `ARM_NEON_2_x86_SSE` shim), as a pure
 bit-exact performance change, to cut per-frame Compute time at 4096×3072@24 fps.
 
 **Architecture:** A new bit-exact vectorized primitive `computeInteriorResidualsRow`
@@ -13,10 +13,10 @@ time); `ParallelFrameEncoder::computeAndPackBand` calls it for interior samples
 edge rows, and the vector tail stay scalar via the existing `predictAt`. The
 scalar `encodeFrame` is untouched and serves as the byte-for-byte oracle the host
 `ctest` asserts against. On x86 the identical intrinsic code compiles/runs under
-`ARM_NEON_2_SSE` (SSE4.1), so the host bit-exact assertion genuinely guards the NEON path.
+`ARM_NEON_2_x86_SSE` (SSE4.1), so the host bit-exact assertion genuinely guards the NEON path.
 
 **Tech Stack:** C++17, ARM NEON (`arm_neon.h`) on-device, `NEON_2_SSE.h` (single
-BSD-2-Clause header, from `intel/ARM_NEON_2_SSE`) on host, doctest, CMake + Ninja.
+BSD-2-Clause header, from `intel/ARM_NEON_2_x86_SSE`) on host, doctest, CMake + Ninja.
 Host toolchain: MSYS2 mingw64 g++.
 Android: Gradle NDK arm64 build.
 
@@ -29,7 +29,7 @@ Android: Gradle NDK arm64 build.
   output must equal scalar `encodeFrame` output **byte-for-byte**; `encode → decode
   == input` must hold losslessly. Any single-byte diff is a failure.
 - **Integer-ops-only in the vector path.** No float/reciprocal intrinsics — that is
-  what keeps SSE (`ARM_NEON_2_SSE`) and NEON bit-identical. Only add/sub/min/max/shift/xor
+  what keeps SSE (`ARM_NEON_2_x86_SSE`) and NEON bit-identical. Only add/sub/min/max/shift/xor
   on `int32x4_t`.
 - **int32 lanes.** Widen samples uint16→int32; 4 lanes per 128-bit register. `r<<1`
   reaches ±65532 (overflows int16), so int32 is mandatory.
@@ -40,7 +40,7 @@ Android: Gradle NDK arm64 build.
 - **`main` stays clean of throwaway instrumentation** (Task 0 / Task 4 device
   timing patches are reverted and saved as `.patch` files, never committed to `main`).
 - **Host build:** MSYS2 mingw64 g++ + Ninja; host vector flag `-msse4.1`
-  (`ARM_NEON_2_SSE` needs SSE4.1). Configure: `cmake -S core -B core/build -G Ninja`.
+  (`ARM_NEON_2_x86_SSE` needs SSE4.1). Configure: `cmake -S core -B core/build -G Ninja`.
   Build: `cmake --build core/build`. Test: `ctest --test-dir core/build --output-on-failure`.
 - **`file(GLOB)` gotcha:** `core/CMakeLists.txt` globs `tests/*.cpp`. After ADDING a
   new test file you MUST re-run the configure step (`cmake -S core -B core/build`)
@@ -127,10 +127,10 @@ git commit -m 'docs: round 4 NEON step 0 -- on-device predict-vs-pack baseline'
 
 ---
 
-## Task 1: Vendor ARM_NEON_2_SSE + CMake wiring + host build go/no-go
+## Task 1: Vendor ARM_NEON_2_x86_SSE + CMake wiring + host build go/no-go
 
 Proves the `arm_neon.h`-style code compiles and links under mingw g++ via
-`ARM_NEON_2_SSE` (`intel/ARM_NEON_2_SSE`'s `NEON_2_SSE.h`, which implements the
+`ARM_NEON_2_x86_SSE` (`intel/ARM_NEON_2_x86_SSE`'s `NEON_2_SSE.h`, which implements the
 `arm_neon.h` intrinsic surface in terms of x86 SSE — the NEON→SSE direction this
 round needs). This is the Option-B go/no-go: if it can't build clean here, STOP
 and escalate with the exact compiler/linker error (accept a documented
@@ -157,7 +157,7 @@ byte-preserving download (do NOT pipe through Set-Content):
 ```bash
 mkdir -p core/third_party/neon2sse
 curl -L -o core/third_party/neon2sse/NEON_2_SSE.h \
-  https://raw.githubusercontent.com/intel/ARM_NEON_2_SSE/master/NEON_2_SSE.h
+  https://raw.githubusercontent.com/intel/ARM_NEON_2_x86_SSE/master/NEON_2_SSE.h
 ```
 
 Verify it's the real header (contains `_NEON2SSE_INLINE`) and is not HTML/error text.
@@ -177,12 +177,12 @@ sched/pthread block stays), ADD:
 #endif
 ```
 
-- [ ] **Step 3: Wire CMake — host-only ARM_NEON_2_SSE include + define + flag**
+- [ ] **Step 3: Wire CMake — host-only ARM_NEON_2_x86_SSE include + define + flag**
 
 In `core/CMakeLists.txt`, after `target_include_directories(rawcam_core PUBLIC include)`:
 
 ```cmake
-# Host (non-Android) builds get the ARM_NEON_2_SSE shim so the SIMD path in
+# Host (non-Android) builds get the ARM_NEON_2_x86_SSE shim so the SIMD path in
 # rawv_codec.cpp compiles and runs (as SSE4.1) under ctest -- the byte-for-byte
 # bit-exact assertion then genuinely guards the on-device NEON path. On Android,
 # arm_neon.h is used directly (auto-detected via __ARM_NEON); no shim, no flag.
@@ -218,7 +218,7 @@ same guard and checks the ops we rely on are bit-exact on this toolchain:
   #define RAWV_HAVE_NEON 1
 #endif
 
-TEST_CASE("ARM_NEON_2_SSE/NEON integer ops are bit-exact for our predictor kernel") {
+TEST_CASE("ARM_NEON_2_x86_SSE/NEON integer ops are bit-exact for our predictor kernel") {
 #if RAWV_HAVE_NEON
   // left/up/upleft/actual chosen so clamp engages both bounds and one lane
   // yields a negative residual (exercises the arithmetic shift in zigzag).
@@ -264,7 +264,7 @@ have altered scalar behavior).
 
 ```bash
 git add core/third_party/neon2sse/NEON_2_SSE.h core/CMakeLists.txt core/src/rawv_codec.cpp core/tests/test_rawv_simd_spike.cpp
-git commit -m 'build: vendor ARM_NEON_2_SSE + host SIMD wiring, bit-exact op spike (round 4 NEON)'
+git commit -m 'build: vendor ARM_NEON_2_x86_SSE + host SIMD wiring, bit-exact op spike (round 4 NEON)'
 ```
 
 ---
@@ -351,7 +351,7 @@ Add the load helper in the anonymous namespace:
 ```cpp
 #if RAWV_HAVE_NEON
 // Loads 4 consecutive uint16 samples and zero-extends to int32x4. Valid on both
-// arm_neon.h and ARM_NEON_2_SSE (integer-only, bit-exact on both).
+// arm_neon.h and ARM_NEON_2_x86_SSE (integer-only, bit-exact on both).
 static inline int32x4_t loadU16x4AsS32(const uint16_t* p) {
   return vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p)));
 }
@@ -390,7 +390,7 @@ void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
 `vmaxq_s32(vminq_s32(l,u), vminq_s32(linear, vmaxq_s32(l,u)))` is exactly
 `std::clamp(linear, min(l,u), max(l,u))` = `medPredict`. `vshlq_n_s32(r,1)` shifts the
 raw bits (matches scalar `uint32_t(r)<<1`); `vshrq_n_s32(r,31)` is an arithmetic shift
-(matches scalar `int32_t r >> 31` sign fill). All integer ops → SSE-exact under ARM_NEON_2_SSE.
+(matches scalar `int32_t r >> 31` sign fill). All integer ops → SSE-exact under ARM_NEON_2_x86_SSE.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -539,7 +539,7 @@ Replace the double `for` loop body (`rawv_codec.cpp:432-439`) with fill-then-pac
 
 Run: `cmake --build core/build && ctest --test-dir core/build --output-on-failure`
 Expected: ALL PASS — the new matrix, every pre-existing `encodeFrame`-equality test
-(these now run the SIMD path via ARM_NEON_2_SSE and are the primary NEON guard), and all
+(these now run the SIMD path via ARM_NEON_2_x86_SSE and are the primary NEON guard), and all
 round-trip/overflow/backpressure tests.
 
 - [ ] **Step 7: Commit**
@@ -565,7 +565,7 @@ baseline.
 
 Run the Android build (`./gradlew :app:assembleDebug :app:assembleRelease` or the repo
 command). Confirm both build clean — the `#if defined(__ARM_NEON)` branch compiles
-`arm_neon.h` intrinsics with no ARM_NEON_2_SSE involved.
+`arm_neon.h` intrinsics with no ARM_NEON_2_x86_SSE involved.
 
 - [ ] **Step 2: On-device lossless round-trip check**
 
@@ -627,7 +627,7 @@ Skip and close the round if Task 4 already meets the goal or shows no further he
 - §4 exact math (int32, clamp=med, zigzag shifts) → Task 2 Step 4 code. ✓
 - §5 edges (y<2 rows, x<2 cols, tail) → Task 3 Step 5 (`edgeCols`, y<2 branch) + Task 2
   tail loop; tiny widths in Task 2 & 3 matrices. ✓
-- §5/§6 ARM_NEON_2_SSE host testability → Task 1 (wiring + spike), all equality tests. ✓
+- §5/§6 ARM_NEON_2_x86_SSE host testability → Task 1 (wiring + spike), all equality tests. ✓
 - §6 test matrix (content/bitDepth/dims/threadCount + round-trip) → Task 3 Step 1. ✓
 - §7 on-device protocol (file logging, packMode/whiteLevel checks, cool device) →
   Tasks 0 & 4. ✓

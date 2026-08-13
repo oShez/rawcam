@@ -122,7 +122,7 @@ reaches ±65532, which overflows int16 — so **int32 is mandatory**, 4 lanes pe
 scalar). `vshrq_n_s32(r, 31)` is an *arithmetic* right shift producing the sign
 mask, matching scalar `v >> 31` on a signed int32.
 
-Every op above has an exact SSE4.1 equivalent under `ARM_NEON_2_SSE`
+Every op above has an exact SSE4.1 equivalent under `ARM_NEON_2_x86_SSE`
 (`_mm_min_epi32`, `_mm_max_epi32`, `_mm_add/sub_epi32`, `_mm_slli/srai_epi32`,
 `_mm_xor_si128`). Therefore **host-SSE output == device-NEON output == scalar
 output**, byte-for-byte.
@@ -160,7 +160,7 @@ across:
 - Plus the existing round-trip `encode → decode == input` assertions on the same
   inputs.
 
-On the host this suite runs the vector path **via `ARM_NEON_2_SSE` (SSE)** and is the
+On the host this suite runs the vector path **via `ARM_NEON_2_x86_SSE` (SSE)** and is the
 primary NEON correctness guard. On device the same equality is confirmed by a
 round-trip decode of a real recorded clip. Any single byte diff fails the gate.
 
@@ -192,7 +192,7 @@ and like-for-like.
 
 **Gate — must all pass:**
 
-- Host bit-exact across the full §6 matrix (vector path via `ARM_NEON_2_SSE`).
+- Host bit-exact across the full §6 matrix (vector path via `ARM_NEON_2_x86_SSE`).
 - Device round-trip lossless on a real recorded `packMode=3` clip.
 - arm64 `assembleDebug` and `assembleRelease` build clean; host `ctest` clean.
 - Integer-ops-only rule respected (no float/reciprocal intrinsics).
@@ -211,7 +211,7 @@ the round-5 12-bit-truncation decision.
 
 0. **Measurement spike** (throwaway): predict-vs-pack + pass-1/band-pack/merge
    instrumentation; run on device; record ceiling + baseline; revert; save patch.
-1. **`ARM_NEON_2_SSE` go/no-go spike:** vendor `third_party/neon2sse/NEON_2_SSE.h`; wire
+1. **`ARM_NEON_2_x86_SSE` go/no-go spike:** vendor `third_party/neon2sse/NEON_2_SSE.h`; wire
    host CMake (`RAWV_USE_NEON2SSE`, `-msse4.1` or toolchain equivalent); prove
    one vector op compiles and runs bit-exact under the actual host SDK CMake
    toolchain. If it fails to build cleanly, escalate (clang-cl / documented
@@ -242,7 +242,7 @@ the round-5 12-bit-truncation decision.
 - **SIMD style: portable `std::experimental::simd` / `vector_size` (Option C)** —
   viable and lighter (no vendored header), but `std::simd` availability is
   spotty on the NDK/libc++ and codegen is less predictable than hand-NEON.
-  Chosen against in favor of Option B (`arm_neon.h` intrinsics + `ARM_NEON_2_SSE` host
+  Chosen against in favor of Option B (`arm_neon.h` intrinsics + `ARM_NEON_2_x86_SSE` host
   shim), which gives real hand-written NEON on-device *and* the identical code
   under the host bit-exact assertion.
 - **Micro-structure: predict-only NEON (Approach 3)** — rejected; zigzag is two
