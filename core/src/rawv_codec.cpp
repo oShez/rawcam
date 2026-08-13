@@ -14,6 +14,14 @@
 #include <cerrno>
 #endif
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  #include <arm_neon.h>
+  #define RAWV_HAVE_NEON 1
+#elif defined(RAWV_USE_NEON2SSE)
+  #include "NEON_2_SSE.h"
+  #define RAWV_HAVE_NEON 1
+#endif
+
 namespace rawcam {
 namespace {
 
