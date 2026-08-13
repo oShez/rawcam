@@ -380,6 +380,8 @@ ParallelFrameEncoder::ParallelFrameEncoder(uint32_t width, uint32_t height, uint
     bandBits_[s].resize(threadCount_, 0);
     bandPtrs_[s].resize(threadCount_);
   }
+  zScratch_.resize(threadCount_);
+  for (auto& v : zScratch_) v.resize(width_);
 
   workers_.reserve(threadCount_);
   for (uint32_t i = 0; i < threadCount_; i++) {
@@ -445,12 +447,26 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
   BitWriter bw(bandBufs_[slot][bandIndex].data(),
                static_cast<uint32_t>(bandBufs_[slot][bandIndex].size()));
   bool ok = true;
+  uint32_t* z = zScratch_[bandIndex].data();
   for (uint32_t y = bandStart; y < bandEnd && ok; y++) {
+    const uint16_t* row = jobRaw16_ + static_cast<size_t>(y) * jobRowStrideSamples_;
+    // Fill z[0..width_) for this row.
+    uint32_t edgeCols = std::min(2u, width_);  // x = 0,1 have no same-color left
+    if (y < 2) {
+      // No same-color row above -> whole row uses the scalar edge predictor.
+      for (uint32_t x = 0; x < width_; x++)
+        z[x] = zigzagEncode(static_cast<int32_t>(row[x]) -
+                            predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_));
+    } else {
+      for (uint32_t x = 0; x < edgeCols; x++)
+        z[x] = zigzagEncode(static_cast<int32_t>(row[x]) -
+                            predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_));
+      // Interior x >= 2, y >= 2: vectorized (scalar fallback inside if no NEON).
+      computeInteriorResidualsRow(jobRaw16_, y, jobRowStrideSamples_, 2, width_, z);
+    }
+    // Pack the row (unchanged Rice/BitWriter path -> bit-exact by construction).
     for (uint32_t x = 0; x < width_; x++) {
-      int32_t actual = jobRaw16_[y * jobRowStrideSamples_ + x];
-      int32_t predicted = predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_);
-      uint32_t z = zigzagEncode(actual - predicted);
-      if (!bw.writeRice(z, jobK_)) { ok = false; break; }
+      if (!bw.writeRice(z[x], jobK_)) { ok = false; break; }
     }
   }
   // Capture the exact bit count BEFORE finishedBytes() -- see this file's

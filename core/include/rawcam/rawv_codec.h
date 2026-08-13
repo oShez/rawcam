@@ -145,6 +145,11 @@ class ParallelFrameEncoder {
   // slot's workers have finished. bandPtrs_ is per-slot merge scratch,
   // rebuilt (not reallocated) at the top of each mergeSlot() call.
   std::vector<std::vector<uint8_t>> bandBufs_[kSlotCount];
+  // Per-band scratch holding one row's zigzag-encoded residuals: filled by the
+  // (NEON) predict+zigzag pass in computeAndPackBand, then drained into the Rice
+  // packer. One vector per band index (each worker only ever touches its own
+  // band, and generations never overlap on a band), width_ entries each. Round 4.
+  std::vector<std::vector<uint32_t>> zScratch_;
   std::vector<uint64_t> bandBits_[kSlotCount];
   std::vector<const uint8_t*> bandPtrs_[kSlotCount];
   // Set by computeBands() (Compute thread), read by mergeSlot() (possibly
