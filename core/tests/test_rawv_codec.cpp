@@ -118,6 +118,36 @@ TEST_CASE("round-trips dimensions not evenly divisible by the k-sampling stride"
   CHECK(roundTrips(src, 63, 65, 12));
 }
 
+static int32_t medRef(int32_t l, int32_t u, int32_t ul) {
+  int32_t lin = l + u - ul, lo = std::min(l, u), hi = std::max(l, u);
+  return std::max(lo, std::min(lin, hi));
+}
+static uint32_t zzRef(int32_t v) {
+  return (static_cast<uint32_t>(v) << 1) ^ static_cast<uint32_t>(v >> 31);
+}
+
+TEST_CASE("computeInteriorResidualsRow matches scalar predictor+zigzag (vectorized path)") {
+  // Widths chosen to exercise the 4-lane body AND a scalar tail of every size
+  // 0..3: interior length = width-2, so widths 6,7,8,9 give tails 0,1,2,3.
+  const uint32_t widths[] = {6, 7, 8, 9, 33, 64, 100};
+  for (uint32_t width : widths) {
+    const uint32_t height = 8, bitDepth = 14;
+    std::srand(9876 + width);
+    auto src = makeFrame(width, height, bitDepth, [](uint32_t, uint32_t, uint16_t maxVal) {
+      return static_cast<uint16_t>(std::rand() % (maxVal + 1));
+    });
+    for (uint32_t y = 2; y < height; y++) {  // interior rows only (y >= 2)
+      std::vector<uint32_t> got(width, 0xDEADBEEFu);
+      computeInteriorResidualsRow(src.data(), y, width, 2, width, got.data());
+      for (uint32_t x = 2; x < width; x++) {
+        int32_t p = medRef(src[y * width + x - 2], src[(y - 2) * width + x], src[(y - 2) * width + x - 2]);
+        uint32_t want = zzRef(static_cast<int32_t>(src[y * width + x]) - p);
+        CHECK(got[x] == want);
+      }
+    }
+  }
+}
+
 TEST_CASE("ParallelFrameEncoder (round 4: band-parallel write) produces byte-identical output to encodeFrame") {
   // 512x512 with threadCount forced to 4 guarantees a real multi-band split
   // and exercises the merge step across real band boundaries.

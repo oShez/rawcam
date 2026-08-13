@@ -296,6 +296,14 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
   return k;
 }
 
+#if RAWV_HAVE_NEON
+// Loads 4 consecutive uint16 samples and zero-extends to int32x4. Valid on both
+// arm_neon.h and ARM_NEON_2_x86_SSE (integer-only, bit-exact on both).
+static inline int32x4_t loadU16x4AsS32(const uint16_t* p) {
+  return vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p)));
+}
+#endif
+
 #ifdef __ANDROID__
 // Reads /sys/.../cpuN/cpufreq/cpuinfo_max_freq for each core [0, hw). Returns
 // one entry per core in kHz, or -1 for any core whose file is missing/
@@ -598,6 +606,31 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
     }
   }
   return true;
+}
+
+void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
+                                 uint32_t rowStrideSamples, uint32_t xStart,
+                                 uint32_t xEnd, uint32_t* zOut) {
+  const uint16_t* cur = plane + static_cast<size_t>(y) * rowStrideSamples;
+  const uint16_t* up = plane + static_cast<size_t>(y - 2) * rowStrideSamples;
+  uint32_t x = xStart;
+#if RAWV_HAVE_NEON
+  for (; x + 4 <= xEnd; x += 4) {
+    int32x4_t a = loadU16x4AsS32(cur + x);
+    int32x4_t l = loadU16x4AsS32(cur + x - 2);
+    int32x4_t u = loadU16x4AsS32(up + x);
+    int32x4_t ul = loadU16x4AsS32(up + x - 2);
+    int32x4_t linear = vsubq_s32(vaddq_s32(l, u), ul);
+    int32x4_t pred = vmaxq_s32(vminq_s32(l, u), vminq_s32(linear, vmaxq_s32(l, u)));
+    int32x4_t r = vsubq_s32(a, pred);
+    int32x4_t z = veorq_s32(vshlq_n_s32(r, 1), vshrq_n_s32(r, 31));
+    vst1q_u32(zOut + x, vreinterpretq_u32_s32(z));
+  }
+#endif
+  for (; x < xEnd; x++) {
+    zOut[x] = zigzagEncode(static_cast<int32_t>(cur[x]) -
+                           medPredict(cur[x - 2], up[x], up[x - 2]));
+  }
 }
 
 }  // namespace rawcam

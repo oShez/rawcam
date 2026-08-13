@@ -32,6 +32,17 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint16_t* out, uint32_t width, uint32_t height,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
 
+// Fills zOut[x] for x in [xStart, xEnd) (requires xStart >= 2 and y >= 2, so
+// every sample has same-color left/up/upleft neighbors) with the zigzag-encoded
+// MED/LOCO-I residual for row y of `plane` (rowStrideSamples samples per row).
+// Bit-identical to zigzagEncode(plane[y*s+x] - medPredict(plane[y*s+x-2],
+// plane[(y-2)*s+x], plane[(y-2)*s+x-2])). NEON when RAWV_HAVE_NEON, scalar
+// otherwise; both produce identical bytes. Exposed so host tests can assert the
+// vectorized path against the scalar predictor directly.
+void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
+                                 uint32_t rowStrideSamples, uint32_t xStart,
+                                 uint32_t xEnd, uint32_t* zOut);
+
 // Given each CPU core's max frequency in kHz (one entry per core; -1 for a
 // core whose frequency couldn't be read), returns the indices of every core
 // NOT in the lowest-frequency cluster -- i.e. the "big + middle" cores worth
