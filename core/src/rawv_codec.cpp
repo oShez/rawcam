@@ -81,6 +81,30 @@ class BitWriter {
     return true;
   }
 
+  // Bytes of output capacity not yet consumed by fully-flushed bytes. Ignores
+  // the <8 pending accumulator bits (a conservative under-count -> safe for the
+  // once-per-row headroom check in computeAndPackBand).
+  uint64_t remainingBytes() const { return capacity_ - bytePos_; }
+
+  // Unchecked twin of writeBits: identical bit output, no capacity guard. Only
+  // safe when the caller has proven headroom (see computeAndPackBand's per-row
+  // worstCaseRiceRowBytes check).
+  void putUnchecked(uint32_t bits, uint32_t nbits) {
+    if (nbits == 0) return;
+    acc_ = (acc_ << nbits) | static_cast<uint64_t>(bits & maskFor(nbits));
+    accBits_ += nbits;
+    while (accBits_ >= 8) { accBits_ -= 8; buf_[bytePos_++] = static_cast<uint8_t>(acc_ >> accBits_); }
+  }
+
+  // Unchecked twin of writeRice: bit-identical to writeRice (same q==0 fast path).
+  void writeRiceUnchecked(uint32_t value, uint32_t k) {
+    uint32_t q = value >> k;
+    if (q == 0) { putUnchecked(value, k + 1); return; }
+    while (q >= 32) { putUnchecked(0xFFFFFFFFu, 32); q -= 32; }
+    putUnchecked((((1u << q) - 1u) << 1), q + 1);
+    if (k > 0) putUnchecked(value, k);
+  }
+
   // Flushes any partial byte (zero-padded, matching the pre-zeroed-buffer
   // padding semantics the per-bit version relied on) and returns the total
   // bytes written. Not const: the flush is a real write, deferred from
@@ -455,6 +479,11 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
                static_cast<uint32_t>(bandBufs_[slot][bandIndex].size()));
   bool ok = true;
   uint32_t* z = zScratch_[bandIndex].data();
+  // Per-row headroom bound: if the band buffer has at least this many bytes free,
+  // the whole row provably fits, so pack it with the unchecked fast path (no
+  // per-append capacity branch). The +1 margin at the call site covers the <8
+  // bits the accumulator may carry over from the prior row.
+  const uint64_t worstRowBytes = worstCaseRiceRowBytes(width_, jobBitDepth_, jobK_);
   for (uint32_t y = bandStart; y < bandEnd && ok; y++) {
     const uint16_t* row = jobRaw16_ + static_cast<size_t>(y) * jobRowStrideSamples_;
     // Fill z[0..width_) for this row.
@@ -471,9 +500,15 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
       // Interior x >= 2, y >= 2: vectorized (scalar fallback inside if no NEON).
       computeInteriorResidualsRow(jobRaw16_, y, jobRowStrideSamples_, 2, width_, z);
     }
-    // Pack the row (unchanged Rice/BitWriter path -> bit-exact by construction).
-    for (uint32_t x = 0; x < width_; x++) {
-      if (!bw.writeRice(z[x], jobK_)) { ok = false; break; }
+    // Pack the row -- bit-exact either way. Fast path when the row provably fits
+    // (no per-append capacity branch); checked writeRice near the buffer end (or
+    // for tiny-k frames where the bound saturates), which sets jobOverflowed_.
+    if (worstRowBytes != UINT64_MAX && bw.remainingBytes() >= worstRowBytes + 1) {
+      for (uint32_t x = 0; x < width_; x++) bw.writeRiceUnchecked(z[x], jobK_);
+    } else {
+      for (uint32_t x = 0; x < width_; x++) {
+        if (!bw.writeRice(z[x], jobK_)) { ok = false; break; }
+      }
     }
   }
   // Capture the exact bit count BEFORE finishedBytes() -- see this file's
@@ -560,6 +595,19 @@ uint32_t ParallelFrameEncoder::mergeSlot(uint32_t slot, uint8_t* out, uint32_t o
   }
   slotCv_.notify_all();
   return result;
+}
+
+uint64_t worstCaseRiceRowBytes(uint32_t width, uint32_t bitDepth, uint32_t k) {
+  if (width == 0) return 0;
+  // zigzag(residual) < 2^(bitDepth+1) => q = value>>k < 2^(bitDepth+1-k). Take
+  // maxQ = 2^qExp as a (conservative, off-by-<=1) upper bound on q; the codeword
+  // is q ones + a 0 terminator + k remainder bits <= (maxQ + 1 + k) bits.
+  uint32_t qExp = (bitDepth + 1u > k) ? (bitDepth + 1u - k) : 0u;
+  if (qExp >= 40) return UINT64_MAX;  // bound too large to be useful -> checked path
+  uint64_t maxQ = static_cast<uint64_t>(1) << qExp;
+  uint64_t maxCodewordBits = maxQ + 1u + k;
+  if (maxCodewordBits > (UINT64_MAX - 7) / width) return UINT64_MAX;
+  return (static_cast<uint64_t>(width) * maxCodewordBits + 7) / 8;
 }
 
 uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,

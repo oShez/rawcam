@@ -292,12 +292,42 @@ TEST_CASE("Rice q=0 fast path: encoder stays byte-identical to encodeFrame and r
   }
 }
 
+TEST_CASE("worstCaseRiceRowBytes is a conservative upper bound on a packed row") {
+  using rawcam::worstCaseRiceRowBytes;
+  // k=9, 14-bit: qExp = 15-9 = 6 -> maxQ=64, codeword <= 74 bits/sample.
+  CHECK(worstCaseRiceRowBytes(8, 14, 9) == (8ull * (64 + 1 + 9) + 7) / 8);      // 74
+  CHECK(worstCaseRiceRowBytes(4096, 14, 9) == (4096ull * 74 + 7) / 8);          // 37888
+  // k >= bitDepth+1 -> qExp clamps to 0 -> maxQ=1 -> codeword <= (k+2) bits.
+  CHECK(worstCaseRiceRowBytes(100, 14, 20) == (100ull * (1 + 1 + 20) + 7) / 8); // 275
+  // Smaller k => strictly larger (or equal) bound (monotonic).
+  CHECK(worstCaseRiceRowBytes(64, 12, 3) >= worstCaseRiceRowBytes(64, 12, 9));
+  // Small k on a wide frame -> a huge but finite bound (qExp=17), far larger than
+  // any real band buffer, so the per-row check falls back to the checked path.
+  CHECK(worstCaseRiceRowBytes(4096, 16, 0) == (4096ull * (131072 + 1) + 7) / 8);  // 67109376
+  CHECK(worstCaseRiceRowBytes(4096, 16, 0) > 4096ull * 3072 * 2);  // > full raw frame size
+  // The UINT64_MAX saturation guard triggers only for absurd bit depths (defensive).
+  CHECK(worstCaseRiceRowBytes(4096, 60, 0) == UINT64_MAX);
+}
+
 TEST_CASE("ParallelFrameEncoder returns 0 (caller falls back) when the merged output doesn't fit outCapacity") {
   auto src = makeFrame(64, 64, 16, [](uint32_t, uint32_t, uint16_t maxVal) { return maxVal; });
   ParallelFrameEncoder enc(64, 64, /*threadCount=*/4);
   std::vector<uint8_t> tiny(4);
   uint32_t n = enc.encode(src.data(), 64, 16, tiny.data(), static_cast<uint32_t>(tiny.size()));
   CHECK(n == 0);
+}
+
+TEST_CASE("Tier2: encoder still fails whole-frame on overflow when early rows took the fast path") {
+  const uint32_t width = 96, height = 96, bitDepth = 16;
+  // Incompressible-ish content so real output far exceeds the tight buffer below.
+  auto src = makeFrame(width, height, bitDepth, [](uint32_t x, uint32_t y, uint16_t maxVal) {
+    return static_cast<uint16_t>(((x * 2654435761u) ^ (y * 40503u)) & maxVal);
+  });
+  ParallelFrameEncoder enc(width, height, /*threadCount=*/4);
+  std::vector<uint8_t> tiny(width * height / 4);  // far too small -> must overflow
+  uint32_t n = enc.encode(src.data(), width, bitDepth, tiny.data(),
+                          static_cast<uint32_t>(tiny.size()));
+  CHECK(n == 0);  // whole-frame failure, no partial/corrupt result
 }
 
 TEST_CASE("ParallelFrameEncoder fails the whole frame (not a partial/corrupt result) when one band's content overflows its local buffer") {

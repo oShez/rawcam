@@ -32,6 +32,14 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint16_t* out, uint32_t width, uint32_t height,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
 
+// Upper bound (in bytes) on one packed Rice row for a frame of `bitDepth` at
+// Rice parameter `k`. zigzag(residual) < 2^(bitDepth+1) => q < 2^(bitDepth+1-k),
+// so each codeword is at most (q+1+k) bits. Conservative (may over-estimate q by
+// up to 1). Returns UINT64_MAX when the bound would overflow (tiny k) so the
+// caller falls back to the per-append-checked path. Exposed for host tests;
+// used by ParallelFrameEncoder to gate its per-row unchecked fast pack path.
+uint64_t worstCaseRiceRowBytes(uint32_t width, uint32_t bitDepth, uint32_t k);
+
 // Fills zOut[x] for x in [xStart, xEnd) (requires xStart >= 2 and y >= 2, so
 // every sample has same-color left/up/upleft neighbors) with the zigzag-encoded
 // MED/LOCO-I residual for row y of `plane` (rowStrideSamples samples per row).
