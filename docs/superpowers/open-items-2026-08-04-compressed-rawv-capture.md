@@ -669,3 +669,71 @@ NEON) target exactly that. Worth deciding explicitly whether to continue to
 those, or whether 19.4% loss is close enough to reconsider the
 ship-OFF-by-default option from the original open decision even before a
 sixth round.
+
+## Round 4 (NEON) — host portion COMPLETE & merge-clean; device A/B THERMALLY CONFOUNDED, predict was never the bottleneck (2026-08-17)
+
+**Host portion: done, bit-exact, merged to `main`.** Tasks 1-3 of the NEON plan
+(`docs/superpowers/plans/2026-08-13-rawv-codec-round4-neon-predict-simd.md`) are
+committed on `main` (`7ff2c9a` vendor `ARM_NEON_2_x86_SSE` shim + host SIMD wiring +
+bit-exact op spike; `82794a1` `computeInteriorResidualsRow` primitive; `4bd657b` wire
+it into `computeAndPackBand`). Every task individually reviewed clean, whole-branch
+final review CLEAN (0 Critical/Important). Host `ctest` 9/9 green — the pre-existing
+`encodeFrame`-equality tests now run the SIMD path via the shim, so the byte-for-byte
+oracle genuinely guards the on-device NEON path. **The format is unchanged and output
+is byte-identical to the scalar oracle** — this round adds zero risk to correctness.
+
+**Device A/B ran (2026-08-13, 24030PN60G / Xiaomi 14 Ultra), but the result is
+inconclusive and, read carefully, argues NEON is the wrong lever.** Method: one
+instrumented release build with a runtime `debug.rawv.scalar` toggle forcing the scalar
+tail (bit-identical output), NEON run first (cool), scalar run second, back-to-back
+~35 s clips, same scene, `packMode=3`, 14-bit. Cumulative-average per-phase timings
+(summed across the 5 band workers per frame, except `dispatchwait` which is wall-clock):
+
+| phase (ms) | NEON @50 (cold) | scalar @50 (cold) | NEON @600 | scalar @600 |
+|---|---|---|---|---|
+| predict     | 8.383  | 8.283  | 10.984  | 13.008  |
+| pack (writeRice, **unchanged** — control) | 96.045 | 98.907 | 122.809 | 145.090 |
+| pass1       | 2.845  | 2.712  | 2.910   | 3.346   |
+| dispatchwait (wall) | 25.432 | 25.719 | 33.313 | 38.373 |
+| merge       | 9.256  | 5.766  | 10.846  | 12.942  |
+
+**Why the steady-state "win" is thermal, not NEON:**
+1. **At the least-confounded point (cold, frame 50) NEON predict is NOT faster** —
+   8.383 vs 8.283 ms, marginally *worse*; dispatch+wait 25.432 vs 25.719, dead even.
+2. The steady-state predict gap tracks the **pack control** gap proportionally
+   (predict/pack ratio 0.089 NEON vs 0.090 scalar — identical). Pack is the *same*
+   `writeRice` code in both runs, so its ~18 % between-run difference is pure thermal
+   drift (scalar ran second, already saturated ~90 °C). The predict "improvement" is
+   the same drift, not a compute effect. This is the exact confound that burned the
+   2026-08-06 stage-3 checkpoint; running scalar-second-and-hotter merely flipped its
+   sign to favor NEON.
+
+**The load-bearing conclusion (robust to the confound):** the per-frame encode-CPU
+split is **predict ≈ 8 %, pack ≈ 84 %** (11 ms vs 123 ms summed). NEON vectorized
+*predict*. Even a real, generous 15 % predict cut = ~1.6 ms summed = ~0.3 ms/worker
+wall — far too small to close the ~4-5 ms/frame gap to the 41.6 ms budget. **The
+dominant cost is `writeRice` (the Rice/BitWriter pack), which this round did not
+touch** — precisely what round-2 profiling already showed (pack = 88.5 % of cost).
+NEON, as scoped, cannot hit the 0-dropped bar; it was aimed at the wrong 8 %.
+
+**The 0-dropped landing rate was NOT captured this session** (the instrumentation
+measured phase timings, not frames-written/dropped). It doesn't need re-instrumenting:
+the definitive test is to record on the **shipped (clean) NEON release build** and read
+the app's own drop counter. But the phase split above makes the expected verdict clear
+in advance — NEON alone won't close the gap.
+
+**Where this leaves the effort (6th-round decision for the user):** every lever that
+attacks core count or the 8 % predict fraction is now exhausted or shown immaterial.
+The only remaining levers cut **pack work / data volume**:
+- **12-bit truncation** (drop 2 LSBs) — ~2 fewer bits/sample for the Rice coder ⇒
+  directly less `writeRice` work *and* ~20-25 % smaller output; lossy but
+  near-visually-lossless at base ISO. This attacks the 84 % (pack), stacks on the
+  committed NEON, and is the single highest-leverage remaining option.
+- **SIMD / batch the Rice writer itself** — much harder (variable-length, bit-packed,
+  data-dependent), but it is where the 84 % actually lives.
+- **Ship compression OFF-by-default** — accept the codec as a correct, opt-in feature
+  that isn't yet real-time at 4K@24 on this hardware, and stop the throughput chase.
+
+Instrumentation reverted (`main` clean at `4bd657b`); patch saved as
+`.superpowers/sdd/2026-08-13-rawv-codec-round4-neon-predict-simd/predict-vs-pack-instrumentation.patch`;
+both `rawv_prof_neon.log` / `rawv_prof_scalar.log` retained in that workspace.
