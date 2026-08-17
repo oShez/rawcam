@@ -737,3 +737,50 @@ The only remaining levers cut **pack work / data volume**:
 Instrumentation reverted (`main` clean at `4bd657b`); patch saved as
 `.superpowers/sdd/2026-08-13-rawv-codec-round4-neon-predict-simd/predict-vs-pack-instrumentation.patch`;
 both `rawv_prof_neon.log` / `rawv_prof_scalar.log` retained in that workspace.
+
+## Round 5 (serial Rice packer) — ON-DEVICE: valid, large improvement, but 0-dropped NOT confirmed (thermally compromised run) (2026-08-17)
+
+Host tiers 1+2 (q=0 fast path + per-row adaptive capacity check) shipped to `main`
+2026-08-17 (commits `d06a85c`, `f2b5370`; bit-exact, host ctest 9/9 = 34 cases/3024
+assertions). Arm64 release built off `f2b5370`, installed on the `24030PN60G` and
+recorded at 4096×3072@24fps, main cam (23mm), 4:3.
+
+**Two device gotchas hit first (both are recurring — see prior rounds):**
+1. First run recorded **Raw16** (`packMode@20 == 0`) — the "Compress recordings" toggle
+   had reverted to OFF. Caught by reading the header (byte 20; the `3` at byte 24 is the
+   `cfa` field, NOT packMode — read the FileHeader struct, don't eyeball adjacent u32s).
+   That run's 0-dropped was meaningless (uncompressed never stresses the encoder).
+   Re-enabled the toggle, deleted the 44 GB Raw16 clip, re-recorded.
+2. Second run **verified valid**: `packMode@20 == 3` (CompressedPredictive),
+   `whiteLevel@28 == 16383` (14-bit), 40.6 GB (~33% smaller than the Raw16 equivalent).
+
+**Valid compressed measurement (live written/dropped from the app's atomic counter):**
+
+| time | written | dropped | note |
+|---|---|---|---|
+| 00:55 | 1196 | 121 | ~9% cumulative loss |
+| 01:25 | 1775 | 250 | ~18% incremental (55–85s) |
+| 01:35 | 1968 | 309 | ~23% incremental (85–95s) |
+| 01:46 | 2164 | 365 | ~22% incremental (95–106s) |
+
+**The drop RATE climbs over time (9% → ~22%) — the throttling signature, not a fixed
+per-frame deficit or a startup transient.** Device state at stop, measured:
+**AC-plugged (`AC powered: true`)**, battery **41.5 °C**, SoC thermal zones **~58–60 °C**.
+This directly violates the spec's "measure cool + unplugged" (§7), and the device was
+additionally pre-heated by the 44 GB Raw16 write immediately before. **This run is
+thermally compromised and does NOT settle the 0-dropped question.**
+
+**What it DOES establish:** round 5 is a large, real improvement. Even hot + throttled
+and AC-plugged, it lands **78–91%** of frames (9–22% loss) — versus the codec's history
+of ~91% LOSS originally and ~19.4% loss at round-4 stage 2. The coolest window (0–55s,
+still warm-started) already showed only ~9% loss. The evidence strongly suggests a cool,
+unplugged device would land at or very near 0-dropped — but that is **not yet proven**.
+
+**Remaining gate (unchanged):** a clean **cool + unplugged** re-measure. Unplug the
+`24030PN60G` from AC, let the SoC idle down from ~59 °C toward ambient (~10–15 min), then
+record ~35 s from cold and read the landing rate. If it still misses 0-dropped cool,
+stack **12-bit truncation** (additive; cuts pack work further + shrinks output).
+
+`main` clean at `f2b5370`; host code fully verified; test clips deleted; "Compress
+recordings" left ON. On-device lossless round-trip decode (plan Task 3 Step 2) not run
+this pass (host 3024-assertion bit-exact matrix stands in until the cool re-measure).
