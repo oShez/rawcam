@@ -784,3 +784,13 @@ stack **12-bit truncation** (additive; cuts pack work further + shrinks output).
 `main` clean at `f2b5370`; host code fully verified; test clips deleted; "Compress
 recordings" left ON. On-device lossless round-trip decode (plan Task 3 Step 2) not run
 this pass (host 3024-assertion bit-exact matrix stands in until the cool re-measure).
+
+### Decision 2026-08-17: round 5 accepted, cool re-measure not pursued
+
+User decided **not** to redo the test at a colder temperature. Round 5 is accepted and
+closed as a large, real improvement on the strength of the hot-throttled 78–91%-landing
+result (vs the codec's ~91%-loss history and round-4 stage-2's ~19.4% loss). 0-dropped
+was never formally confirmed on a cool device, but the user is satisfied and did not
+require it. The serial-packer host work (tiers 1+2) stays shipped on `main`
+(`f2b5370`, bit-exact, host ctest 9/9). 12-bit truncation remains an available future
+lever if more headroom is ever wanted, but is not scheduled.
