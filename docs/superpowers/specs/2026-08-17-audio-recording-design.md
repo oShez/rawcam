@@ -110,16 +110,29 @@ AudioRecorder (Kotlin, 2 threads)
             v
       AudioMeterState (atomic) --> RecordScreen meter
 
+CameraController.onCaptureCompleted (first frame only)
+   \- AudioRecorder.onFirstFrame(sensorTs) -> compute trim, flush preroll, stream
+
 CameraController.stopRecording()
-   |- 1. quiesce camera, nativeStopRecording()   <- unchanged
-   |- 2. AudioRecorder.stop() -> SyncResult
-   |- 3. WavWriter.finalizeWithTrim(SyncResult)
-   \- 4. nativeSetAudioInfo(...) -> patched into the v5 header at finalize
+   |- 1. quiesce camera (stopRepeating, abortCaptures, await idle)  <- unchanged
+   |- 2. AudioRecorder.stop() -> AudioResult
+   |- 3. nativeSetAudioInfo(...)
+   \- 4. nativeStopRecording()   <- finalizes the header, so MUST come last
 ```
 
 Arming audio *before* the capture session is what makes alignment an exact trim rather
 than a guessed pad: session configuration already blocks for hundreds of milliseconds, so
 audio is reliably running before the first frame arrives.
+
+**The trim is applied at the start of a take, not at finalize.** RIFF data begins at a
+fixed byte offset, so removing leading samples once the file exists would mean rewriting
+the whole thing. Instead the recorder holds captured audio in memory until frame 0's
+`SENSOR_TIMESTAMP` arrives, applies the trim (or pad) to that buffered prefix, and then
+streams straight to disk. Because audio arms before session configuration, the prefix is
+well under a second -- roughly 300 KB, capped at 2 s.
+
+**`nativeSetAudioInfo` must precede `nativeStopRecording`.** The latter finalizes the
+header; audio provenance published after it would be silently discarded.
 
 Two threads rather than one so a filesystem stall cannot cause an `AudioRecord` overrun.
 This mirrors the read/queue/write shape `capture.cpp` already uses.
@@ -185,7 +198,7 @@ The mechanism, in order:
    yields `(framePosition, nanoTime)` pairs -- when a specific sample reached the
    converter, not when `read()` returned. Polled alongside the bridge.
 
-4. **Trim.**
+4. **Trim**, applied to the buffered in-memory prefix the moment frame 0 arrives (section 3).
    `trimSamples = (frame0SensorTime_boottime - audioSample0_boottime) * rate / 1e9`
    Because audio arms first this is positive in practice, making alignment an exact trim.
    A negative result (audio started late) pads with silence at the head and sets
