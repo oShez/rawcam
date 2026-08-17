@@ -257,6 +257,41 @@ TEST_CASE("ParallelFrameEncoder SIMD path is byte-identical to encodeFrame acros
   }
 }
 
+TEST_CASE("Rice q=0 fast path: encoder stays byte-identical to encodeFrame and round-trips (fast-path stress)") {
+  struct Case { uint32_t width, height, bitDepth; };
+  const Case cases[] = {
+    {1, 8, 14}, {2, 8, 14}, {3, 8, 12}, {8, 8, 16}, {9, 9, 14},
+    {33, 40, 12}, {64, 64, 16}, {100, 130, 14}, {257, 64, 10},
+  };
+  const uint32_t threadCounts[] = {1, 2, 5};
+  // Mostly-flat frame (drives q=0 for nearly every pixel) with sparse large
+  // spikes every 101th pixel (forces q>=32 and the multi-chunk drain), so a
+  // single frame exercises both the fast path and the slow path.
+  auto gen = [](uint32_t x, uint32_t y, uint16_t maxVal) -> uint16_t {
+    uint32_t idx = x * 131u + y * 17u;
+    if (idx % 101u == 0) return maxVal;                 // spike
+    return static_cast<uint16_t>(maxVal / 2 + ((idx) % 3u));  // near-flat
+  };
+  for (const auto& c : cases) {
+    auto src = makeFrame(c.width, c.height, c.bitDepth, gen);
+    std::vector<uint8_t> serial(static_cast<size_t>(c.width) * c.height * 2 + 64);
+    uint32_t sn = encodeFrame(src.data(), c.width, c.height, c.width, c.bitDepth,
+                              serial.data(), static_cast<uint32_t>(serial.size()));
+    REQUIRE(sn > 0);
+    for (uint32_t tc : threadCounts) {
+      ParallelFrameEncoder enc(c.width, c.height, tc);
+      std::vector<uint8_t> par(static_cast<size_t>(c.width) * c.height * 2 + 64);
+      uint32_t pn = enc.encode(src.data(), c.width, c.bitDepth, par.data(),
+                               static_cast<uint32_t>(par.size()));
+      REQUIRE(pn == sn);
+      CHECK(std::equal(serial.begin(), serial.begin() + sn, par.begin()));
+      std::vector<uint16_t> dec(src.size());
+      REQUIRE(decodeFrame(par.data(), pn, dec.data(), c.width, c.height, c.width, c.bitDepth));
+      CHECK(dec == src);
+    }
+  }
+}
+
 TEST_CASE("ParallelFrameEncoder returns 0 (caller falls back) when the merged output doesn't fit outCapacity") {
   auto src = makeFrame(64, 64, 16, [](uint32_t, uint32_t, uint16_t maxVal) { return maxVal; });
   ParallelFrameEncoder enc(64, 64, /*threadCount=*/4);

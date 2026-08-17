@@ -63,12 +63,19 @@ class BitWriter {
   // total per pixel; large quotients (q >= 32) drain in the while loop.
   bool writeRice(uint32_t value, uint32_t k) {
     uint32_t q = value >> k;
+    // Fast path (the common, well-predicted case -- ~98% of pixels): q == 0 means
+    // value < 2^k, so the whole codeword is the (k+1)-bit field whose top bit is
+    // the unary terminator 0 followed by the k remainder bits -- i.e. `value`
+    // itself as a (k+1)-bit field. One checked append instead of two. k <= 20
+    // (riceParamFor cap) so k+1 <= 21 <= 32, valid for writeBits. Bit-identical
+    // to the slow path below.
+    if (q == 0) return writeBits(value, k + 1);
     while (q >= 32) {
       if (!writeBits(0xFFFFFFFFu, 32)) return false;
       q -= 32;
     }
     // q one-bits followed by a terminating zero bit, as one (q+1)-bit field.
-    uint32_t qval = (q == 0) ? 0u : (((1u << q) - 1u) << 1);
+    uint32_t qval = (((1u << q) - 1u) << 1);
     if (!writeBits(qval, q + 1)) return false;
     if (k > 0 && !writeBits(value, k)) return false;
     return true;
