@@ -10,3 +10,4 @@ core/build/
 testfootage/
 keystore.properties
 release-keystore.jks
+.claude/
