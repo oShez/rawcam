@@ -339,9 +339,16 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
     // Defensive: stop() drains the queue, so it should already be empty. If
     // anything is left it belongs to a deleted reader and must not be touched
     // (AImage_delete on it would double-free); just drop the pointers.
+    // Also resets audioInfo_/audioInfoSet_ here, under the same lock
+    // setAudioInfo()/stop() use to touch them: Capture is a singleton, so
+    // without this a session that never calls setAudioInfo() (mic busy,
+    // permission denied, audio off) would silently inherit and write the
+    // PREVIOUS session's audio params/filename/offset into its own header.
     std::lock_guard<std::mutex> lock(queueMutex_);
     queueHead_ = 0;
     queueCount_ = 0;
+    audioInfo_ = AudioInfo{};
+    audioInfoSet_ = false;
   }
 
   FileHeader hdr{};
@@ -485,6 +492,8 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
   // in queue_ aborts the NEXT session's writer thread inside
   // AImage_getPlaneData ("lockImage: AImage has no buffer" -- observed on
   // device, 2026-07-13 12:19 crash).
+  AudioInfo audioInfoSnapshot{};
+  bool haveAudioInfo = false;
   {
     std::lock_guard<std::mutex> lock(queueMutex_);
     for (size_t i = 0; i < queueCount_; i++) {
@@ -492,12 +501,17 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
     }
     queueHead_ = 0;
     queueCount_ = 0;
+    // Read audioInfo_/audioInfoSet_ under the same lock setAudioInfo() takes
+    // to write them (and start() takes to reset them) -- see capture.h's
+    // comment on setAudioInfo() for what this lock does and does not guard.
+    audioInfoSnapshot = audioInfo_;
+    haveAudioInfo = audioInfoSet_;
   }
 
   uint64_t written = 0;
   if (writer_) {
     written = writer_->framesWritten();
-    if (audioInfoSet_) writer_->setAudioInfo(audioInfo_);
+    if (haveAudioInfo) writer_->setAudioInfo(audioInfoSnapshot);
     writer_->finalize();
     writer_.reset();
   }

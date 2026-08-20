@@ -99,6 +99,10 @@ Java_com_shez_rawcam_NativeBridge_nativeSetAudioInfo(
     if (name != nullptr) {
       jsize nameLen = env->GetStringUTFLength(jFileName);
       size_t maxCopy = sizeof(info.fileName) - 1;
+      // Raw byte cut, not UTF-8 codepoint-boundary-aware: a name whose 63rd
+      // byte lands mid-codepoint stores an invalid trailing byte sequence.
+      // Inherent to the fixed 64-byte buffer; byte-safe truncation (never
+      // reading/writing past it) is what matters here, not codepoint purity.
       size_t copyLen = (size_t)nameLen < maxCopy ? (size_t)nameLen : maxCopy;
       std::memcpy(info.fileName, name, copyLen);
       info.fileName[copyLen] = '\0';

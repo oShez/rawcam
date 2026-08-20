@@ -47,8 +47,11 @@ class Capture {
 
   // Stores audio parameters/provenance for the writer to fold into the header at
   // finalize. Called from the JNI/UI thread BEFORE stop(), because stop() is what
-  // finalizes. Takes queueMutex_ so it cannot race the writer thread's deferred
-  // creation of writer_.
+  // finalizes. Takes queueMutex_ purely to guard audioInfo_/audioInfoSet_
+  // themselves against the concurrent read in stop() (and the reset in
+  // start()) -- NOT to guard writer_, which this method never touches;
+  // writer_ is created inside processImage(), off the writer thread, after
+  // queueMutex_ has already been released for that frame.
   void setAudioInfo(const AudioInfo& info);
 
   // Lock-free snapshot of {framesWritten, framesDropped} for UI polling while
