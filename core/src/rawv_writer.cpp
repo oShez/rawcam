@@ -1,5 +1,6 @@
 #include "rawcam/rawv_writer.h"
 #include "rawcam/file_io.h"
+#include <cstring>
 
 namespace rawcam {
 
@@ -20,6 +21,20 @@ bool RawvWriter::writeFrame(const FrameMeta& meta, const uint8_t* payload, uint3
   if (payloadBytes > 0 && !io::writeAll(fd_, payload, payloadBytes)) return false;
   frames_++;
   return true;
+}
+
+void RawvWriter::setAudioInfo(const AudioInfo& info) {
+  hdr_.audioPresent = info.present;
+  hdr_.audioSampleRate = info.sampleRate;
+  hdr_.audioChannels = info.channels;
+  hdr_.audioBitsPerSample = info.bitsPerSample;
+  hdr_.audioOffsetNs = info.offsetNs;
+  hdr_.audioDriftPpm = info.driftPpm;
+  hdr_.audioTimestampSource = info.timestampSource;
+  hdr_.audioStatus = info.status;
+  hdr_.audioSource = info.source;
+  std::memcpy(hdr_.audioFileName, info.fileName, sizeof hdr_.audioFileName);
+  hdr_.audioFileName[sizeof hdr_.audioFileName - 1] = '\0';
 }
 
 bool RawvWriter::finalize() {

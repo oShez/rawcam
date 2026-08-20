@@ -9,6 +9,10 @@ class RawvWriter {
  public:
   static std::unique_ptr<RawvWriter> create(const std::string& path, const FileHeader& hdr);
   bool writeFrame(const FrameMeta& meta, const uint8_t* payload, uint32_t payloadBytes);
+  // Records audio parameters and sync provenance into the in-memory header, for
+  // finalize() to write out. Must be called BEFORE finalize(); calling it after
+  // has no effect, since finalize() is what rewrites the header on disk.
+  void setAudioInfo(const AudioInfo& info);
   bool finalize();
   uint64_t framesWritten() const { return frames_; }
   ~RawvWriter();

@@ -81,7 +81,8 @@ std::unique_ptr<RawvReader> RawvReader::open(const std::string& path) {
   int fd = io::openRead(path.c_str());
   if (fd < 0) return nullptr;
   FileHeader h{};
-  if (!io::readAll(fd, &h, sizeof h) || h.magic != kMagic || h.version != kVersion ||
+  if (!io::readAll(fd, &h, sizeof h) || h.magic != kMagic ||
+      h.version < kMinReadableVersion || h.version > kVersion ||
       h.frameSizeBytes == 0 || !headerSane(h)) {
     io::closeFd(fd);
     return nullptr;

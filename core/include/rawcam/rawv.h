@@ -4,7 +4,12 @@
 namespace rawcam {
 
 constexpr uint32_t kMagic = 0x56574152u;  // "RAWV" LE
-constexpr uint32_t kVersion = 4;
+constexpr uint32_t kVersion = 5;
+// Oldest header version this build can still read. v4 files predate audio and
+// read back with every audio field zero, which is exactly audioPresent == 0.
+// The reader must range-check rather than demand equality, or bumping kVersion
+// silently orphans every clip already on a user's device.
+constexpr uint32_t kMinReadableVersion = 4;
 constexpr uint32_t kHeaderSize = 512;
 constexpr uint32_t kFrameMetaSize = 64;
 
@@ -19,6 +24,36 @@ constexpr uint32_t kFrameMetaSize = 64;
 // FrameMeta.payloadBytes below.
 enum class PackMode : uint32_t { Raw16 = 0, Packed10 = 1, Packed12 = 2, CompressedPredictive = 3 };
 enum class Cfa : uint32_t { RGGB = 0, GRBG = 1, GBRG = 2, BGGR = 3 };
+
+// FileHeader.audioStatus bits. A clip can report several at once, so this is a
+// bitfield rather than an enum of states. "Sync is trustworthy" means
+// (audioStatus & kAudioSyncInvalidating) == 0.
+constexpr uint32_t kAudioPermissionDenied = 1u << 0;  // RECORD_AUDIO not granted
+constexpr uint32_t kAudioOpenFailed       = 1u << 1;  // AudioRecord would not open
+constexpr uint32_t kAudioEndedEarly       = 1u << 2;  // disconnect/read error/disk full
+constexpr uint32_t kAudioOverruns         = 1u << 3;  // samples dropped mid-stream
+constexpr uint32_t kAudioSuspended        = 1u << 4;  // clock bridge moved mid-take
+constexpr uint32_t kAudioPadded           = 1u << 5;  // head is inserted silence
+constexpr uint32_t kAudioDriftHigh        = 1u << 6;  // drift over the warning threshold
+constexpr uint32_t kAudioProcessedSource  = 1u << 7;  // UNPROCESSED unavailable
+constexpr uint32_t kAudioSyncInvalidating =
+    kAudioOverruns | kAudioSuspended | kAudioPadded;
+
+// Audio parameters and sync provenance, handed to RawvWriter before finalize.
+// Mirrors the FileHeader fields below; kept as its own type so the JNI layer and
+// the writer share one definition instead of ten loose arguments.
+struct AudioInfo {
+  uint32_t present = 0;
+  uint32_t sampleRate = 0;
+  uint32_t channels = 0;
+  uint32_t bitsPerSample = 0;
+  int64_t  offsetNs = 0;
+  int32_t  driftPpm = 0;
+  uint32_t timestampSource = 0;
+  uint32_t status = 0;
+  uint32_t source = 0;
+  char     fileName[64] = {};
+};
 
 #pragma pack(push, 1)
 struct FileHeader {
@@ -52,7 +87,23 @@ struct FileHeader {
   // Resolve to report an implausible CCT and "break" the image on any WB nudge.
   uint32_t illuminant2;
   float    colorMatrix2[9];  // XYZ->camera under illuminant2; valid iff illuminant2 != 0
-  uint8_t  reserved[284];
+  // ---- Audio (v5+). All zero in v4 files, which reads as audioPresent == 0.
+  // The sidecar WAV named by audioFileName lives beside this file and is already
+  // head-trimmed, so its sample 0 coincides with frame 0's SENSOR_TIMESTAMP
+  // (start of exposure). audioOffsetNs is provenance only: it is the PRE-trim
+  // measurement, positive when audio started first (the normal case, since audio
+  // arms before the capture session).
+  uint32_t audioPresent;
+  uint32_t audioSampleRate;
+  uint32_t audioChannels;
+  uint32_t audioBitsPerSample;
+  int64_t  audioOffsetNs;
+  int32_t  audioDriftPpm;
+  uint32_t audioTimestampSource;  // 0 = unknown/monotonic, 1 = realtime/boottime
+  uint32_t audioStatus;           // bitfield, see kAudio* above
+  uint32_t audioSource;           // MediaRecorder.AudioSource actually opened
+  char     audioFileName[64];     // NUL-terminated sidecar basename
+  uint8_t  reserved[180];
 };
 
 struct FrameMeta {
