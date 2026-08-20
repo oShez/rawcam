@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <cstring>
 #include <string>
 #include "rawcam/rawv.h"
 #include "rawcam/rawv_reader.h"
@@ -69,6 +70,43 @@ Java_com_shez_rawcam_NativeBridge_nativePushFrameMeta(
   rawcam::Capture::instance().pushFrameMeta((int64_t)timestampNs, (int32_t)iso,
                                              (int64_t)exposureNs, focusDistance, wbR, wbG,
                                              wbB);
+}
+
+// present==false and status/source/etc. still get recorded, so nativeStopRecording
+// (which finalizes the header) sees a definitive "no audio" rather than the
+// all-zero default. fileName is truncated to fit AudioInfo::fileName (char[64])
+// via the JNI-reported byte length -- not strlen -- and always left NUL-terminated,
+// so RawvWriter::setAudioInfo's fixed-size memcpy + forced trailing NUL never has
+// to drop a real character of a 64-byte name (see Task 3 review carry-forward).
+extern "C" JNIEXPORT void JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeSetAudioInfo(
+    JNIEnv* env, jobject, jboolean present, jint sampleRate, jint channels,
+    jint bitsPerSample, jlong offsetNs, jint driftPpm, jint timestampSource,
+    jint status, jint source, jstring jFileName) {
+  rawcam::AudioInfo info{};
+  info.present = present == JNI_TRUE ? 1u : 0u;
+  info.sampleRate = (uint32_t)sampleRate;
+  info.channels = (uint32_t)channels;
+  info.bitsPerSample = (uint32_t)bitsPerSample;
+  info.offsetNs = (int64_t)offsetNs;
+  info.driftPpm = (int32_t)driftPpm;
+  info.timestampSource = (uint32_t)timestampSource;
+  info.status = (uint32_t)status;
+  info.source = (uint32_t)source;
+
+  if (jFileName != nullptr) {
+    const char* name = env->GetStringUTFChars(jFileName, nullptr);
+    if (name != nullptr) {
+      jsize nameLen = env->GetStringUTFLength(jFileName);
+      size_t maxCopy = sizeof(info.fileName) - 1;
+      size_t copyLen = (size_t)nameLen < maxCopy ? (size_t)nameLen : maxCopy;
+      std::memcpy(info.fileName, name, copyLen);
+      info.fileName[copyLen] = '\0';
+      env->ReleaseStringUTFChars(jFileName, name);
+    }
+  }
+
+  rawcam::Capture::instance().setAudioInfo(info);
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL

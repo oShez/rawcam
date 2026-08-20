@@ -15,6 +15,14 @@ object NativeBridge {
         deviceName: String, compressRecordings: Boolean): android.view.Surface?
     external fun nativePushFrameMeta(timestampNs: Long, iso: Int, exposureNs: Long,
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)
+    // Records audio parameters and sync provenance into the .rawv header. MUST be
+    // called before nativeStopRecording(), which is what finalizes the header --
+    // calling it afterwards is silently a no-op.
+    external fun nativeSetAudioInfo(
+        present: Boolean, sampleRate: Int, channels: Int, bitsPerSample: Int,
+        offsetNs: Long, driftPpm: Int, timestampSource: Int, status: Int,
+        source: Int, fileName: String,
+    )
     // returns longArrayOf(framesWritten, framesDropped)
     external fun nativeStopRecording(): LongArray
     // atomic snapshot, safe to poll while recording: longArrayOf(framesWritten, framesDropped)

@@ -449,6 +449,12 @@ void Capture::pushFrameMeta(int64_t timestampNs, int32_t iso, int64_t exposureNs
   }
 }
 
+void Capture::setAudioInfo(const AudioInfo& info) {
+  std::lock_guard<std::mutex> lock(queueMutex_);
+  audioInfo_ = info;
+  audioInfoSet_ = true;
+}
+
 std::pair<uint64_t, uint64_t> Capture::stop() {
   if (reader_ == nullptr) return {0, dropped_.load()};
 
@@ -491,6 +497,7 @@ std::pair<uint64_t, uint64_t> Capture::stop() {
   uint64_t written = 0;
   if (writer_) {
     written = writer_->framesWritten();
+    if (audioInfoSet_) writer_->setAudioInfo(audioInfo_);
     writer_->finalize();
     writer_.reset();
   }

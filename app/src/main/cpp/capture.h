@@ -45,6 +45,12 @@ class Capture {
   // file and tears down the reader. Returns {framesWritten, framesDropped}.
   std::pair<uint64_t, uint64_t> stop();
 
+  // Stores audio parameters/provenance for the writer to fold into the header at
+  // finalize. Called from the JNI/UI thread BEFORE stop(), because stop() is what
+  // finalizes. Takes queueMutex_ so it cannot race the writer thread's deferred
+  // creation of writer_.
+  void setAudioInfo(const AudioInfo& info);
+
   // Lock-free snapshot of {framesWritten, framesDropped} for UI polling while
   // recording is in progress. Safe to call from any thread concurrently with
   // the writer thread; both counters are std::atomic.
@@ -113,6 +119,8 @@ class Capture {
   std::atomic<uint64_t> compressedFallbacks_{0};
 
   std::unique_ptr<RawvWriter> writer_;
+  AudioInfo audioInfo_{};
+  bool audioInfoSet_ = false;
   FileHeader headerTemplate_{};
   std::string path_;
   int32_t width_ = 0;
