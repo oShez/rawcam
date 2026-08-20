@@ -33,6 +33,11 @@ data class BextInfo(
  * Head trimming is deliberately NOT this class's job: RIFF data begins at a
  * fixed offset, so removing leading samples afterwards would mean rewriting the
  * whole file. AudioRecorder applies the trim before the first [append] instead.
+ *
+ * Classic RIFF size fields are 32-bit, so total file size is capped just under
+ * 4 GiB -- about 4.1 hours mono / 2 hours stereo at 48 kHz/24-bit. Beyond that
+ * the size fields wrap; this is an inherent limitation of plain WAV (RF64
+ * lifts it) and not something this writer works around.
  */
 class WavWriter(
     private val file: File,
@@ -63,6 +68,9 @@ class WavWriter(
                 val v = samples[i + k]
                 val clamped = if (v > 1.0f) 1.0f else if (v < -1.0f) -1.0f else v
                 // Asymmetric full scale: +1.0 -> 0x7FFFFF, -1.0 -> -0x800000.
+                // toInt() truncates toward zero rather than rounding to nearest;
+                // deliberate -- inaudible at 24-bit and matches common practice.
+                // Do not change to rounding, it would break the byte-exact tests.
                 val s = if (clamped >= 0f) (clamped * 8_388_607.0f).toInt()
                         else (clamped * 8_388_608.0f).toInt()
                 scratch[b++] = (s and 0xFF).toByte()
@@ -139,9 +147,6 @@ class WavWriter(
         System.arraycopy(src, 0, dst, at, minOf(len, src.size))
     }
 
-    private fun le32(v: Int): ByteArray =
-        ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
-
     companion object {
         const val BEXT_PAYLOAD_BYTES = 602
         private const val BEXT_PAYLOAD_OFFSET = 44
@@ -149,6 +154,12 @@ class WavWriter(
         const val HEADER_BYTES = 654
         private const val BUFFER_BYTES = 64 * 1024
         private const val SCRATCH_SAMPLES = 4096
+
+        /** Encodes [v] as 4 little-endian bytes. Shared by [close] and
+         * [repairIfTruncated] -- the one size-field encoding used at every
+         * patch site. */
+        private fun le32(v: Int): ByteArray =
+            ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
 
         /**
          * Recovers the size fields of a WAV left behind by a killed process,
@@ -178,11 +189,9 @@ class WavWriter(
                     if (storedData == actualData && storedRiff == actualRiff) return true
 
                     raf.seek(4)
-                    raf.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-                        .putInt(actualRiff).array())
+                    raf.write(le32(actualRiff))
                     raf.seek(DATA_SIZE_OFFSET.toLong())
-                    raf.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-                        .putInt(actualData).array())
+                    raf.write(le32(actualData))
                     true
                 }
             } catch (e: IOException) {
