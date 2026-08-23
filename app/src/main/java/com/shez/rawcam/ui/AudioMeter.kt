@@ -1,5 +1,6 @@
 package com.shez.rawcam.ui
 
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -20,6 +22,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.shez.rawcam.audio.MeterLevels
 import kotlinx.coroutines.delay
 
@@ -29,13 +32,24 @@ import kotlinx.coroutines.delay
  * stat.
  *
  * Scale is -60..0 dBFS. The clip lamp latches for [CLIP_LATCH_MS] so a single
- * over-sample cannot flash past unnoticed between frames.
+ * over-sample cannot flash past unnoticed between frames. [degraded] renders a
+ * restrained AUDIO DEGRADED label (spec SS8) when the take's live status bits
+ * include anything in AudioStatus.SYNC_INVALIDATING -- distinct from [noAudio],
+ * which means no audio at all rather than merely untrustworthy sync.
+ *
+ * This composable stays mounted across many takes (it's gated on the
+ * recordAudio SETTING in RecordScreen, not on whether a take is actually
+ * recording), so every piece of latch/hold state below is `remember`ed keyed
+ * on [recording]: without that key, a clip latch or an in-progress peak hold
+ * from a previous take could still be showing when a brand new take starts.
  */
 @Composable
 fun AudioMeter(
     levels: MeterLevels,
     channels: Int,
     noAudio: Boolean,
+    degraded: Boolean,
+    recording: Boolean,
     modifier: Modifier = Modifier,
 ) {
     if (noAudio) {
@@ -48,26 +62,65 @@ fun AudioMeter(
         return
     }
 
-    var clipLatched by remember { mutableStateOf(false) }
-    var peakHoldL by remember { mutableFloatStateOf(MeterLevels.SILENCE_DBFS) }
-    var peakHoldR by remember { mutableFloatStateOf(MeterLevels.SILENCE_DBFS) }
+    var clipUntilMs by remember(recording) { mutableLongStateOf(0L) }
+    var peakUntilL by remember(recording) { mutableLongStateOf(0L) }
+    var peakUntilR by remember(recording) { mutableLongStateOf(0L) }
+    var peakValueL by remember(recording) { mutableFloatStateOf(MeterLevels.SILENCE_DBFS) }
+    var peakValueR by remember(recording) { mutableFloatStateOf(MeterLevels.SILENCE_DBFS) }
+    var nowMs by remember(recording) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
-    LaunchedEffect(levels.clipped) {
-        if (levels.clipped) {
-            clipLatched = true
-            delay(CLIP_LATCH_MS)
-            clipLatched = false
+    // Both latches are driven off monotonic deadlines rather than restarting on
+    // a LaunchedEffect key change (the previous approach's bug): keying on
+    // levels.clipped never changes during SUSTAINED clipping, so that effect
+    // was never restarted and the lamp went dark exactly when overload was
+    // continuous; keying on levels itself changes on every emission
+    // (~43-85ms), cancelling the pending peak-hold delay before it ever
+    // completed, so the reset lines were dead while audio flowed and the
+    // "1.5s peak hold" became an infinite hold pinned to the loudest transient
+    // since composition. Deadlines only ever move forward and are compared
+    // against a ticking [nowMs] below, so both latches release on their own
+    // schedule regardless of how new level emissions happen to key.
+    LaunchedEffect(levels) {
+        val now = SystemClock.elapsedRealtime()
+        if (levels.clipped) clipUntilMs = now + CLIP_LATCH_MS
+        if (levels.peakDbfsL > peakValueL) {
+            peakValueL = levels.peakDbfsL
+            peakUntilL = now + PEAK_HOLD_MS
+        } else if (now >= peakUntilL) {
+            peakValueL = levels.peakDbfsL
+        }
+        if (levels.peakDbfsR > peakValueR) {
+            peakValueR = levels.peakDbfsR
+            peakUntilR = now + PEAK_HOLD_MS
+        } else if (now >= peakUntilR) {
+            peakValueR = levels.peakDbfsR
         }
     }
-    LaunchedEffect(levels) {
-        if (levels.peakDbfsL > peakHoldL) peakHoldL = levels.peakDbfsL
-        if (levels.peakDbfsR > peakHoldR) peakHoldR = levels.peakDbfsR
-        delay(PEAK_HOLD_MS)
-        peakHoldL = levels.peakDbfsL
-        peakHoldR = levels.peakDbfsR
+    // Forces periodic recomposition so a deadline takes visual effect even
+    // between distinct level emissions -- e.g. clipping stops and audio goes
+    // to exact silence, whose repeated MeterLevels(-160, -160, false) readings
+    // are structurally equal and so would not by themselves retrigger the
+    // effect above.
+    LaunchedEffect(recording) {
+        while (true) {
+            delay(TICK_MS)
+            nowMs = SystemClock.elapsedRealtime()
+        }
     }
 
+    val clipLatched = nowMs < clipUntilMs
+    val peakHoldL = if (nowMs < peakUntilL) peakValueL else levels.peakDbfsL
+    val peakHoldR = if (nowMs < peakUntilR) peakValueR else levels.peakDbfsR
+
     Column(modifier = modifier) {
+        if (degraded) {
+            Text(
+                text = "AUDIO DEGRADED",
+                color = Color(0xFFFFA726),
+                fontSize = 10.sp,
+                modifier = Modifier.padding(bottom = 2.dp),
+            )
+        }
         MeterBar(levels.peakDbfsL, peakHoldL, clipLatched)
         if (channels == 2) MeterBar(levels.peakDbfsR, peakHoldR, clipLatched)
     }
@@ -112,5 +165,6 @@ private fun norm(dbfs: Float): Float = ((dbfs + 60f) / 60f).coerceIn(0f, 1f)
 
 private const val CLIP_LATCH_MS = 2_000L
 private const val PEAK_HOLD_MS = 1_500L
+private const val TICK_MS = 100L
 private const val PEAK_TICK_PX = 2f
 private const val CLIP_LAMP_PX = 6f

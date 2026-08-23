@@ -231,6 +231,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * not be folded into [RecordUiState]. See RecordScreen's AudioMeter render. */
     val audioMeter: StateFlow<MeterLevels> get() = controller.audioMeter
 
+    /** Straight pass-through of the controller's live audio status bits -- same
+     * rationale as [audioMeter]. Drives AudioMeter's AUDIO DEGRADED state, which
+     * (unlike NO AUDIO) must react while a take is still recording, not only
+     * after it stops -- see the RULING item in the audio-recording fix wave. */
+    val audioStatus: StateFlow<Int> get() = controller.audioStatus
+
     private val cameraOps = CoroutineScope(
         SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
     )
@@ -922,6 +928,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
+                    // controller.lastAudioResult is already populated by
+                    // startRecording's own failure paths (permission denied, open
+                    // failed, ...) by the time it returns -- read it HERE, in the
+                    // same update that resets these fields for the new take,
+                    // rather than waiting for stopRecordingInternal's completion
+                    // block. Without this, a take whose audio failed to arm shows
+                    // a flat, healthy-looking meter (audioFailed stays false) for
+                    // its entire duration and NO AUDIO only appears after stop.
+                    val audio = controller.lastAudioResult
+                    val failed = s.settings.recordAudio && audio?.present == false
                     _uiState.update {
                         // audioChannels/audioFailed reset to their defaults here too --
                         // otherwise a failed take's audioFailed=true (or a stale channel
@@ -929,7 +945,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         // healthy take until the NEXT stop overwrote it.
                         it.copy(
                             recording = true, elapsedSeconds = 0, written = 0, dropped = 0,
-                            audioChannels = 1, audioFailed = false,
+                            audioChannels = 1, audioFailed = failed,
                         )
                     }
                     withContext(Dispatchers.Main) { startPolling() }
@@ -1047,6 +1063,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         a.status and AudioStatus.SUSPENDED != 0 -> "Audio sync unreliable: device slept mid-take"
         a.status and AudioStatus.OVERRUNS != 0 -> "Audio dropouts; sync may drift"
         a.status and AudioStatus.PADDED != 0 -> "Audio started late; head is padded with silence"
+        a.status and AudioStatus.ALIGNMENT_UNVERIFIED != 0 -> "Audio alignment could not be verified"
         a.status and AudioStatus.DRIFT_HIGH != 0 -> "Audio clock drift ${a.driftPpm} ppm"
         a.status and AudioStatus.PROCESSED_SOURCE != 0 -> "Audio may be processed (UNPROCESSED unavailable)"
         else -> null
@@ -1267,6 +1284,7 @@ fun RecordScreen(
 
     val state by viewModel.uiState.collectAsState()
     val meterLevels by viewModel.audioMeter.collectAsState()
+    val audioStatusBits by viewModel.audioStatus.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(viewModel) {
         viewModel.events.collect { msg -> snackbarHostState.showSnackbar(msg) }
@@ -1578,6 +1596,8 @@ fun RecordScreen(
                     levels = meterLevels,
                     channels = state.audioChannels,
                     noAudio = state.audioFailed,
+                    degraded = (audioStatusBits and AudioStatus.SYNC_INVALIDATING) != 0,
+                    recording = state.recording,
                     modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 16.dp).width(120.dp),
                 )
             }
