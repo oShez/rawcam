@@ -25,6 +25,7 @@ class AudioDeviceCatalogTest {
     @Test
     fun `bluetooth types are excluded`() {
         assertTrue(AudioDeviceCatalog.isExcluded(AudioDeviceInfo.TYPE_BLUETOOTH_SCO))
+        assertTrue(AudioDeviceCatalog.isExcluded(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP))
         assertTrue(AudioDeviceCatalog.isExcluded(AudioDeviceInfo.TYPE_BLE_HEADSET))
         assertFalse(AudioDeviceCatalog.isExcluded(AudioDeviceInfo.TYPE_BUILTIN_MIC))
         assertFalse(AudioDeviceCatalog.isExcluded(AudioDeviceInfo.TYPE_USB_DEVICE))
