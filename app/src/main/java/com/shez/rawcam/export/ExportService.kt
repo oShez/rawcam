@@ -158,7 +158,14 @@ class ExportService : Service() {
             var srcWavCopyFailed = false
             if (ok) {
                 val srcWav = wavSiblingOf(rawvPath)
-                if (srcWav.exists()) {
+                // A WAV at or under HEADER_BYTES has no audio in it at all -- either
+                // recordAudio was off, the take never got past arming, or a killed
+                // process left only the header behind. That is "nothing to copy",
+                // not a copy failure: repairIfTruncated's own `length() < HEADER_BYTES`
+                // check would otherwise route it through the catch below into
+                // AUDIO_COPY_FAILED, which wrongly blocks deleteAfterExport for a
+                // pair whose audio was never more than silence to begin with.
+                if (srcWav.exists() && srcWav.length() > WavWriter.HEADER_BYTES) {
                     val dst = File(outDir, "$clipName.wav")
                     try {
                         if (!WavWriter.repairIfTruncated(srcWav)) {

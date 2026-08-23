@@ -49,6 +49,7 @@ class WavWriter(
     private var dataBytes = 0L
     private var closed = false
     private val scratch = ByteArray(SCRATCH_SAMPLES * 3)
+    private var appendsSinceFlush = 0
 
     init {
         out.write(buildHeader())
@@ -80,6 +81,19 @@ class WavWriter(
             out.write(scratch, 0, b)
             dataBytes += b
             i += n
+        }
+        // Flushes every FLUSH_EVERY_N_APPENDS calls (see its own comment): a
+        // process kill can otherwise lose up to the whole 64 KB OS-buffered
+        // window (~220ms at this class's 288 KB/s stereo rate) -- and for a
+        // clip too short to ever fill that buffer, even the header (written at
+        // construction, sitting in the same buffer) would never reach disk,
+        // leaving a 0-byte file that repairIfTruncated rejects and that blocks
+        // deleting the whole exported pair. Cheap: flush() pushes bytes into
+        // the OS page cache, not a physical-disk fsync.
+        appendsSinceFlush++
+        if (appendsSinceFlush >= FLUSH_EVERY_N_APPENDS) {
+            out.flush()
+            appendsSinceFlush = 0
         }
     }
 
@@ -154,6 +168,14 @@ class WavWriter(
         const val HEADER_BYTES = 654
         private const val BUFFER_BYTES = 64 * 1024
         private const val SCRATCH_SAMPLES = 4096
+
+        // N=4: each append() call is roughly one audio chunk (~43-85ms of audio
+        // at AudioRecorder's typical mono/stereo cadence -- see its READ_SAMPLES),
+        // so this bounds a process kill's trailing loss to ~170-340ms, the same
+        // order as the previous implicit ~220ms-to-fill-the-buffer bound, but now
+        // GUARANTEED regardless of how full the OS buffer happens to be, rather
+        // than only once 64 KB has actually accumulated.
+        private const val FLUSH_EVERY_N_APPENDS = 4
 
         /** Encodes [v] as 4 little-endian bytes. Shared by [close] and
          * [repairIfTruncated] -- the one size-field encoding used at every

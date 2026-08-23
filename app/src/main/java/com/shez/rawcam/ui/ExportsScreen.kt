@@ -53,7 +53,11 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-private data class ExportEntry(val dir: File, val dngCount: Int, val totalBytes: Long)
+private data class ExportEntry(val dir: File, val dngCount: Int, val totalBytes: Long, val hasAudio: Boolean)
+
+/** Sidecar WAV copied alongside the DNGs by ExportService, named after the export
+ * folder itself (see ExportService's `File(outDir, "$clipName.wav")`). */
+private fun wavOf(entry: ExportEntry) = File(entry.dir, "${entry.dir.name}.wav")
 
 // Lists across every export root (public + private fallback), not just the one
 // ExportPaths.exportsRootDir() currently resolves to -- a clip exported before
@@ -67,7 +71,8 @@ private fun loadExports(context: Context): List<ExportEntry> {
     return dirs.mapNotNull { dir ->
         val dngs = dir.listFiles { f -> f.name.endsWith(".dng") } ?: return@mapNotNull null
         if (dngs.isEmpty()) return@mapNotNull null
-        ExportEntry(dir, dngs.size, dngs.sumOf { it.length() })
+        val hasAudio = File(dir, "${dir.name}.wav").exists()
+        ExportEntry(dir, dngs.size, dngs.sumOf { it.length() }, hasAudio)
     }.sortedByDescending { it.dir.lastModified() }
 }
 
@@ -88,18 +93,22 @@ private fun humanSize(bytes: Long): String {
     return if (mb >= 1024) "%.2f GB".format(Locale.US, mb / 1024.0) else "%.1f MB".format(Locale.US, mb)
 }
 
-/** Hands the clip's whole DNG set to the system share sheet via a FileProvider (scoped
- * to the export root paths declared in file_paths.xml -- both the private exports/
- * fallback and the public Download/RawCam location that [com.shez.rawcam.export.ExportPaths]
- * can resolve to, see ExportPaths.exportsRootDir()) -- Quick Share/Nearby Share to a
- * paired laptop, a Drive folder, email, whatever share target the user already has set
- * up. No custom networking: the share sheet is the standard, already-hardened Android
- * mechanism for "get these files onto another device", so this app doesn't need to be a
- * file server. */
+/** Hands the clip's whole DNG set -- and its sidecar WAV, when present (Important 8:
+ * this list previously only ever included DNGs, silently dropping the audio on the
+ * likelier of the two paths for moving a finished export off the device) -- to the
+ * system share sheet via a FileProvider (scoped to the export root paths declared in
+ * file_paths.xml -- both the private exports/ fallback and the public Download/RawCam
+ * location that [com.shez.rawcam.export.ExportPaths] can resolve to, see
+ * ExportPaths.exportsRootDir()) -- Quick Share/Nearby Share to a paired laptop, a Drive
+ * folder, email, whatever share target the user already has set up. No custom
+ * networking: the share sheet is the standard, already-hardened Android mechanism for
+ * "get these files onto another device", so this app doesn't need to be a file server. */
 private fun shareExport(context: Context, entry: ExportEntry) {
     val authority = "${context.packageName}.fileprovider"
     val dngs = entry.dir.listFiles { f -> f.name.endsWith(".dng") } ?: return
-    val uris = ArrayList(dngs.map { FileProvider.getUriForFile(context, authority, it) })
+    val wav = wavOf(entry).takeIf { it.exists() }
+    val files = dngs.toList() + listOfNotNull(wav)
+    val uris = ArrayList(files.map { FileProvider.getUriForFile(context, authority, it) })
     if (uris.isEmpty()) return
     val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
         type = "*/*"
@@ -231,6 +240,13 @@ private fun ExportCard(entry: ExportEntry, onShare: () -> Unit, onDelete: () -> 
                     "${entry.dngCount} DNGs · ${humanSize(entry.totalBytes)}",
                     color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
                 )
+                // Mirrors ClipsScreen's own "A" badge for a clip with a sidecar WAV.
+                if (entry.hasAudio) {
+                    Text(
+                        "A", color = RawCamColors.Success, fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
             Spacer(Modifier.width(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

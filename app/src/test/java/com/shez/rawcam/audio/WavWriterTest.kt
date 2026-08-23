@@ -173,4 +173,17 @@ class WavWriterTest {
         f.writeBytes(ByteArray(32))
         assertFalse(WavWriter.repairIfTruncated(f))
     }
+
+    @Test
+    fun `data reaches disk periodically without an explicit close`() {
+        val f = tmp.newFile("l.wav")
+        val w = WavWriter(f, 48_000, 1)
+        // Four single-sample append() calls -- one per call is the flush unit
+        // (see WavWriter's FLUSH_EVERY_N_APPENDS=4) -- so by the fourth call
+        // everything written so far, including the header, must be visible on
+        // disk even though close() was never called.
+        repeat(4) { w.append(floatArrayOf(1.0f), 1) }
+        assertEquals((WavWriter.HEADER_BYTES + 4 * 3).toLong(), f.length())
+        w.close(null)
+    }
 }
