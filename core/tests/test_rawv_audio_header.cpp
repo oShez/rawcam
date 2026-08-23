@@ -98,9 +98,9 @@ TEST_CASE("a pre-v4 version is rejected") {
 
 TEST_CASE("audio status bits are distinct single bits") {
   const uint32_t bits[] = {
-      kAudioPermissionDenied, kAudioOpenFailed, kAudioEndedEarly,
-      kAudioOverruns,         kAudioSuspended,  kAudioPadded,
-      kAudioDriftHigh,        kAudioProcessedSource,
+      kAudioPermissionDenied, kAudioOpenFailed,      kAudioEndedEarly,
+      kAudioOverruns,         kAudioSuspended,       kAudioPadded,
+      kAudioDriftHigh,        kAudioProcessedSource, kAudioAlignmentUnverified,
   };
   uint32_t seen = 0;
   for (uint32_t b : bits) {
@@ -108,7 +108,8 @@ TEST_CASE("audio status bits are distinct single bits") {
     CHECK((seen & b) == 0u);      // no duplicates
     seen |= b;
   }
-  CHECK(kAudioSyncInvalidating == (kAudioOverruns | kAudioSuspended | kAudioPadded));
+  CHECK(kAudioSyncInvalidating ==
+        (kAudioOverruns | kAudioSuspended | kAudioPadded | kAudioAlignmentUnverified));
 }
 
 TEST_CASE("writer stores audio info into the finalized header") {

@@ -36,8 +36,14 @@ constexpr uint32_t kAudioSuspended        = 1u << 4;  // clock bridge moved mid-
 constexpr uint32_t kAudioPadded           = 1u << 5;  // head is inserted silence
 constexpr uint32_t kAudioDriftHigh        = 1u << 6;  // drift over the warning threshold
 constexpr uint32_t kAudioProcessedSource  = 1u << 7;  // UNPROCESSED unavailable
+// Alignment was not applied, or applying it could not be trusted: either the
+// no-anchor fallback (getTimestamp() never succeeded, so offset/trim are both
+// 0 by policy, not by measurement) or a computed trim implausible enough that
+// applying it was refused outright. Distinct from kAudioPadded/kAudioOverruns,
+// which mean a trim WAS applied but the take is otherwise degraded.
+constexpr uint32_t kAudioAlignmentUnverified = 1u << 8;
 constexpr uint32_t kAudioSyncInvalidating =
-    kAudioOverruns | kAudioSuspended | kAudioPadded;
+    kAudioOverruns | kAudioSuspended | kAudioPadded | kAudioAlignmentUnverified;
 
 // Audio parameters and sync provenance, handed to RawvWriter before finalize.
 // Mirrors the FileHeader fields below; kept as its own type so the JNI layer and
