@@ -22,6 +22,7 @@ import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.pow
@@ -58,7 +59,14 @@ object AudioStatus {
     const val PADDED = 1 shl 5
     const val DRIFT_HIGH = 1 shl 6
     const val PROCESSED_SOURCE = 1 shl 7
-    const val SYNC_INVALIDATING = OVERRUNS or SUSPENDED or PADDED
+    // Alignment was not applied, or applying it could not be trusted: either the
+    // no-anchor fallback (getTimestamp() never succeeded, so offset/trim are
+    // both 0 by policy, not by measurement) or a computed trim implausible
+    // enough that applying it was refused outright. Distinct from
+    // PADDED/OVERRUNS, which mean a trim WAS applied but the take is otherwise
+    // degraded.
+    const val ALIGNMENT_UNVERIFIED = 1 shl 8
+    const val SYNC_INVALIDATING = OVERRUNS or SUSPENDED or PADDED or ALIGNMENT_UNVERIFIED
 }
 
 /**
@@ -67,23 +75,35 @@ object AudioStatus {
  * Head alignment happens at the START of a take, not at finalize: RIFF data
  * begins at a fixed offset, so trimming later would mean rewriting the file.
  * Captured audio is held in memory until [onFirstFrame] supplies frame 0's
- * sensor timestamp; the computed trim is applied to that prefix and everything
- * after streams straight to disk. Audio arms before the capture session is
- * configured, so the buffered prefix stays well under a second.
+ * sensor timestamp. [onFirstFrame] itself only computes the trim -- it runs on
+ * the Camera2 capture-callback thread and must stay cheap -- and publishes it
+ * via [frame0BootNs]; the write thread notices that publish, opens the
+ * WavWriter, and flushes the buffered prefix through [AvSync.planPrerollTrim]
+ * (see [flushFirstFrame]). Everything after streams straight to disk. Audio
+ * arms before the capture session is configured, so the buffered prefix stays
+ * well under a second.
  *
  * Failure policy: video always wins. No method throws to the caller; every
- * failure sets a bit in [AudioResult.status] and the take continues.
+ * failure sets a bit in [AudioResult.status] (via [addStatus], which is safe
+ * across the four threads that touch it) and the take continues.
  *
- * Single-writer contract on [WavWriter]: exactly one thread ever calls
- * append()/close() at a time. [preroll] doubles as the handoff lock between
- * the write thread (which owns the writer once armed) and [onFirstFrame]'s
- * caller (which owns it during the one-time preroll flush) -- see
- * [writeLoop] and [onFirstFrame] for how that hands off without a gap.
+ * Single-writer contract on [WavWriter]: exactly one thread -- the write
+ * thread -- ever calls append()/close(). [preroll] doubles as the lock around
+ * that handoff: [writeLoop] checks-and-buffers under it, [flushFirstFrame]
+ * drains-and-publishes under the same lock, so a chunk can never land in
+ * preroll after the drain has already run.
  */
 class AudioRecorder(private val context: Context) {
 
     private val _meter = MutableStateFlow(MeterLevels())
     val meter: StateFlow<MeterLevels> = _meter.asStateFlow()
+
+    // Live mirror of [status], for the on-screen AUDIO DEGRADED indicator
+    // (see AudioMeter.kt) -- unlike the AudioResult returned by [stop], the UI
+    // needs to see status bits while the take is still recording, not only
+    // after it ends. Updated by [addStatus]; reset alongside status in [start].
+    private val _liveStatus = MutableStateFlow(0)
+    val liveStatus: StateFlow<Int> = _liveStatus.asStateFlow()
 
     private var record: AudioRecord? = null
     private var readThread: Thread? = null
@@ -105,7 +125,15 @@ class AudioRecorder(private val context: Context) {
     // blocking the read thread or growing without limit.
     private val queue = ArrayBlockingQueue<FloatArray>(QUEUE_CAPACITY)
 
-    @Volatile private var status = 0
+    // status is mutated from four different threads (read, write, camera
+    // capture-callback, and stop()'s caller). AtomicInteger + addStatus's
+    // getAndUpdate/updateAndGet is what actually makes `or` atomic here --
+    // @Volatile alone only makes each individual read/write atomic, not the
+    // read-modify-write `or` a plain `status = status or X` performs, so two
+    // concurrent sets could otherwise lose one bit. These bits ARE the entire
+    // "warn loudly" mechanism (the toast, SYNC_INVALIDATING, the header's
+    // permanent record), so losing one silently is not acceptable.
+    private val status = AtomicInteger(0)
     @Volatile private var sampleRate = SAMPLE_RATE
     @Volatile private var channels = 1
     @Volatile private var audioSource = MediaRecorder.AudioSource.UNPROCESSED
@@ -114,12 +142,30 @@ class AudioRecorder(private val context: Context) {
     @Volatile private var driftPpm = 0
     @Volatile private var frame0BootNs = 0L
     @Volatile private var firstBridge: ClockBridge? = null
+    // First out-of-tolerance clock-bridge reading, awaiting a second consecutive
+    // confirmation before latching SUSPENDED -- see [sampleClocks].
+    @Volatile private var pendingSuspectBridge: ClockBridge? = null
     @Volatile private var sourceIsRealtime = false
+
+    // Set once by onFirstFrame (pure math, cheap) and consumed once by
+    // flushFirstFrame on the write thread, which does the actual I/O. Valid
+    // only once frame0BootNs != 0L.
+    @Volatile private var firstFrameTrimFrames = 0L
+    // Guards flushFirstFrame so it runs at most once per take, regardless of
+    // whether it succeeds. Only ever touched by the write thread.
+    @Volatile private var firstFrameHandled = false
+    // Residual trim (Critical 1) that the buffered preroll could not fully
+    // absorb -- carried forward instead of being silently discarded, and
+    // consumed from the start of subsequently streamed chunks by
+    // [appendTrimmed]. Set once by flushFirstFrame (under the preroll lock,
+    // before writer is published); read/decremented afterwards only by the
+    // write thread, so no further synchronization is needed.
+    @Volatile private var pendingTrimSamples = 0L
 
     private val anchors = ArrayList<AudioAnchor>()
 
     // Guards both the preroll deque/counter AND the writer handoff: writeLoop
-    // checks-and-buffers under this lock, onFirstFrame drains-and-publishes
+    // checks-and-buffers under this lock, flushFirstFrame drains-and-publishes
     // under the same lock, so the two can never interleave and no chunk can
     // land in preroll after the drain has already run.
     private val preroll = ArrayDeque<FloatArray>()
@@ -162,22 +208,31 @@ class AudioRecorder(private val context: Context) {
         // rest of this class's public surface. Two concurrent start() calls
         // could both pass this check.
         if (running.get()) return false
-        status = 0
+        status.set(0)
+        _liveStatus.value = 0
         armed.set(false)
         synchronized(anchors) { anchors.clear() }
         synchronized(preroll) { preroll.clear(); prerollSamples = 0L }
         frame0BootNs = 0L
         firstBridge = null
+        pendingSuspectBridge = null
+        firstFrameTrimFrames = 0L
+        firstFrameHandled = false
+        pendingTrimSamples = 0L
         offsetNs = 0L
         driftPpm = 0
         writer = null
         this.wavFile = wavFile
         sourceIsRealtime = cameraSourceIsRealtime
-        val clampedGainDb = gainDb.coerceIn(GAIN_DB_MIN, GAIN_DB_MAX)
+        // A corrupt persisted float (NaN) would otherwise survive coerceIn
+        // (NaN.coerceIn(..) is NaN) and silently produce an all-zero, never-
+        // clipping WAV -- fall back to unity gain instead.
+        val safeGainDb = if (gainDb.isFinite()) gainDb else 0f
+        val clampedGainDb = safeGainDb.coerceIn(GAIN_DB_MIN, GAIN_DB_MAX)
         gainLinear = 10.0.pow(clampedGainDb.toDouble() / 20.0).toFloat()
 
         if (!hasPermission()) {
-            status = status or AudioStatus.PERMISSION_DENIED
+            addStatus(AudioStatus.PERMISSION_DENIED)
             return false
         }
 
@@ -188,7 +243,7 @@ class AudioRecorder(private val context: Context) {
 
         val rec = openRecord(channelMask)
         if (rec == null) {
-            status = status or AudioStatus.OPEN_FAILED
+            addStatus(AudioStatus.OPEN_FAILED)
             return false
         }
         if (target != null) {
@@ -215,7 +270,7 @@ class AudioRecorder(private val context: Context) {
         return try {
             rec.startRecording()
             if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                status = status or AudioStatus.OPEN_FAILED
+                addStatus(AudioStatus.OPEN_FAILED)
                 releaseRecord()
                 false
             } else {
@@ -226,7 +281,7 @@ class AudioRecorder(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "startRecording failed", e)
-            status = status or AudioStatus.OPEN_FAILED
+            addStatus(AudioStatus.OPEN_FAILED)
             releaseRecord()
             false
         }
@@ -252,7 +307,7 @@ class AudioRecorder(private val context: Context) {
             if (r != null && r.state == AudioRecord.STATE_INITIALIZED) {
                 audioSource = src
                 if (src != MediaRecorder.AudioSource.UNPROCESSED) {
-                    status = status or AudioStatus.PROCESSED_SOURCE
+                    addStatus(AudioStatus.PROCESSED_SOURCE)
                 }
                 return r
             }
@@ -277,7 +332,7 @@ class AudioRecorder(private val context: Context) {
                 val n = rec.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
                 if (n < 0) {
                     Log.e(TAG, "AudioRecord.read error $n")
-                    status = status or AudioStatus.ENDED_EARLY
+                    addStatus(AudioStatus.ENDED_EARLY)
                     break
                 }
                 if (n == 0) continue
@@ -290,7 +345,7 @@ class AudioRecorder(private val context: Context) {
                     val v = buf[i] * g
                     buf[i] = v
                     val a = abs(v)
-                    if (a >= 1.0f) clipped = true
+                    if (a >= CLIP_THRESHOLD) clipped = true
                     if (channels == 2 && (i and 1) == 1) {
                         if (a > peakR) peakR = a
                     } else if (a > peakL) {
@@ -303,7 +358,7 @@ class AudioRecorder(private val context: Context) {
                     clipped = clipped,
                 )
 
-                if (!queue.offer(buf.copyOf(n))) status = status or AudioStatus.OVERRUNS
+                if (!queue.offer(buf.copyOf(n))) addStatus(AudioStatus.OVERRUNS)
 
                 val now = SystemClock.elapsedRealtimeNanos()
                 if (now >= nextAnchorAt) {
@@ -315,7 +370,7 @@ class AudioRecorder(private val context: Context) {
             // Never let a read-path fault escape this thread -- it must not
             // touch the video path. Mark the take degraded and wind down.
             Log.e(TAG, "audio read loop failed", e)
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
         } finally {
             // Prompt shutdown of the write side even if stop() has not been
             // called yet; harmless if it already was.
@@ -327,6 +382,17 @@ class AudioRecorder(private val context: Context) {
      * One clock-bridge reading plus one converter anchor. Suspend shows up as a
      * moved bridge and invalidates the take's sync claim, rather than silently
      * shifting every timestamp by the sleep duration.
+     *
+     * Latching requires TWO consecutive out-of-tolerance readings (one second
+     * apart, at [ANCHOR_INTERVAL_NS]) rather than one: sampleClocks' own
+     * back-to-back System.nanoTime()/elapsedRealtimeNanos() reads can be
+     * preempted by the scheduler between them, which looks identical to a real
+     * suspend for exactly one sample -- and this project pins five worker
+     * threads to big cores during 4K capture, making that preemption plausible
+     * over a multi-minute take. A genuine suspend keeps the gap moved on every
+     * later sample (it does not self-correct), so requiring one confirming
+     * reading before latching filters the scheduler-jitter false positive
+     * without meaningfully delaying detection of a real one.
      */
     private fun sampleClocks(rec: AudioRecord, ts: AudioTimestamp) {
         val bridge = ClockBridge(System.nanoTime(), SystemClock.elapsedRealtimeNanos())
@@ -334,7 +400,13 @@ class AudioRecorder(private val context: Context) {
         if (first == null) {
             firstBridge = bridge
         } else if (AvSync.suspendDetected(first, bridge)) {
-            status = status or AudioStatus.SUSPENDED
+            if (pendingSuspectBridge != null) {
+                addStatus(AudioStatus.SUSPENDED)
+            } else {
+                pendingSuspectBridge = bridge
+            }
+        } else {
+            pendingSuspectBridge = null
         }
         if (rec.getTimestamp(ts, AudioTimestamp.TIMEBASE_BOOTTIME) == AudioRecord.SUCCESS) {
             synchronized(anchors) { anchors.add(AudioAnchor(ts.framePosition, ts.nanoTime)) }
@@ -343,6 +415,13 @@ class AudioRecorder(private val context: Context) {
 
     private fun writeLoop() {
         while (true) {
+            // First-frame handoff: onFirstFrame (camera capture-callback thread)
+            // only computes the trim and publishes frame0BootNs; the actual
+            // WavWriter creation and the (potentially ~576 KB) preroll flush run
+            // here instead, off the camera thread. Checked every iteration so it
+            // fires promptly even if the queue happens to be momentarily empty.
+            if (!firstFrameHandled && frame0BootNs != 0L) flushFirstFrame()
+
             val chunk = try {
                 queue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             } catch (e: InterruptedException) {
@@ -354,9 +433,9 @@ class AudioRecorder(private val context: Context) {
                 continue
             }
 
-            // Decide preroll-vs-stream atomically with onFirstFrame's drain+publish
-            // (same monitor), so a chunk can never be added to preroll after
-            // onFirstFrame has already finished draining it.
+            // Decide preroll-vs-stream atomically with flushFirstFrame's drain+
+            // publish (same monitor), so a chunk can never be added to preroll
+            // after the drain has already run.
             val target: WavWriter? = synchronized(preroll) {
                 val w = writer
                 if (w == null) {
@@ -368,15 +447,37 @@ class AudioRecorder(private val context: Context) {
             }
             if (target != null) {
                 try {
-                    target.append(chunk, chunk.size)
+                    appendTrimmed(target, chunk)
                 } catch (e: Exception) {
                     Log.e(TAG, "WAV append failed", e)
-                    status = status or AudioStatus.ENDED_EARLY
+                    addStatus(AudioStatus.ENDED_EARLY)
                     running.set(false)
                     break
                 }
             }
         }
+    }
+
+    /** Applies any still-owed [pendingTrimSamples] (Critical 1's carried
+     * residual -- a trim larger than the whole buffered preroll) to the front
+     * of [chunk] before appending what's left to [target]. Only ever called
+     * from writeLoop: pendingTrimSamples is set once by [flushFirstFrame]
+     * (under the preroll lock, before writer is published) and only read or
+     * decremented afterwards, by this same thread, so no locking is needed
+     * here. */
+    private fun appendTrimmed(target: WavWriter, chunk: FloatArray) {
+        val toDrop = pendingTrimSamples
+        if (toDrop <= 0L) {
+            target.append(chunk, chunk.size)
+            return
+        }
+        if (toDrop >= chunk.size) {
+            pendingTrimSamples = toDrop - chunk.size
+            return
+        }
+        val keep = chunk.copyOfRange(toDrop.toInt(), chunk.size)
+        pendingTrimSamples = 0L
+        target.append(keep, keep.size)
     }
 
     /** Holds audio until frame 0's timestamp arrives. Capped, because an
@@ -387,96 +488,138 @@ class AudioRecorder(private val context: Context) {
         prerollSamples += chunk.size
         while (prerollSamples > MAX_PREROLL_SAMPLES && preroll.isNotEmpty()) {
             prerollSamples -= preroll.removeFirst().size
-            status = status or AudioStatus.OVERRUNS
+            addStatus(AudioStatus.OVERRUNS)
         }
     }
 
     /**
-     * Supplies frame 0's SENSOR_TIMESTAMP: computes the head trim, flushes the
-     * buffered prefix through it, and switches to streaming. Only the first call
-     * has any effect, since only the first frame defines t=0.
+     * Supplies frame 0's SENSOR_TIMESTAMP and computes the head trim. Only the
+     * first call has any effect, since only the first frame defines t=0.
+     *
+     * Deliberately cheap: this runs on the Camera2 capture-callback thread (see
+     * CameraController.captureCallback) and must stay a near-no-op after the
+     * first frame -- one boolean/field read, no allocation, no logging on the
+     * success path. All the actual I/O (opening the WavWriter and flushing the
+     * buffered preroll) happens on the audio write thread instead; see
+     * [flushFirstFrame], which [writeLoop] invokes once it observes
+     * [frame0BootNs] published below.
      *
      * Synchronized so two near-simultaneous calls can never both pass the
-     * "not armed yet" guard and open two writers on the same file.
+     * "not armed yet" guard and publish two different trims.
      */
     @Synchronized
     fun onFirstFrame(sensorTimestampNs: Long) {
-        if (!running.get() || writer != null || frame0BootNs != 0L) return
+        if (!running.get() || frame0BootNs != 0L) return
 
         // AvSync is pure math with no internal guards (by design -- see its own
         // review notes): a degenerate sampleRate could throw or yield NaN/Infinity.
         // sampleRate is pinned to the 48000 constant so this should never happen,
         // but this method runs on the video capture path, so nothing from AvSync
         // may ever propagate out of it regardless.
-        val trimFrames: Long
         try {
             val bridge = firstBridge
                 ?: ClockBridge(System.nanoTime(), SystemClock.elapsedRealtimeNanos())
-            frame0BootNs = AvSync.toBootNs(sensorTimestampNs, sourceIsRealtime, bridge)
+            val f0 = AvSync.toBootNs(sensorTimestampNs, sourceIsRealtime, bridge)
 
-            // No anchor yet means getTimestamp has not succeeded on this device.
-            // Fall back to "no correction" (offset 0) rather than a wrong one.
             val anchor = synchronized(anchors) { anchors.firstOrNull() }
-            val sample0 =
-                if (anchor != null) AvSync.sample0BootNs(anchor, sampleRate) else frame0BootNs
-            offsetNs = frame0BootNs - sample0
-            trimFrames = AvSync.trimSamples(frame0BootNs, sample0, sampleRate)
+            val trimFrames: Long
+            if (anchor != null) {
+                val sample0 = AvSync.sample0BootNs(anchor, sampleRate)
+                offsetNs = f0 - sample0
+                trimFrames = AvSync.trimSamples(f0, sample0, sampleRate)
+            } else {
+                // No anchor yet means getTimestamp() has never succeeded on this
+                // device. Applying no correction is the right POLICY (fall back
+                // to offset 0 rather than a guessed-wrong one) -- but asserting a
+                // sync we did not earn is not, so flag it (Important 10).
+                offsetNs = 0L
+                trimFrames = 0L
+                addStatus(AudioStatus.ALIGNMENT_UNVERIFIED)
+            }
+
+            // A trim this large cannot be real: the preroll physically cannot
+            // hold more than MAX_PREROLL_SAMPLES / channels frames. Anything
+            // past that points at a bad clock-bridge assumption (e.g.
+            // SENSOR_INFO_TIMESTAMP_SOURCE reporting UNKNOWN when the vendor
+            // actually emits boottime, adding a multi-hour uptime offset) --
+            // applying it would silently discard the whole preroll with no sign
+            // anything went wrong. No trim beats a nonsense one.
+            firstFrameTrimFrames = if (abs(trimFrames) > MAX_PREROLL_SAMPLES / channels) {
+                addStatus(AudioStatus.ALIGNMENT_UNVERIFIED)
+                0L
+            } else {
+                trimFrames
+            }
+            // Publish LAST: this is writeLoop's signal that the trim decision is
+            // ready and it may proceed to open the writer and flush the preroll.
+            frame0BootNs = f0
         } catch (e: Exception) {
             Log.e(TAG, "AvSync computation failed", e)
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
             running.set(false)
-            return
         }
+    }
 
+    /**
+     * Runs on the audio write thread, exactly once per take, as soon as
+     * [onFirstFrame] has published its trim decision: opens the WavWriter and
+     * flushes the buffered preroll through [AvSync.planPrerollTrim]. Never runs
+     * on the camera capture-callback thread -- see [onFirstFrame]'s kdoc for why
+     * that matters (frame 0's metadata push must not race a ~576 KB disk write).
+     */
+    private fun flushFirstFrame() {
+        firstFrameHandled = true
         val f = wavFile ?: return
         val w = try {
             WavWriter(f, sampleRate, channels)
         } catch (e: Exception) {
             Log.e(TAG, "could not open WAV", e)
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
             running.set(false)
             return
         }
 
         // Every append() here can throw (disk full, I/O fault); none of it may
-        // reach this method's caller, which is on the video capture path. On
-        // failure writer is left null: writeLoop keeps buffering into preroll
-        // (harmless, capped) until it observes running == false and exits.
+        // escape this thread. On failure writer is left null: the rest of
+        // writeLoop keeps buffering into preroll (harmless, capped) until it
+        // observes running == false and exits.
         try {
-            // trimFrames counts sample FRAMES; the buffers hold interleaved samples.
-            var toDrop = trimFrames * channels
             synchronized(preroll) {
-                if (toDrop < 0) {
-                    status = status or AudioStatus.PADDED
-                    var pad = -toDrop
+                val plan = AvSync.planPrerollTrim(preroll.map { it.size }, firstFrameTrimFrames, channels)
+                if (plan.padSamples > 0) {
+                    addStatus(AudioStatus.PADDED)
+                    var pad = plan.padSamples
                     val silence = FloatArray(PAD_CHUNK)
                     while (pad > 0) {
                         val n = minOf(pad, PAD_CHUNK.toLong()).toInt()
                         w.append(silence, n)
                         pad -= n
                     }
-                    toDrop = 0
+                }
+                repeat(plan.dropChunkCount) { preroll.removeFirst() }
+                if (plan.partialDropSamples > 0) {
+                    val c = preroll.removeFirst()
+                    val keep = c.copyOfRange(plan.partialDropSamples, c.size)
+                    w.append(keep, keep.size)
                 }
                 while (preroll.isNotEmpty()) {
                     val c = preroll.removeFirst()
-                    when {
-                        toDrop >= c.size -> toDrop -= c.size
-                        toDrop > 0 -> {
-                            val keep = c.copyOfRange(toDrop.toInt(), c.size)
-                            w.append(keep, keep.size)
-                            toDrop = 0
-                        }
-                        else -> w.append(c, c.size)
-                    }
+                    w.append(c, c.size)
                 }
                 prerollSamples = 0
-                // Publish while still holding the lock: from this point on
-                // writeLoop, not this method, owns append() on w.
+                // Carry any trim the preroll itself couldn't cover (Critical 1):
+                // previously this was silently discarded, leaving the WAV
+                // effectively untrimmed with no sign anything was wrong.
+                // appendTrimmed drops it from the start of subsequently
+                // streamed chunks instead.
+                pendingTrimSamples = plan.residualSamples
+                // Publish while still holding the lock: from this point on the
+                // rest of writeLoop, not this method, owns append() on w.
                 writer = w
             }
         } catch (e: Exception) {
             Log.e(TAG, "WAV preroll flush failed", e)
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
             running.set(false)
             try {
                 w.close(null)
@@ -533,10 +676,10 @@ class AudioRecorder(private val context: Context) {
             Log.w(TAG, "driftPpm computation failed", e)
             0
         }
-        if (abs(driftPpm) > DRIFT_WARN_PPM) status = status or AudioStatus.DRIFT_HIGH
+        if (abs(driftPpm) > DRIFT_WARN_PPM) addStatus(AudioStatus.DRIFT_HIGH)
 
         // No first frame ever arrived: the take produced no aligned audio at all.
-        if (writer == null) status = status or AudioStatus.ENDED_EARLY
+        if (writer == null) addStatus(AudioStatus.ENDED_EARLY)
 
         if (writeStuck) {
             // The write thread never returned from a blocked append()/close()
@@ -548,13 +691,13 @@ class AudioRecorder(private val context: Context) {
             // exists precisely to recover a file left in this state, which
             // beats risking corruption.
             Log.e(TAG, "audio write thread did not terminate within ${THREAD_JOIN_MS}ms; skipping close to avoid racing a live append()")
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
         } else {
             try {
                 writer?.close(buildBext())
             } catch (e: Exception) {
                 Log.e(TAG, "WAV close failed", e)
-                status = status or AudioStatus.ENDED_EARLY
+                addStatus(AudioStatus.ENDED_EARLY)
             }
         }
         writer = null
@@ -573,7 +716,7 @@ class AudioRecorder(private val context: Context) {
             // busy on the next start(). This tradeoff (leak over crash) is
             // deliberate; see task-6-report.md.
             Log.e(TAG, "audio read thread did not terminate after AudioRecord.stop(); leaking AudioRecord rather than racing release() against a possibly-live read()")
-            status = status or AudioStatus.ENDED_EARLY
+            addStatus(AudioStatus.ENDED_EARLY)
             record = null
         } else {
             try {
@@ -589,10 +732,18 @@ class AudioRecorder(private val context: Context) {
         return result(present = produced)
     }
 
+    /** Sets [bit] in [status] atomically and republishes it via [liveStatus].
+     * status is mutated from four different threads (read, write, camera
+     * capture-callback, and stop()'s caller); getAndUpdate/updateAndGet is what
+     * actually makes the `or` atomic -- see the [status] field comment. */
+    private fun addStatus(bit: Int) {
+        _liveStatus.value = status.updateAndGet { it or bit }
+    }
+
     private fun buildBext(): BextInfo {
         val now = Date()
         return BextInfo(
-            description = "RawCam offsetNs=$offsetNs driftPpm=$driftPpm status=$status " +
+            description = "RawCam offsetNs=$offsetNs driftPpm=$driftPpm status=${status.get()} " +
                 "source=$audioSource rate=$sampleRate ch=$channels",
             originationDate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(now),
             originationTime = SimpleDateFormat("HH:mm:ss", Locale.US).format(now),
@@ -607,7 +758,7 @@ class AudioRecorder(private val context: Context) {
         offsetNs = offsetNs,
         driftPpm = driftPpm,
         timestampSource = if (sourceIsRealtime) 1 else 0,
-        status = status,
+        status = status.get(),
         source = audioSource,
         fileName = wavFile?.name ?: "",
     )
@@ -644,6 +795,13 @@ class AudioRecorder(private val context: Context) {
         private const val DRIFT_WARN_PPM = 100
         private const val GAIN_DB_MIN = -20.0f
         private const val GAIN_DB_MAX = 30.0f
+
+        // Spec: latch the clip indicator at or above -0.1 dBFS, not only at a
+        // literal 1.0f. With ENCODING_PCM_FLOAT, a 16-bit-backed source at
+        // digital full scale normalizes to 32767/32768 = 0.99997f -- under
+        // 1.0f, so a >= 1.0f comparison never latches on genuinely clipped
+        // 16-bit-sourced input. 0.98855f == 10^(-0.1/20).
+        private const val CLIP_THRESHOLD = 0.98855f
 
         /** 2s at 48kHz stereo. Audio arms before session config, so a normal take
          * buffers a fraction of this before frame 0 arrives. */

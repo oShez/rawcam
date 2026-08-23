@@ -83,4 +83,73 @@ class AvSyncTest {
         val later = ClockBridge(monotonicNs = 2_000_000_000L, bootNs = 10_000_000_000L)
         assertTrue(AvSync.suspendDetected(bridge, later))
     }
+
+    // -- planPrerollTrim ------------------------------------------------------
+    // chunkSizes are interleaved-sample counts; trimFrames is in FRAMES (the
+    // same unit trimSamples() returns), converted internally via channels.
+
+    @Test
+    fun `zero trim keeps everything, nothing padded or dropped`() {
+        val plan = AvSync.planPrerollTrim(listOf(100, 100), trimFrames = 0L, channels = 1)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(0, plan.dropChunkCount)
+        assertEquals(0, plan.partialDropSamples)
+        assertEquals(0L, plan.residualSamples)
+    }
+
+    @Test
+    fun `negative trim yields pad samples and drops nothing`() {
+        // -50 frames stereo = -100 interleaved samples to pad.
+        val plan = AvSync.planPrerollTrim(listOf(100, 100), trimFrames = -50L, channels = 2)
+        assertEquals(100L, plan.padSamples)
+        assertEquals(0, plan.dropChunkCount)
+        assertEquals(0, plan.partialDropSamples)
+        assertEquals(0L, plan.residualSamples)
+    }
+
+    @Test
+    fun `trim landing exactly on a chunk boundary drops whole chunks only`() {
+        // 100 frames mono = 100 samples = exactly chunkSizes[0].
+        val plan = AvSync.planPrerollTrim(listOf(100, 100, 100), trimFrames = 100L, channels = 1)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(1, plan.dropChunkCount)
+        assertEquals(0, plan.partialDropSamples)
+        assertEquals(0L, plan.residualSamples)
+    }
+
+    @Test
+    fun `trim spanning multiple whole chunks drops all of them`() {
+        val plan = AvSync.planPrerollTrim(listOf(100, 100, 100, 100), trimFrames = 250L, channels = 1)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(2, plan.dropChunkCount)
+        assertEquals(50, plan.partialDropSamples)
+        assertEquals(0L, plan.residualSamples)
+    }
+
+    @Test
+    fun `trim landing mid-chunk drops a partial chunk`() {
+        val plan = AvSync.planPrerollTrim(listOf(100, 100), trimFrames = 30L, channels = 1)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(0, plan.dropChunkCount)
+        assertEquals(30, plan.partialDropSamples)
+        assertEquals(0L, plan.residualSamples)
+    }
+
+    @Test
+    fun `trim larger than the whole preroll consumes it and carries a residual`() {
+        val plan = AvSync.planPrerollTrim(listOf(100, 100), trimFrames = 350L, channels = 1)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(2, plan.dropChunkCount)
+        assertEquals(0, plan.partialDropSamples)
+        assertEquals(150L, plan.residualSamples)
+    }
+
+    @Test
+    fun `an empty preroll with a positive trim is pure residual`() {
+        val plan = AvSync.planPrerollTrim(emptyList(), trimFrames = 40L, channels = 2)
+        assertEquals(0L, plan.padSamples)
+        assertEquals(0, plan.dropChunkCount)
+        assertEquals(0, plan.partialDropSamples)
+        assertEquals(80L, plan.residualSamples)
+    }
 }

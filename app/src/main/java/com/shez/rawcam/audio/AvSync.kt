@@ -22,6 +22,30 @@ data class ClockBridge(val monotonicNs: Long, val bootNs: Long) {
 data class AudioAnchor(val framePosition: Long, val bootNs: Long)
 
 /**
+ * Pure plan for applying a head trim across a buffered preroll and, when the
+ * preroll doesn't cover the whole trim, the chunks still to arrive after it.
+ * See [AvSync.planPrerollTrim].
+ */
+data class PrerollTrimPlan(
+    /** Silent interleaved samples to prepend before any preroll chunk.
+     * Non-zero only when the trim was negative (audio started late). */
+    val padSamples: Long,
+    /** The first this many preroll chunks are dropped in full. */
+    val dropChunkCount: Int,
+    /** Interleaved samples to additionally drop from the START of the chunk
+     * at index [dropChunkCount] (0 means that chunk, if any, is kept whole). */
+    val partialDropSamples: Int,
+    /**
+     * Interleaved samples still owed after the WHOLE preroll has been consumed
+     * by [dropChunkCount]/[partialDropSamples] -- i.e. the trim was larger than
+     * everything buffered. The caller must keep dropping this many samples from
+     * the start of subsequently streamed chunks before appending anything to
+     * the writer. 0 in the ordinary case.
+     */
+    val residualSamples: Long,
+)
+
+/**
  * Pure A/V sync arithmetic. Deliberately free of Android dependencies so the
  * hard part of this feature is testable on the JVM without a device.
  *
@@ -83,4 +107,35 @@ object AvSync {
      * every correlation built on [first] is now suspect. */
     fun suspendDetected(first: ClockBridge, latest: ClockBridge): Boolean =
         abs(latest.offsetNs - first.offsetNs) > SUSPEND_TOLERANCE_NS
+
+    /**
+     * Splits [trimFrames] (as returned by [trimSamples], in sample FRAMES) into a
+     * concrete plan for draining/padding a buffered preroll of chunk SIZES
+     * (interleaved samples, i.e. frames * channels already folded in -- the same
+     * unit as the FloatArray chunks AudioRecorder buffers).
+     *
+     * Never throws and never inspects actual sample data -- a pure transform over
+     * sizes, so every branch (exact-boundary trim, a trim spanning several
+     * chunks, a partial-chunk trim, negative trim/pad, zero trim, and a trim
+     * larger than the whole preroll) is exhaustively testable on the JVM.
+     */
+    fun planPrerollTrim(chunkSizes: List<Int>, trimFrames: Long, channels: Int): PrerollTrimPlan {
+        val trimSamples = trimFrames * channels
+        if (trimSamples <= 0L) {
+            return PrerollTrimPlan(
+                padSamples = -trimSamples, dropChunkCount = 0,
+                partialDropSamples = 0, residualSamples = 0L,
+            )
+        }
+        var remaining = trimSamples
+        for ((idx, size) in chunkSizes.withIndex()) {
+            if (remaining >= size) {
+                remaining -= size
+            } else {
+                return PrerollTrimPlan(0L, idx, remaining.toInt(), 0L)
+            }
+        }
+        // Whole preroll consumed but the trim was not fully satisfied.
+        return PrerollTrimPlan(0L, chunkSizes.size, 0, remaining)
+    }
 }
