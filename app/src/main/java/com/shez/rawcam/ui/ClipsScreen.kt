@@ -360,6 +360,8 @@ private fun ClipCard(
                         val (suffix, color) = when {
                             status == ExportService.ExportStatus.FAILED -> " (failed)" to RawCamColors.Accent
                             status == ExportService.ExportStatus.CANCELLED -> " (cancelled)" to RawCamColors.Muted
+                            status == ExportService.ExportStatus.AUDIO_COPY_FAILED ->
+                                " (audio copy failed -- source kept, retry export)" to RawCamColors.Accent
                             partial -> " (incomplete · ${clip.exportedFrameCount}/${clip.frameCount})" to RawCamColors.Accent
                             else -> "" to RawCamColors.Success
                         }

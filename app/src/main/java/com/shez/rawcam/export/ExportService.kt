@@ -145,8 +145,13 @@ class ExportService : Service() {
             // Copy the sidecar WAV next to the DNGs. Best effort by design: the DNGs
             // are the irreplaceable asset, so a failure here warns and leaves the
             // export successful. Repair first -- a WAV from a killed process still
-            // has zeroed RIFF size fields.
+            // has zeroed RIFF size fields. "Best effort" covers the copy only -- it
+            // never licenses destroying the source: srcWavCopyFailed below is what
+            // stops deleteAfter from throwing away the only remaining copy of the
+            // audio, and overrides the DONE status set above so the user is told
+            // instead of the clip just quietly staying put.
             var wavCopied: File? = null
+            var srcWavCopyFailed = false
             if (ok) {
                 val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
                 if (srcWav.exists()) {
@@ -157,8 +162,12 @@ class ExportService : Service() {
                         wavCopied = dst
                     } catch (e: Exception) {
                         Log.e(TAG, "failed to copy sidecar WAV for $rawvPath", e)
+                        srcWavCopyFailed = true
                     }
                 }
+            }
+            if (srcWavCopyFailed) {
+                status[clipName] = ExportStatus.AUDIO_COPY_FAILED
             }
             // Indexes the just-written DNGs (and, if copied, the sidecar WAV) into
             // MediaStore's generic Files collection so they show up over MTP/USB
@@ -186,24 +195,35 @@ class ExportService : Service() {
             // completion -- never on FAILED or CANCELLED (the clip would otherwise
             // vanish with no exported DNGs to show for it).
             if (ok && deleteAfter) {
-                val rawvDeleted = try {
-                    val deleted = File(rawvPath).delete()
-                    if (!deleted) Log.e(TAG, "deleteAfter: failed to delete $rawvPath")
-                    deleted
-                } catch (e: Exception) {
-                    Log.e(TAG, "deleteAfter: failed to delete $rawvPath", e)
-                    false
-                }
-                // Pairing: never delete the WAV if the .rawv delete above did not
-                // actually succeed -- a surviving .rawv must never leave its WAV
-                // deleted, or vice versa.
-                if (rawvDeleted) {
-                    val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
-                    if (srcWav.exists()) {
-                        try {
-                            if (!srcWav.delete()) Log.e(TAG, "deleteAfter: failed to delete $srcWav")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "deleteAfter: failed to delete $srcWav", e)
+                if (srcWavCopyFailed) {
+                    // The sidecar WAV is the only copy of the audio that exists -- a
+                    // successful DNG export does not make it recoverable. Deleting
+                    // either the .rawv or the WAV now would destroy that only copy,
+                    // which the copy step's best-effort contract never licensed for
+                    // the source. Keep the whole pair so the user can retry the
+                    // export; ExportStatus.AUDIO_COPY_FAILED (set above) is what
+                    // tells them why this clip is still here instead of a silent skip.
+                    Log.w(TAG, "deleteAfter: keeping source .rawv and WAV, audio copy failed for $rawvPath")
+                } else {
+                    val rawvDeleted = try {
+                        val deleted = File(rawvPath).delete()
+                        if (!deleted) Log.e(TAG, "deleteAfter: failed to delete $rawvPath")
+                        deleted
+                    } catch (e: Exception) {
+                        Log.e(TAG, "deleteAfter: failed to delete $rawvPath", e)
+                        false
+                    }
+                    // Pairing: never delete the WAV if the .rawv delete above did not
+                    // actually succeed -- a surviving .rawv must never leave its WAV
+                    // deleted, or vice versa.
+                    if (rawvDeleted) {
+                        val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
+                        if (srcWav.exists()) {
+                            try {
+                                if (!srcWav.delete()) Log.e(TAG, "deleteAfter: failed to delete $srcWav")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "deleteAfter: failed to delete $srcWav", e)
+                            }
                         }
                     }
                 }
@@ -267,7 +287,11 @@ class ExportService : Service() {
         updateNotification(clipName, done, total)
     }
 
-    enum class ExportStatus { RUNNING, DONE, FAILED, CANCELLED }
+    // AUDIO_COPY_FAILED: DNGs exported successfully, but the sidecar WAV -- the
+    // only copy of the clip's audio -- failed to copy into the export folder.
+    // deleteAfter does not run in this case, so the source .rawv and WAV are
+    // both still on disk and the export can be retried.
+    enum class ExportStatus { RUNNING, DONE, FAILED, CANCELLED, AUDIO_COPY_FAILED }
 
     companion object {
         const val EXTRA_RAWV_PATH = "rawvPath"
