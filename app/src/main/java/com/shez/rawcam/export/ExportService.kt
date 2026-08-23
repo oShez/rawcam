@@ -145,24 +145,37 @@ class ExportService : Service() {
             // Copy the sidecar WAV next to the DNGs. Best effort by design: the DNGs
             // are the irreplaceable asset, so a failure here warns and leaves the
             // export successful. Repair first -- a WAV from a killed process still
-            // has zeroed RIFF size fields. "Best effort" covers the copy only -- it
-            // never licenses destroying the source: srcWavCopyFailed below is what
-            // stops deleteAfter from throwing away the only remaining copy of the
-            // audio, and overrides the DONE status set above so the user is told
-            // instead of the clip just quietly staying put.
+            // has zeroed RIFF size fields. repairIfTruncated returns false (without
+            // throwing) when the file is too short or has a bad RIFF/data tag, so
+            // that return value is checked and routed through the same failure path
+            // as a thrown copy error below -- an unrepairable WAV must never read as
+            // a successful copy. "Best effort" covers the copy only -- it never
+            // licenses destroying the source: srcWavCopyFailed below is what stops
+            // deleteAfter from throwing away the only remaining copy of the audio,
+            // and overrides the DONE status set above so the user is told instead
+            // of the clip just quietly staying put.
             var wavCopied: File? = null
             var srcWavCopyFailed = false
             if (ok) {
-                val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
+                val srcWav = wavSiblingOf(rawvPath)
                 if (srcWav.exists()) {
+                    val dst = File(outDir, "$clipName.wav")
                     try {
-                        WavWriter.repairIfTruncated(srcWav)
-                        val dst = File(outDir, "$clipName.wav")
+                        if (!WavWriter.repairIfTruncated(srcWav)) {
+                            throw java.io.IOException(
+                                "sidecar WAV is unrepairable (too short or bad RIFF/data tag)"
+                            )
+                        }
                         srcWav.copyTo(dst, overwrite = true)
                         wavCopied = dst
                     } catch (e: Exception) {
                         Log.e(TAG, "failed to copy sidecar WAV for $rawvPath", e)
                         srcWavCopyFailed = true
+                        // A partial copy (e.g. disk full mid-copyTo) can leave a
+                        // truncated file at dst -- clean it up so it doesn't sit
+                        // beside the valid DNGs as a broken audio file waiting for
+                        // the system's own periodic media scan to surface it.
+                        dst.delete()
                     }
                 }
             }
@@ -217,7 +230,7 @@ class ExportService : Service() {
                     // actually succeed -- a surviving .rawv must never leave its WAV
                     // deleted, or vice versa.
                     if (rawvDeleted) {
-                        val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
+                        val srcWav = wavSiblingOf(rawvPath)
                         if (srcWav.exists()) {
                             try {
                                 if (!srcWav.delete()) Log.e(TAG, "deleteAfter: failed to delete $srcWav")
@@ -232,6 +245,12 @@ class ExportService : Service() {
         }
         return START_NOT_STICKY
     }
+
+    // Sidecar WAV path for a given .rawv path -- same basename, same directory.
+    // Mirrors ClipsScreen.kt's wavOf; kept separate since that one takes a File
+    // for a clip already resolved on disk, while this one derives from the raw
+    // path string onStartCommand is handed.
+    private fun wavSiblingOf(rawvPath: String) = File(rawvPath.removeSuffix(".rawv") + ".wav")
 
     override fun onDestroy() {
         // Whole-instance teardown (system reclaim, or nothing left outstanding):
