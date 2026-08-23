@@ -962,7 +962,7 @@ In `struct FileHeader`, replace `uint8_t reserved[284];` with:
   uint32_t audioStatus;           // bitfield, see kAudio* above
   uint32_t audioSource;           // MediaRecorder.AudioSource actually opened
   char     audioFileName[64];     // NUL-terminated sidecar basename
-  uint8_t  reserved[184];
+  uint8_t  reserved[180];
 ```
 
 In `core/src/rawv_reader.cpp:84`, replace the strict equality:
@@ -1758,6 +1758,22 @@ class AudioRecorder(private val context: Context) {
         }
         writer = w
     }
+```
+
+**Post-implementation correction (whole-branch review, 2026-08-17 fix wave, Critical 1):** the
+drain loop above has a defect this plan did not anticipate -- if the loop exits with `toDrop > 0`
+(the trim is larger than the entire buffered preroll), that residual was silently discarded rather
+than applied: the samples that should have been trimmed stay in the stream untrimmed, with no
+status bit recording that alignment was not actually achieved. Fixed by (1) carrying the residual
+forward as a field consumed by the streaming append path instead of dropping it, (2) guarding
+implausible trims (`abs(trimFrames) > MAX_PREROLL_SAMPLES / channels`) by applying no trim and
+setting a new `ALIGNMENT_UNVERIFIED` status bit rather than a nonsense one, and (3) extracting the
+drain/pad decision into a pure, unit-tested function (`AvSync.planPrerollTrim`). See
+`AudioRecorder.kt`'s `flushFirstFrame`/`appendTrimmed` and `AvSyncTest.kt`'s `planPrerollTrim`
+cases for the corrected version; the code block above is preserved here only as the plan's original
+(defective) design intent.
+
+```kotlin
 
     /**
      * Stops capture, finalizes the WAV, and reports what happened. Never throws.

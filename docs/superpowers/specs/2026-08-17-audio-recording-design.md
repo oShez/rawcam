@@ -314,7 +314,11 @@ already finalizes the clip via `MainActivity.onStop`.
 
 - **Settings screen**: a new "Audio" section -- record-audio toggle, input picker (live
   list; a persisted device that is no longer present shows "unavailable -- using default"
-  rather than failing), gain slider with a dB readout.
+  rather than failing), gain control offering 8 discrete stops (-20, -12, -6, 0, +6, +12,
+  +20, +30 dB) via the same `EnumRow` idiom every other Settings row already uses, rather
+  than a continuous slider -- this also sidesteps persisting an arbitrary float gain value
+  that a continuous slider could produce but that this section's other controls have no
+  analogous concept of representing or restoring exactly.
 - **Record screen**: an `AudioMeter` in the HUD, visible whenever audio is enabled and
   independent of the `showStatsSidebar` toggle -- it is a recording-critical indicator,
   not a stat. Per-channel bars, ~1.5 s peak hold, and a clip indicator latching red for
