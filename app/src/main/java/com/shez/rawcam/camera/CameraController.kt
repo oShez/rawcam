@@ -26,6 +26,7 @@ import android.view.Surface
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.audio.AudioRecorder
 import com.shez.rawcam.audio.AudioResult
+import com.shez.rawcam.audio.AudioStatus
 import com.shez.rawcam.audio.MeterLevels
 import com.shez.rawcam.settings.OisMode
 import java.io.File
@@ -1023,8 +1024,8 @@ class CameraController(private val context: Context) {
      *
      * Teardown ordering (mandatory): frames into the RAW surface are fully stopped
      * FIRST — stopRepeating() + abortCaptures(), then wait for the session's
-     * onReady (idle) callback — then audio is stopped and its provenance handed
-     * to [NativeBridge.nativeSetAudioInfo] — and only THEN is
+     * onReady (idle) callback -- then audio is stopped and its provenance handed
+     * to [NativeBridge.nativeSetAudioInfo] -- and only THEN is
      * [NativeBridge.nativeStopRecording] called. A late frame arriving after
      * native stop would leak a hardware buffer; setAudioInfo after native stop
      * would be silently discarded (the header is already finalized).
@@ -1073,6 +1074,22 @@ class CameraController(private val context: Context) {
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "audio stop/setAudioInfo threw; clip will report no audio", e)
+                // audioRecorder.stop() is documented never to throw -- this branch exists
+                // for exactly the case that guarantee is wrong. Without synthesizing a
+                // result here, lastAudioResult stays at the null startRecording() reset
+                // it to, and RecordScreen's `audio != null` guard silently skips the user
+                // warning entirely: video still finalizes fine ("video always wins" holds),
+                // but "warn loudly" would not. Only synthesize when stop() itself is what
+                // threw (lastAudioResult is still that pre-take null) -- if stop() actually
+                // succeeded and only the nativeSetAudioInfo call after it threw, the real
+                // result assigned above is more honest than overwriting it with a fake one.
+                if (lastAudioResult == null) {
+                    lastAudioResult = AudioResult(
+                        present = false, sampleRate = 0, channels = 0, offsetNs = 0L,
+                        driftPpm = 0, timestampSource = 0, status = AudioStatus.ENDED_EARLY,
+                        source = 0, fileName = "",
+                    )
+                }
             } finally {
                 audioArmed = false
             }

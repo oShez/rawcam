@@ -923,7 +923,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
                     _uiState.update {
-                        it.copy(recording = true, elapsedSeconds = 0, written = 0, dropped = 0)
+                        // audioChannels/audioFailed reset to their defaults here too --
+                        // otherwise a failed take's audioFailed=true (or a stale channel
+                        // count) would keep showing on the meter through an entirely new,
+                        // healthy take until the NEXT stop overwrote it.
+                        it.copy(
+                            recording = true, elapsedSeconds = 0, written = 0, dropped = 0,
+                            audioChannels = 1, audioFailed = false,
+                        )
                     }
                     withContext(Dispatchers.Main) { startPolling() }
                 } else {
