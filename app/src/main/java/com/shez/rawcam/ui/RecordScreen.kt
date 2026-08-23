@@ -1596,7 +1596,17 @@ fun RecordScreen(
                     levels = meterLevels,
                     channels = state.audioChannels,
                     noAudio = state.audioFailed,
-                    degraded = (audioStatusBits and AudioStatus.SYNC_INVALIDATING) != 0,
+                    // UI-only predicate, deliberately wider than the header's
+                    // kAudioSyncInvalidating (which stays exactly as-is): if the
+                    // read thread dies mid-take, _meter freezes at its last
+                    // emitted (non-silent) value and the ticking peak-hold in
+                    // AudioMeter settles onto it, so the HUD would otherwise
+                    // affirmatively show a steady, healthy-looking signal while
+                    // the mic is actually dead. ENDED_EARLY is folded in here,
+                    // UI-side only, so "warn loudly" holds even though
+                    // ENDED_EARLY correctly stays out of the header's sync
+                    // contract (it means "stopped early", not "sync is off").
+                    degraded = (audioStatusBits and (AudioStatus.SYNC_INVALIDATING or AudioStatus.ENDED_EARLY)) != 0,
                     recording = state.recording,
                     modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 16.dp).width(120.dp),
                 )

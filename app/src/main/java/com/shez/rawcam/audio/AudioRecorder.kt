@@ -546,6 +546,14 @@ class AudioRecorder(private val context: Context) {
             // anything went wrong. No trim beats a nonsense one.
             firstFrameTrimFrames = if (abs(trimFrames) > MAX_PREROLL_SAMPLES / channels) {
                 addStatus(AudioStatus.ALIGNMENT_UNVERIFIED)
+                // offsetNs was set above from the same bad clock-bridge
+                // assumption that produced this implausible trimFrames, and
+                // is written verbatim to the header's audioOffsetNs -- a
+                // consumer that checks the status bit is fine, but one that
+                // just applies the offset would get a multi-hour shift.
+                // Zero it here so the header carries a harmless value rather
+                // than a trap.
+                offsetNs = 0L
                 0L
             } else {
                 trimFrames
