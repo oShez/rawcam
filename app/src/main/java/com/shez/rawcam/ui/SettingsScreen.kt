@@ -51,6 +51,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.AudioDeviceCatalog
+import com.shez.rawcam.audio.AudioInputDevice
 import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -71,7 +73,12 @@ import java.io.File
  * value, so external changes (e.g. Reset) are reflected immediately via the flow.
  */
 @Composable
-fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewModel()) {
+fun SettingsScreen(
+    onBack: () -> Unit = {},
+    viewModel: RecordViewModel = viewModel(),
+    onRequestAudioPermission: () -> Unit = {},
+    audioInputs: () -> List<AudioInputDevice> = { emptyList() },
+) {
     BackHandler(onBack = onBack)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -230,6 +237,40 @@ fun SettingsScreen(onBack: () -> Unit = {}, viewModel: RecordViewModel = viewMod
                 title = "Clip name prefix", value = settings.clipPrefix,
                 onCommit = { v -> apply { it.copy(clipPrefix = v) } },
             )
+
+            SectionHeader("AUDIO")
+            ToggleRow(
+                title = "Record audio",
+                subtitle = "Writes a synced .wav beside each clip",
+                checked = settings.recordAudio,
+                onChange = { v ->
+                    // Ask at the toggle, never at record time: a permission dialog
+                    // appearing as the user hits record is how takes get lost.
+                    if (v) onRequestAudioPermission()
+                    apply { it.copy(recordAudio = v) }
+                },
+            )
+            if (settings.recordAudio) {
+                val inputs = remember { audioInputs() }
+                EnumRow(
+                    title = "Input",
+                    subtitle = if (settings.audioInputKey.isNotEmpty() &&
+                        AudioDeviceCatalog.resolve(inputs, settings.audioInputKey) == null
+                    ) "Saved input unavailable -- using default" else null,
+                    options = listOf("" to "System default") + inputs.map { d -> d.key to d.displayName },
+                    selected = settings.audioInputKey,
+                    onSelect = { v -> apply { it.copy(audioInputKey = v) } },
+                )
+                EnumRow(
+                    title = "Gain", subtitle = null,
+                    options = listOf(
+                        -20f to "-20 dB", -12f to "-12 dB", -6f to "-6 dB", 0f to "0 dB",
+                        6f to "+6 dB", 12f to "+12 dB", 20f to "+20 dB", 30f to "+30 dB",
+                    ),
+                    selected = settings.audioGainDb,
+                    onSelect = { v -> apply { it.copy(audioGainDb = v) } },
+                )
+            }
 
             SectionHeader("TAP-TO-METER")
             EnumRow(

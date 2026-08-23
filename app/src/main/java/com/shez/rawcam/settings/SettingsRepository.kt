@@ -53,6 +53,11 @@ data class Settings(
     val mainsFreq: MainsFreq = MainsFreq.OFF,
     val oisMode: OisMode = OisMode.AUTO,
     val compressRecordings: Boolean = true,  // lossless CompressedPredictive .rawv capture
+    val recordAudio: Boolean = false,        // sidecar WAV capture; off by default so an
+                                             // upgrade neither springs a mic-permission
+                                             // prompt nor silently writes a second file
+    val audioInputKey: String = "",          // "" = system default; "<type>:<productName>"
+    val audioGainDb: Float = 0f,             // -20.0 .. +30.0 digital trim
     val clipPrefix: String = "clip",         // sanitized [A-Za-z0-9_-], 1..16
     val meterScope: MeterScope = MeterScope.EVERYTHING,
     val meterRegion: MeterRegion = MeterRegion.MEDIUM,
@@ -136,6 +141,9 @@ object SettingsRepository {
     private val KEY_MAINS_FREQ = stringPreferencesKey("mainsFreq")
     private val KEY_OIS_MODE = stringPreferencesKey("oisMode")
     private val KEY_COMPRESS_RECORDINGS = booleanPreferencesKey("compressRecordings")
+    private val KEY_RECORD_AUDIO = booleanPreferencesKey("recordAudio")
+    private val KEY_AUDIO_INPUT_KEY = stringPreferencesKey("audioInputKey")
+    private val KEY_AUDIO_GAIN_DB = floatPreferencesKey("audioGainDb")
     private val KEY_CLIP_PREFIX = stringPreferencesKey("clipPrefix")
     private val KEY_METER_SCOPE = stringPreferencesKey("meterScope")
     private val KEY_METER_REGION = stringPreferencesKey("meterRegion")
@@ -192,6 +200,9 @@ object SettingsRepository {
             mainsFreq = decodeEnum(this[KEY_MAINS_FREQ], fallback.mainsFreq),
             oisMode = decodeEnum(this[KEY_OIS_MODE], fallback.oisMode),
             compressRecordings = this[KEY_COMPRESS_RECORDINGS] ?: fallback.compressRecordings,
+            recordAudio = this[KEY_RECORD_AUDIO] ?: fallback.recordAudio,
+            audioInputKey = this[KEY_AUDIO_INPUT_KEY] ?: fallback.audioInputKey,
+            audioGainDb = this[KEY_AUDIO_GAIN_DB] ?: fallback.audioGainDb,
             clipPrefix = this[KEY_CLIP_PREFIX] ?: fallback.clipPrefix,
             meterScope = decodeEnum(this[KEY_METER_SCOPE], fallback.meterScope),
             meterRegion = decodeEnum(this[KEY_METER_REGION], fallback.meterRegion),
@@ -235,6 +246,7 @@ object SettingsRepository {
                 // clip-length limit straight into the recording path.
                 maxClipLengthSeconds = updated.maxClipLengthSeconds.coerceIn(0, 3600),
                 reticleHoldMs = updated.reticleHoldMs.coerceIn(100, 5000),
+                audioGainDb = updated.audioGainDb.coerceIn(-20f, 30f),
             )
             prefs[KEY_STARTUP_METER] = next.startupMeter.name
             prefs[KEY_DEFAULT_KELVIN] = next.defaultKelvin
@@ -251,6 +263,9 @@ object SettingsRepository {
             prefs[KEY_MAINS_FREQ] = next.mainsFreq.name
             prefs[KEY_OIS_MODE] = next.oisMode.name
             prefs[KEY_COMPRESS_RECORDINGS] = next.compressRecordings
+            prefs[KEY_RECORD_AUDIO] = next.recordAudio
+            prefs[KEY_AUDIO_INPUT_KEY] = next.audioInputKey
+            prefs[KEY_AUDIO_GAIN_DB] = next.audioGainDb
             prefs[KEY_CLIP_PREFIX] = next.clipPrefix
             prefs[KEY_METER_SCOPE] = next.meterScope.name
             prefs[KEY_METER_REGION] = next.meterRegion.name
