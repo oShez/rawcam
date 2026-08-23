@@ -10,6 +10,7 @@ import android.media.MediaScannerConnection
 import android.os.IBinder
 import android.util.Log
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.WavWriter
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -141,12 +142,30 @@ class ExportService : Service() {
                 wasCancelled -> ExportStatus.CANCELLED
                 else -> ExportStatus.FAILED
             }
-            // Indexes the just-written DNGs into MediaStore's generic Files
-            // collection so they show up over MTP/USB without waiting on the
-            // system's periodic scan. Only meaningful when they were written
-            // under the public ExportPaths root -- skipped otherwise, since a
-            // private-storage path isn't something the scanner can do
-            // anything useful with. Gated on outDir itself (where this export
+            // Copy the sidecar WAV next to the DNGs. Best effort by design: the DNGs
+            // are the irreplaceable asset, so a failure here warns and leaves the
+            // export successful. Repair first -- a WAV from a killed process still
+            // has zeroed RIFF size fields.
+            var wavCopied: File? = null
+            if (ok) {
+                val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
+                if (srcWav.exists()) {
+                    try {
+                        WavWriter.repairIfTruncated(srcWav)
+                        val dst = File(outDir, "$clipName.wav")
+                        srcWav.copyTo(dst, overwrite = true)
+                        wavCopied = dst
+                    } catch (e: Exception) {
+                        Log.e(TAG, "failed to copy sidecar WAV for $rawvPath", e)
+                    }
+                }
+            }
+            // Indexes the just-written DNGs (and, if copied, the sidecar WAV) into
+            // MediaStore's generic Files collection so they show up over MTP/USB
+            // without waiting on the system's periodic scan. Only meaningful when
+            // they were written under the public ExportPaths root -- skipped
+            // otherwise, since a private-storage path isn't something the scanner
+            // can do anything useful with. Gated on outDir itself (where this export
             // actually landed), not a live hasAllFilesAccess() check: exports
             // are serialized on a single-thread executor, so a queued export
             // can sit behind a running one long enough for the user to flip
@@ -158,20 +177,35 @@ class ExportService : Service() {
             if (ok && ExportPaths.isPublicRoot(this, File(outDir))) {
                 val dngPaths = File(outDir).listFiles { f -> f.name.endsWith(".dng") }
                     ?.map { it.absolutePath }?.toTypedArray() ?: emptyArray()
-                if (dngPaths.isNotEmpty()) {
-                    MediaScannerConnection.scanFile(this, dngPaths, null, null)
+                val paths = (dngPaths.toList() + listOfNotNull(wavCopied?.absolutePath)).toTypedArray()
+                if (paths.isNotEmpty()) {
+                    MediaScannerConnection.scanFile(this, paths, null, null)
                 }
             }
             // Delete the source .rawv only on a genuine successful, non-cancelled
             // completion -- never on FAILED or CANCELLED (the clip would otherwise
             // vanish with no exported DNGs to show for it).
             if (ok && deleteAfter) {
-                try {
-                    if (!File(rawvPath).delete()) {
-                        Log.e(TAG, "deleteAfter: failed to delete $rawvPath")
-                    }
+                val rawvDeleted = try {
+                    val deleted = File(rawvPath).delete()
+                    if (!deleted) Log.e(TAG, "deleteAfter: failed to delete $rawvPath")
+                    deleted
                 } catch (e: Exception) {
                     Log.e(TAG, "deleteAfter: failed to delete $rawvPath", e)
+                    false
+                }
+                // Pairing: never delete the WAV if the .rawv delete above did not
+                // actually succeed -- a surviving .rawv must never leave its WAV
+                // deleted, or vice versa.
+                if (rawvDeleted) {
+                    val srcWav = File(rawvPath.removeSuffix(".rawv") + ".wav")
+                    if (srcWav.exists()) {
+                        try {
+                            if (!srcWav.delete()) Log.e(TAG, "deleteAfter: failed to delete $srcWav")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "deleteAfter: failed to delete $srcWav", e)
+                        }
+                    }
                 }
             }
             stopSelf(startId)

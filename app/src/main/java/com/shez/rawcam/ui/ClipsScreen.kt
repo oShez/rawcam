@@ -1,6 +1,7 @@
 package com.shez.rawcam.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.StatFs
@@ -44,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -73,6 +75,36 @@ private fun clipsDirOf(context: android.content.Context) =
     File(context.getExternalFilesDir(null), "clips")
 
 private fun baseName(f: File) = f.name.removeSuffix(".rawv")
+
+/** Sidecar WAV recorded alongside a clip (Task 9), same basename, same directory.
+ * May not exist -- audio recording is optional and best-effort. */
+private fun wavOf(f: File) = File(f.parentFile, baseName(f) + ".wav")
+
+/** Hands the clip's .rawv -- and its sidecar WAV, when present -- to the system
+ * share sheet via a FileProvider (the clips/ directory is under the external-files
+ * root already covered by file_paths.xml's snapshot-root entry). Mirrors
+ * ExportsScreen's shareExport: ACTION_SEND_MULTIPLE once there is more than one
+ * file to send, plain single-item ACTION_SEND when the clip has no audio. */
+private fun shareClip(context: android.content.Context, clip: File) {
+    val authority = "${context.packageName}.fileprovider"
+    val files = listOfNotNull(clip, wavOf(clip).takeIf { it.exists() })
+    val uris = ArrayList(files.map { FileProvider.getUriForFile(context, authority, it) })
+    if (uris.isEmpty()) return
+    val intent = if (uris.size > 1) {
+        Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    } else {
+        Intent(Intent.ACTION_SEND).apply {
+            type = "*/*"
+            putExtra(Intent.EXTRA_STREAM, uris[0])
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+    context.startActivity(Intent.createChooser(intent, "Send ${clip.name}"))
+}
 
 private fun humanSize(bytes: Long): String {
     val mb = bytes / (1024.0 * 1024.0)
@@ -146,7 +178,19 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
     // the next natural refresh.
     fun performDelete(clip: File) {
         scope.launch {
-            withContext(Dispatchers.IO) { clip.delete() }
+            withContext(Dispatchers.IO) {
+                val clipDeleted = clip.delete()
+                // Pairing: a sidecar WAV means nothing without its .rawv, so it goes
+                // with it -- but only once the .rawv delete actually succeeded. A
+                // surviving .rawv must never be left with its WAV deleted out from
+                // under it.
+                if (clipDeleted) {
+                    val wav = wavOf(clip)
+                    if (wav.exists() && !wav.delete()) {
+                        android.util.Log.w("ClipsScreen", "failed to delete sidecar $wav")
+                    }
+                }
+            }
             refreshTick++
         }
     }
@@ -243,6 +287,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                             }
                         },
                         onCancel = { ExportService.cancel(context, baseName(clip.file)) },
+                        onShare = { shareClip(context, clip.file) },
                         onDelete = {
                             scope.launch {
                                 if (SettingsRepository.settings.first().confirmDelete) {
@@ -261,7 +306,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
 
 @Composable
 private fun ClipCard(
-    clip: ClipEntry, onExport: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit,
+    clip: ClipEntry, onExport: () -> Unit, onCancel: () -> Unit, onShare: () -> Unit, onDelete: () -> Unit,
 ) {
     val status = ExportService.status[baseName(clip.file)]
     val running = status == ExportService.ExportStatus.RUNNING
@@ -276,11 +321,20 @@ private fun ClipCard(
         ) {
             Column(Modifier.weight(1f)) {
                 Text(clipTitle(clip.file), style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "${clip.width}×${clip.height} · ${clip.fps} fps · ${clip.frameCount} frames · " +
-                        "${durationLabel(clip.frameCount, clip.fps)} · ${humanSize(clip.file.length())}",
-                    color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${clip.width}×${clip.height} · ${clip.fps} fps · ${clip.frameCount} frames · " +
+                            "${durationLabel(clip.frameCount, clip.fps)} · ${humanSize(clip.file.length())}",
+                        color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                    )
+                    if (wavOf(clip.file).exists()) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "A", color = RawCamColors.Success, fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 when {
                     running -> {
@@ -323,6 +377,7 @@ private fun ClipCard(
                     OutlinedButton(onClick = onCancel) { Text("Cancel") }
                 } else {
                     Button(onClick = onExport) { Text("Export") }
+                    TextButton(onClick = onShare) { Text("Share", color = RawCamColors.Muted) }
                     TextButton(onClick = onDelete) { Text("Delete", color = RawCamColors.Muted) }
                 }
             }
