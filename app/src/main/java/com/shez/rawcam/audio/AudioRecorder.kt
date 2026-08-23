@@ -88,7 +88,18 @@ class AudioRecorder(private val context: Context) {
     private var record: AudioRecord? = null
     private var readThread: Thread? = null
     private var writeThread: Thread? = null
+
+    // running is the workers' "keep looping" signal: it is flipped false both
+    // by stop() and by internal failure paths (read error, append failure,
+    // AvSync fault) so a broken pipeline winds itself down promptly. It must
+    // NOT be used to decide whether stop()'s cleanup (joins/close/release)
+    // still needs to run -- an internal failure ending the take early is
+    // exactly the case that most needs that cleanup. armed tracks that
+    // instead: start() sets it true only once threads are actually running,
+    // and only stop() ever clears it (once, via getAndSet, which also makes
+    // stop() idempotent -- a second call sees it already false and no-ops).
     private val running = AtomicBoolean(false)
+    private val armed = AtomicBoolean(false)
 
     // Bounded, so a stalled filesystem is counted as an overrun rather than
     // blocking the read thread or growing without limit.
@@ -146,8 +157,13 @@ class AudioRecorder(private val context: Context) {
         gainDb: Float,
         cameraSourceIsRealtime: Boolean,
     ): Boolean {
+        // Not atomic with the setup below -- this assumes start()/stop() are
+        // only ever invoked serially from a single (UI) thread, same as the
+        // rest of this class's public surface. Two concurrent start() calls
+        // could both pass this check.
         if (running.get()) return false
         status = 0
+        armed.set(false)
         synchronized(anchors) { anchors.clear() }
         synchronized(preroll) { preroll.clear(); prerollSamples = 0L }
         frame0BootNs = 0L
@@ -204,6 +220,7 @@ class AudioRecorder(private val context: Context) {
                 false
             } else {
                 running.set(true)
+                armed.set(true)
                 startThreads()
                 true
             }
@@ -474,9 +491,24 @@ class AudioRecorder(private val context: Context) {
      * Must be called BEFORE nativeStopRecording(), which finalizes the header.
      */
     fun stop(): AudioResult {
-        if (!running.getAndSet(false)) return result(present = false)
+        // armed is only true once start() has actually started the pipeline,
+        // and only stop() ever clears it -- see the field comment. This is
+        // deliberately NOT `running`: an internal failure (read error, append
+        // failure, AvSync fault) flips running false long before stop() is
+        // called, and that is exactly the case that most needs the cleanup
+        // below (joins, close, release) to still run.
+        if (!armed.getAndSet(false)) {
+            _meter.value = MeterLevels()
+            return result(present = false)
+        }
+        running.set(false)
         readThread?.join(THREAD_JOIN_MS)
         writeThread?.join(THREAD_JOIN_MS)
+        // Thread.join(timeout) returns whether or not the thread actually
+        // terminated -- it only carries a happens-before guarantee when it
+        // did. Must check before treating either thread as safely dead.
+        val readStuck = readThread?.isAlive == true
+        val writeStuck = writeThread?.isAlive == true
         readThread = null
         writeThread = null
 
@@ -492,14 +524,39 @@ class AudioRecorder(private val context: Context) {
         // No first frame ever arrived: the take produced no aligned audio at all.
         if (writer == null) status = status or AudioStatus.ENDED_EARLY
 
-        try {
-            writer?.close(buildBext())
-        } catch (e: Exception) {
-            Log.e(TAG, "WAV close failed", e)
+        if (writeStuck) {
+            // The write thread never returned from a blocked append()/close()
+            // within the join timeout. WavWriter has no internal
+            // synchronization, so calling close() here would be an unguarded
+            // concurrent access racing that still-live append() on the same
+            // BufferedOutputStream/RandomAccessFile. Leave the file with its
+            // placeholder RIFF/data sizes instead -- WavWriter.repairIfTruncated
+            // exists precisely to recover a file left in this state, which
+            // beats risking corruption.
+            Log.e(TAG, "audio write thread did not terminate within ${THREAD_JOIN_MS}ms; skipping close to avoid racing a live append()")
             status = status or AudioStatus.ENDED_EARLY
+        } else {
+            try {
+                writer?.close(buildBext())
+            } catch (e: Exception) {
+                Log.e(TAG, "WAV close failed", e)
+                status = status or AudioStatus.ENDED_EARLY
+            }
         }
         writer = null
-        releaseRecord()
+
+        if (readStuck) {
+            // Same reasoning as writeStuck, applied to AudioRecord: the read
+            // thread is presumably still blocked inside rec.read(). Calling
+            // stop()/release() on the track from this thread while that call
+            // is in flight is itself an unguarded concurrent access. Leave
+            // the record alone -- it leaks for this take rather than racing
+            // a call that could crash the process.
+            Log.e(TAG, "audio read thread did not terminate within ${THREAD_JOIN_MS}ms; leaving AudioRecord unreleased")
+            status = status or AudioStatus.ENDED_EARLY
+        } else {
+            releaseRecord()
+        }
         _meter.value = MeterLevels()
 
         val produced = wavFile?.let { it.exists() && it.length() > WavWriter.HEADER_BYTES } ?: false
