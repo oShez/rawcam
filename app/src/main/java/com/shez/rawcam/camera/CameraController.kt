@@ -499,6 +499,12 @@ class CameraController(private val context: Context) {
      * UI only renders it while Settings.recordAudio is on. */
     val audioMeter: StateFlow<MeterLevels> get() = audioRecorder.meter
 
+    /** Straight pass-through of the recorder's live status bits; consumed by
+     * the on-screen AUDIO DEGRADED indicator (see AudioMeter.kt), which -- unlike
+     * [lastAudioResult] -- needs to react while the take is still recording,
+     * not only after it stops. */
+    val audioStatus: StateFlow<Int> get() = audioRecorder.liveStatus
+
     /** Provenance of the most recently STOPPED take's audio, published by
      * [stopRecording] (or by [startRecording]'s own failure paths, where it means
      * "armed but never actually recorded"). Null before any take has started. */
@@ -510,6 +516,13 @@ class CameraController(private val context: Context) {
      * clears it. Gates every other audio call on the recording path so a caller
      * never has to guess whether the recorder is actually running. */
     private var audioArmed = false
+
+    /** True whenever this take's [startRecording] was called with recordAudio,
+     * regardless of whether audio actually armed. Distinct from [audioArmed]:
+     * [stopRecording] needs this wider signal to publish a failure reason
+     * (permission denied, open failed, ...) into the header even on a take
+     * where audio never armed at all -- see [stopRecording]'s Important-3 note. */
+    private var audioRequested = false
 
     /** Cleared at the top of every [startRecording]; latched true by the first
      * [captureCallback.onCaptureCompleted] of the take, which is this take's t=0
@@ -544,6 +557,7 @@ class CameraController(private val context: Context) {
         // kdoc for why the ordering matters. A failure never blocks the take.
         firstFrameSeen = false
         audioArmed = false
+        audioRequested = recordAudio
         lastAudioResult = null
         if (recordAudio) {
             val wav = File(path.removeSuffix(".rawv") + ".wav")
@@ -1064,34 +1078,60 @@ class CameraController(private val context: Context) {
         // point is silently a no-op (see NativeBridge's own kdoc). Wrapped so a
         // throw out of the recorder or the JNI call can never skip step 3 below
         // and leave the take unfinalized -- video always wins.
-        if (audioArmed) {
-            try {
-                val a = audioRecorder.stop()
-                lastAudioResult = a
-                NativeBridge.nativeSetAudioInfo(
-                    a.present, a.sampleRate, a.channels, /* bitsPerSample = */ 24,
-                    a.offsetNs, a.driftPpm, a.timestampSource, a.status, a.source, a.fileName,
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "audio stop/setAudioInfo threw; clip will report no audio", e)
-                // audioRecorder.stop() is documented never to throw -- this branch exists
-                // for exactly the case that guarantee is wrong. Without synthesizing a
-                // result here, lastAudioResult stays at the null startRecording() reset
-                // it to, and RecordScreen's `audio != null` guard silently skips the user
-                // warning entirely: video still finalizes fine ("video always wins" holds),
-                // but "warn loudly" would not. Only synthesize when stop() itself is what
-                // threw (lastAudioResult is still that pre-take null) -- if stop() actually
-                // succeeded and only the nativeSetAudioInfo call after it threw, the real
-                // result assigned above is more honest than overwriting it with a fake one.
-                if (lastAudioResult == null) {
-                    lastAudioResult = AudioResult(
-                        present = false, sampleRate = 0, channels = 0, offsetNs = 0L,
-                        driftPpm = 0, timestampSource = 0, status = AudioStatus.ENDED_EARLY,
-                        source = 0, fileName = "",
+        //
+        // Gated on audioRequested, NOT audioArmed (Important 3): an arm-failure
+        // path (permission denied, AudioRecord open failed, mic held by another
+        // app) leaves audioArmed false, but startRecording already called
+        // audioRecorder.stop() there and populated lastAudioResult with the real
+        // failure reason. Without this wider gate, nativeSetAudioInfo was never
+        // called on that path, and Capture::start()'s zeroed audioInfo_ made the
+        // header byte-identical to a clip recorded with audio switched off --
+        // PERMISSION_DENIED/OPEN_FAILED were unreachable in the .rawv header.
+        if (audioRequested) {
+            if (audioArmed) {
+                try {
+                    val a = audioRecorder.stop()
+                    lastAudioResult = a
+                    NativeBridge.nativeSetAudioInfo(
+                        a.present, a.sampleRate, a.channels, /* bitsPerSample = */ 24,
+                        a.offsetNs, a.driftPpm, a.timestampSource, a.status, a.source, a.fileName,
                     )
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio stop/setAudioInfo threw; clip will report no audio", e)
+                    // audioRecorder.stop() is documented never to throw -- this branch exists
+                    // for exactly the case that guarantee is wrong. Without synthesizing a
+                    // result here, lastAudioResult stays at the null startRecording() reset
+                    // it to, and RecordScreen's `audio != null` guard silently skips the user
+                    // warning entirely: video still finalizes fine ("video always wins" holds),
+                    // but "warn loudly" would not. Only synthesize when stop() itself is what
+                    // threw (lastAudioResult is still that pre-take null) -- if stop() actually
+                    // succeeded and only the nativeSetAudioInfo call after it threw, the real
+                    // result assigned above is more honest than overwriting it with a fake one.
+                    if (lastAudioResult == null) {
+                        lastAudioResult = AudioResult(
+                            present = false, sampleRate = 0, channels = 0, offsetNs = 0L,
+                            driftPpm = 0, timestampSource = 0, status = AudioStatus.ENDED_EARLY,
+                            source = 0, fileName = "",
+                        )
+                    }
+                } finally {
+                    audioArmed = false
                 }
-            } finally {
-                audioArmed = false
+            } else {
+                // Audio was requested but never armed: audioRecorder.stop() already
+                // ran back in startRecording's failure cleanup and lastAudioResult
+                // holds the real reason (PERMISSION_DENIED, OPEN_FAILED, ...).
+                // Publish it now, still strictly before nativeStopRecording below.
+                lastAudioResult?.let { a ->
+                    try {
+                        NativeBridge.nativeSetAudioInfo(
+                            a.present, a.sampleRate, a.channels, /* bitsPerSample = */ 24,
+                            a.offsetNs, a.driftPpm, a.timestampSource, a.status, a.source, a.fileName,
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "nativeSetAudioInfo (arm-failure path) threw", e)
+                    }
+                }
             }
         }
 
@@ -1651,7 +1691,26 @@ class CameraController(private val context: Context) {
             if (!recording) return
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
 
-            // The first frame of a take defines t=0 for audio alignment. One
+            val isoOut = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: iso
+            val expOut = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
+            val focusOut = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
+            // COLOR_CORRECTION_GAINS is not reliably echoed back in the result on this
+            // device/config (observed null during recording); wbOverride ?: gainsFor(...)
+            // is the exact value applyManual set on the request, so it's a faithful fallback.
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: (wbOverride ?: gainsFor(kelvin, tint))
+            val wbR = safeInv(gains.red)
+            val wbG = safeInv((gains.greenEven + gains.greenOdd) / 2f)
+            val wbB = safeInv(gains.blue)
+            NativeBridge.nativePushFrameMeta(ts, isoOut, expOut, focusOut, wbR, wbG, wbB)
+
+            // The first frame of a take defines t=0 for audio alignment. Runs
+            // AFTER nativePushFrameMeta above (Important 4): Capture::start()
+            // zeroes lastKnown_ and matchMeta() falls back to it on a miss, so if
+            // onFirstFrame's caller reached frame 0's image before the meta push
+            // landed, frame 0 of the .rawv would get zeroed ISO/exposure/focus/WB.
+            // onFirstFrame itself only computes the trim and is cheap (see its own
+            // kdoc) -- the actual preroll I/O runs on the audio write thread, not
+            // here -- so this ordering costs nothing but correctness. One
             // predictable branch on the meta path in steady state; onFirstFrame
             // itself must never throw onto the frame path (see its own kdoc).
             if (!firstFrameSeen) {
@@ -1664,18 +1723,6 @@ class CameraController(private val context: Context) {
                     }
                 }
             }
-
-            val isoOut = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: iso
-            val expOut = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
-            val focusOut = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
-            // COLOR_CORRECTION_GAINS is not reliably echoed back in the result on this
-            // device/config (observed null during recording); wbOverride ?: gainsFor(...)
-            // is the exact value applyManual set on the request, so it's a faithful fallback.
-            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: (wbOverride ?: gainsFor(kelvin, tint))
-            val wbR = safeInv(gains.red)
-            val wbG = safeInv((gains.greenEven + gains.greenOdd) / 2f)
-            val wbB = safeInv(gains.blue)
-            NativeBridge.nativePushFrameMeta(ts, isoOut, expOut, focusOut, wbR, wbG, wbB)
         }
     }
 
