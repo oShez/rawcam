@@ -24,6 +24,9 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.AudioRecorder
+import com.shez.rawcam.audio.AudioResult
+import com.shez.rawcam.audio.MeterLevels
 import com.shez.rawcam.settings.OisMode
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -159,6 +162,12 @@ class CameraController(private val context: Context) {
      * what the hardware actually supports). Null means the characteristic itself
      * was absent -- no OIS key is ever set in that case, regardless of [oisMode]. */
     @Volatile private var activeOisModes: IntArray? = null
+
+    /** True when SENSOR_INFO_TIMESTAMP_SOURCE is REALTIME, i.e. SENSOR_TIMESTAMP is
+     * already CLOCK_BOOTTIME. Otherwise it is CLOCK_MONOTONIC and must be bridged.
+     * Nothing in the app read this flag before audio existed. Set alongside the
+     * rest of the active-lens tracking fields in [applySelectedLens]. */
+    @Volatile private var sensorTimestampIsRealtime: Boolean = false
 
     /** User's OIS preference (Settings.oisMode), pushed here by the caller's settings
      * collector reaction. AUTO leaves the HAL default (no key set) since Camera2 does
@@ -468,29 +477,110 @@ class CameraController(private val context: Context) {
             activeCameraId = primaryCameraId
             sessionTagId = lens.cameraId
         }
+        // Binder IPC, same pattern as ensureZebraSurface's own characteristics read --
+        // only fires on lens selection (initialize/selectMode), never on the frame
+        // path. A failure here just means the audio timestamp bridge assumes
+        // CLOCK_MONOTONIC (the more common case), never a crash.
+        sensorTimestampIsRealtime = try {
+            cameraManager.getCameraCharacteristics(activeCameraId)
+                .get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+        } catch (e: Exception) {
+            Log.w(TAG, "sensor timestamp source read failed", e)
+            false
+        }
     }
+
+    private val audioRecorder = AudioRecorder(context)
+
+    /** Straight pass-through of the recorder's peak-level flow; consumed by the
+     * on-screen meter (see AudioMeter.kt). Live regardless of [recording] -- the
+     * UI only renders it while Settings.recordAudio is on. */
+    val audioMeter: StateFlow<MeterLevels> get() = audioRecorder.meter
+
+    /** Provenance of the most recently STOPPED take's audio, published by
+     * [stopRecording] (or by [startRecording]'s own failure paths, where it means
+     * "armed but never actually recorded"). Null before any take has started. */
+    var lastAudioResult: AudioResult? = null
+        private set
+
+    /** True from a successful [AudioRecorder.start] in [startRecording] until
+     * [stopRecording] (or a start-failure path) calls [AudioRecorder.stop] and
+     * clears it. Gates every other audio call on the recording path so a caller
+     * never has to guess whether the recorder is actually running. */
+    private var audioArmed = false
+
+    /** Cleared at the top of every [startRecording]; latched true by the first
+     * [captureCallback.onCaptureCompleted] of the take, which is this take's t=0
+     * for audio alignment. @Volatile: read fast-path on the camera thread only,
+     * but written from the same thread -- defensive, matching this file's other
+     * capture-state fields. */
+    @Volatile private var firstFrameSeen = false
 
     /**
      * Starts a RAW recording into [path] (decided by the caller; see [clipsDir]).
      * Gets the RAW Surface from NativeBridge, recreates the session with both
      * surfaces, and issues a fully manual repeating request. Returns false if the
      * native writer or session setup failed. Blocks until the session is configured.
+     *
+     * Audio (when [recordAudio]) arms BEFORE [NativeBridge.nativeStartRecording]:
+     * session configuration blocks for hundreds of ms, so starting the recorder
+     * here guarantees it is already running when frame 0 arrives, which makes
+     * head alignment an exact trim rather than a guessed silence pad. A failure to
+     * arm audio never blocks or fails the video take -- video always wins.
      */
     fun startRecording(
         path: String, fps: Int, iso: Int, exposureNs: Long, focusDiopters: Float,
         kelvin: Int, tint: Int, compressRecordings: Boolean = false,
+        recordAudio: Boolean = false, audioInputKey: String = "", audioGainDb: Float = 0f,
     ): Boolean {
         if (recording) return false
         val preview = previewSurface ?: return false
         if (device == null) return false
         clipsDir.mkdirs() // idempotent; the actual write (below, via `path`) needs this to exist
+
+        // Arm audio BEFORE the native writer and the session -- see this function's
+        // kdoc for why the ordering matters. A failure never blocks the take.
+        firstFrameSeen = false
+        audioArmed = false
+        lastAudioResult = null
+        if (recordAudio) {
+            val wav = File(path.removeSuffix(".rawv") + ".wav")
+            audioArmed = try {
+                audioRecorder.start(wav, audioInputKey, audioGainDb, sensorTimestampIsRealtime)
+            } catch (e: Exception) {
+                Log.e(TAG, "audio start threw; recording video only", e)
+                false
+            }
+            if (!audioArmed) {
+                Log.w(TAG, "audio failed to arm; recording video only")
+                lastAudioResult = try {
+                    audioRecorder.stop()
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio stop-after-failed-start threw", e)
+                    null
+                }
+            }
+        }
+
         val spec = rawSpec
         val raw = NativeBridge.nativeStartRecording(
             path, spec.width, spec.height, spec.cfa, spec.whiteLevel,
             spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
             spec.deviceName, compressRecordings,
-        ) ?: return false
+        ) ?: run {
+            if (audioArmed) {
+                lastAudioResult = try {
+                    audioRecorder.stop()
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio stop-after-native-start-failed threw", e)
+                    null
+                }
+                audioArmed = false
+            }
+            return false
+        }
 
         rawSurface = raw
         recordFps = fps
@@ -524,6 +614,15 @@ class CameraController(private val context: Context) {
             recording = false
             Log.e(TAG, "recording session configuration failed")
             NativeBridge.nativeStopRecording() // discard the never-fed native writer
+            if (audioArmed) {
+                lastAudioResult = try {
+                    audioRecorder.stop()
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio stop-after-session-config-failed threw", e)
+                    null
+                }
+                audioArmed = false
+            }
             val failedRaw = rawSurface
             rawSurface = null
             previewSurface?.let { ps ->
@@ -924,8 +1023,11 @@ class CameraController(private val context: Context) {
      *
      * Teardown ordering (mandatory): frames into the RAW surface are fully stopped
      * FIRST — stopRepeating() + abortCaptures(), then wait for the session's
-     * onReady (idle) callback — and only THEN is nativeStopRecording() called.
-     * A late frame arriving after native stop would leak a hardware buffer.
+     * onReady (idle) callback — then audio is stopped and its provenance handed
+     * to [NativeBridge.nativeSetAudioInfo] — and only THEN is
+     * [NativeBridge.nativeStopRecording] called. A late frame arriving after
+     * native stop would leak a hardware buffer; setAudioInfo after native stop
+     * would be silently discarded (the header is already finalized).
      */
     fun stopRecording(): LongArray {
         if (!recording) return longArrayOf(0, 0)
@@ -955,6 +1057,26 @@ class CameraController(private val context: Context) {
         }
         idleLatch = null
         recording = false
+
+        // 2b. Stop audio and publish its provenance BEFORE the native stop:
+        // nativeStopRecording() finalizes the header, and setAudioInfo after that
+        // point is silently a no-op (see NativeBridge's own kdoc). Wrapped so a
+        // throw out of the recorder or the JNI call can never skip step 3 below
+        // and leave the take unfinalized -- video always wins.
+        if (audioArmed) {
+            try {
+                val a = audioRecorder.stop()
+                lastAudioResult = a
+                NativeBridge.nativeSetAudioInfo(
+                    a.present, a.sampleRate, a.channels, /* bitsPerSample = */ 24,
+                    a.offsetNs, a.driftPpm, a.timestampSource, a.status, a.source, a.fileName,
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "audio stop/setAudioInfo threw; clip will report no audio", e)
+            } finally {
+                audioArmed = false
+            }
+        }
 
         // 3. Only now is it safe to tear down the native writer.
         val stats = NativeBridge.nativeStopRecording()
@@ -1511,6 +1633,21 @@ class CameraController(private val context: Context) {
         ) {
             if (!recording) return
             val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
+
+            // The first frame of a take defines t=0 for audio alignment. One
+            // predictable branch on the meta path in steady state; onFirstFrame
+            // itself must never throw onto the frame path (see its own kdoc).
+            if (!firstFrameSeen) {
+                firstFrameSeen = true
+                if (audioArmed) {
+                    try {
+                        audioRecorder.onFirstFrame(ts)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "audio onFirstFrame threw", e)
+                    }
+                }
+            }
+
             val isoOut = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: iso
             val expOut = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
             val focusOut = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters

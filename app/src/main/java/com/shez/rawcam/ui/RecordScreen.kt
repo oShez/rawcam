@@ -90,6 +90,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -106,6 +107,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.AudioResult
+import com.shez.rawcam.audio.AudioStatus
+import com.shez.rawcam.audio.MeterLevels
 import com.shez.rawcam.camera.Camera2SnapshotSource
 import com.shez.rawcam.camera.CameraController
 import com.shez.rawcam.camera.CompatibilityReport
@@ -190,6 +194,14 @@ data class RecordUiState(
     val metering: Boolean = false,
     val meterPoint: androidx.compose.ui.geometry.Offset? = null,
     val settings: Settings = Settings(),
+    // Audio provenance of the most recently STOPPED take, published by
+    // stopRecordingInternal's completion block from controller.lastAudioResult.
+    // audioChannels feeds AudioMeter's stereo/mono layout; audioFailed drives its
+    // "NO AUDIO" state (see AudioMeter.kt). Defaults assume mono/present so a
+    // recordAudio-off session (no AudioResult ever published) never shows a false
+    // failure.
+    val audioChannels: Int = 1,
+    val audioFailed: Boolean = false,
 )
 
 /**
@@ -213,6 +225,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * RecordUiState: it updates ~15x/second, and RecordUiState drives the whole
      * screen's recomposition. See RecordScreen's ZebraOverlay for how it is read. */
     val zebraMask: StateFlow<ZebraMask?> get() = controller.zebraMask
+
+    /** Straight pass-through of the controller's audio peak-level flow, same
+     * rationale as [zebraMask]: it updates continuously while recording and must
+     * not be folded into [RecordUiState]. See RecordScreen's AudioMeter render. */
+    val audioMeter: StateFlow<MeterLevels> get() = controller.audioMeter
 
     private val cameraOps = CoroutineScope(
         SupervisorJob() + Dispatchers.Default.limitedParallelism(1)
@@ -899,6 +916,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 val ok = controller.startRecording(
                     path, s.fps, s.iso, exposureNs, s.focusDiopters, s.kelvin, s.tint,
                     compressRecordings = s.settings.compressRecordings,
+                    recordAudio = s.settings.recordAudio,
+                    audioInputKey = s.settings.audioInputKey,
+                    audioGainDb = s.settings.audioGainDb,
                 )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
@@ -975,6 +995,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     _events.tryEmit("${stats[0]} frames, ${stats[1]} dropped")
                 }
+                val audio = controller.lastAudioResult
+                if (_uiState.value.settings.recordAudio && audio != null) {
+                    _uiState.update {
+                        it.copy(audioChannels = audio.channels, audioFailed = !audio.present)
+                    }
+                    audioWarning(audio)?.let { _events.tryEmit(it) }
+                }
                 // Auto-export: only on a genuinely successful stop (stats[0] > 0 --
                 // at least one frame was written), and only reachable through THIS
                 // completion block -- the atomic re-entry guard above (getAndUpdate)
@@ -1001,6 +1028,21 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         return true
+    }
+
+    /** One short, honest cause for the user. Order matters: say why the clip has no
+     * audio at all before saying its sync is merely degraded. Null when the take's
+     * audio needs no warning (present, in sync, no flagged status bits). */
+    private fun audioWarning(a: AudioResult): String? = when {
+        a.status and AudioStatus.PERMISSION_DENIED != 0 -> "No audio: microphone permission denied"
+        a.status and AudioStatus.OPEN_FAILED != 0 -> "No audio: could not open the input"
+        a.status and AudioStatus.ENDED_EARLY != 0 -> "Audio ended early; clip is short on sound"
+        a.status and AudioStatus.SUSPENDED != 0 -> "Audio sync unreliable: device slept mid-take"
+        a.status and AudioStatus.OVERRUNS != 0 -> "Audio dropouts; sync may drift"
+        a.status and AudioStatus.PADDED != 0 -> "Audio started late; head is padded with silence"
+        a.status and AudioStatus.DRIFT_HIGH != 0 -> "Audio clock drift ${a.driftPpm} ppm"
+        a.status and AudioStatus.PROCESSED_SOURCE != 0 -> "Audio may be processed (UNPROCESSED unavailable)"
+        else -> null
     }
 
     /**
@@ -1217,10 +1259,16 @@ fun RecordScreen(
     }
 
     val state by viewModel.uiState.collectAsState()
+    val meterLevels by viewModel.audioMeter.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(viewModel) {
         viewModel.events.collect { msg -> snackbarHostState.showSnackbar(msg) }
     }
+
+    // Keep the device awake for the duration of a take -- audio and RAW capture
+    // both run for as long as the screen would otherwise allow before sleeping.
+    val view = LocalView.current
+    LaunchedEffect(state.recording) { view.keepScreenOn = state.recording }
 
     // Auto-export starts ExportService straight from the record flow, but the
     // runtime POST_NOTIFICATIONS ask lived only in ClipsScreen -- a user who
@@ -1513,6 +1561,18 @@ fun RecordScreen(
                         "space remaining",
                     )
                 }
+            }
+
+            // Peak level meter: a recording-critical indicator, deliberately NOT
+            // gated on showStatsSidebar (see AudioMeter's own kdoc) -- only on
+            // whether audio is actually being recorded this take.
+            if (state.settings.recordAudio) {
+                AudioMeter(
+                    levels = meterLevels,
+                    channels = state.audioChannels,
+                    noAudio = state.audioFailed,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 16.dp).width(120.dp),
+                )
             }
 
             // Right action rail.
