@@ -502,6 +502,20 @@ class AudioRecorder(private val context: Context) {
             return result(present = false)
         }
         running.set(false)
+
+        // Call AudioRecord.stop() BEFORE joining, not after: the framework
+        // documents stop() as the mechanism that unblocks a thread currently
+        // parked in a blocking read() on the same AudioRecord. Doing this
+        // first means the join below only has to cover ordinary shutdown
+        // latency, not a read that is merely waiting on the next buffer of
+        // live audio -- and gives a genuinely wedged HAL a real chance to
+        // respond before the join times out.
+        try {
+            record?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioRecord.stop failed", e)
+        }
+
         readThread?.join(THREAD_JOIN_MS)
         writeThread?.join(THREAD_JOIN_MS)
         // Thread.join(timeout) returns whether or not the thread actually
@@ -546,16 +560,28 @@ class AudioRecorder(private val context: Context) {
         writer = null
 
         if (readStuck) {
-            // Same reasoning as writeStuck, applied to AudioRecord: the read
-            // thread is presumably still blocked inside rec.read(). Calling
-            // stop()/release() on the track from this thread while that call
-            // is in flight is itself an unguarded concurrent access. Leave
-            // the record alone -- it leaks for this take rather than racing
-            // a call that could crash the process.
-            Log.e(TAG, "audio read thread did not terminate within ${THREAD_JOIN_MS}ms; leaving AudioRecord unreleased")
+            // The read thread never returned even after AudioRecord.stop() --
+            // the framework's documented unblock mechanism for a pending
+            // read(). That points to a wedged HAL/driver, not an ordinary
+            // blocked read waiting on the next buffer. There is no further
+            // safe mechanism available here: calling release() while a
+            // read() may genuinely still be executing in native code risks a
+            // process fault, not just a catchable exception, so it is not
+            // called. record is dropped from this field (so no other path
+            // touches it again) but the underlying AudioRecord is never
+            // released -- it leaks for this take, and the mic may report
+            // busy on the next start(). This tradeoff (leak over crash) is
+            // deliberate; see task-6-report.md.
+            Log.e(TAG, "audio read thread did not terminate after AudioRecord.stop(); leaking AudioRecord rather than racing release() against a possibly-live read()")
             status = status or AudioStatus.ENDED_EARLY
+            record = null
         } else {
-            releaseRecord()
+            try {
+                record?.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioRecord.release failed", e)
+            }
+            record = null
         }
         _meter.value = MeterLevels()
 
