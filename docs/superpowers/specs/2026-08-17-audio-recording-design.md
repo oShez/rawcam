@@ -1,7 +1,7 @@
 # Audio Recording -- Design Spec
 
 **Date:** 2026-08-17
-**Status:** Approved (brainstorming complete; implementation plan not yet written)
+**Status:** Implemented, merged to `main` and device-verified 2026-08-24 (see `docs/superpowers/open-items-2026-08-24-audio-recording.md`)
 **Scope:** Add production-quality audio capture to RawCam, synchronized to RAW frame
 sensor timestamps, delivered as a sidecar WAV alongside each `.rawv` clip and copied
 into the export folder next to the CinemaDNG sequence.
