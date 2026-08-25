@@ -3,14 +3,15 @@
 **Date:** 2026-08-24
 **Spec:** `docs/superpowers/specs/2026-08-17-audio-recording-design.md` (commit `29977b1`)
 **Plan:** `docs/superpowers/plans/2026-08-17-audio-recording.md` (commit `1f5b267`, 11 TDD tasks)
-**Status:** Implemented, reviewed, merged to `main`, and device-verified. Two open items below.
+**Status:** Implemented, reviewed, merged to `main`, device-verified, and pushed to
+`origin/main` on 2026-08-25. Open items below.
 
 ## What shipped
 
 All 11 plan tasks were executed via subagent-driven development on branch
-`audio-recording`, then merged locally into `main`. `main` is clean and 27 commits
-ahead of `origin/main`; per the standing constraint on this repo, nothing has been
-pushed to the remote.
+`audio-recording`, then merged locally into `main`. Pushed to `origin/main` on
+2026-08-25 (`f1d6557`); the standing do-not-push-without-explicit-OK constraint on this
+repo has been lifted by the user and `main` is now in sync with the remote.
 
 New Kotlin package `app/src/main/java/com/shez/rawcam/audio/`:
 
@@ -98,7 +99,7 @@ frame, roughly one 4096-sample read chunk -- has no audio, so in an edit the las
 frame is silent. Head alignment is unaffected; this is purely a tail issue, most
 likely the final in-flight read chunk being dropped at stop. Minor, not fixed.
 
-### 2. Take B (10-minute run) never recorded
+### 2. Take B (10-minute run) -- CANCELLED 2026-08-25 by the user
 
 Take B was meant to exercise drift measurement over a long run and the compressed
 capture path under thermal load. It was not recorded: the device did not have enough
@@ -114,7 +115,20 @@ Uncompressed 4096x3072 at 24 fps is ~604 MB/s, so 10 minutes needs ~362 GB again
 `packMode == 3` by reading the `FileHeader` struct.** Do not eyeball adjacent `u32`s:
 the `3` at byte 24 is the CFA pattern, not `packMode`.
 
-Take B remains outstanding.
+**The user cancelled Take B on 2026-08-25: it will not be recorded.** Three things it
+was the only planned way to measure therefore stay UNVERIFIED, and should be treated as
+unknown rather than working:
+
+- **Clock drift over a long run.** Take A was 152 frames (~6.3 s). The measured
+  `driftPpm -24` comes from that short window; drift behaviour over ten minutes was
+  never observed.
+- **The compressed capture path under sustained thermal load,** with audio running
+  alongside it.
+- **The MONOTONIC clock-bridge branch.** This camera reports `tsSource=1 REALTIME`, so
+  the bridge has still never executed on real hardware -- on any device or take.
+
+The A/V sync bar that WAS met (|offset| < ~21 ms, inside one frame at 24 fps) was met on
+a ~6 s uncompressed take only. Nothing here says it holds for a long compressed one.
 
 ### 3. Device cleanup
 
