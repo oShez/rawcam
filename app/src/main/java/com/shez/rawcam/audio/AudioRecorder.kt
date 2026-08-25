@@ -121,6 +121,17 @@ class AudioRecorder(private val context: Context) {
     private val running = AtomicBoolean(false)
     private val armed = AtomicBoolean(false)
 
+    // "The read side will produce nothing more." Set by readLoop's finally, AFTER its
+    // post-stop drain, and by stop() as a fallback once the read thread has been given
+    // its chance to terminate.
+    //
+    // The write loop used to exit on `!running && queue.isEmpty()`, which is a race
+    // with the drain: stop() clears `running` first, so the writer could poll an empty
+    // queue and break while the read thread was still finishing its in-flight read and
+    // draining. Those chunks were then enqueued with no consumer left and silently
+    // dropped -- which made the drain look like it had no effect at all.
+    private val readDone = AtomicBoolean(false)
+
     // Bounded, so a stalled filesystem is counted as an overrun rather than
     // blocking the read thread or growing without limit.
     private val queue = ArrayBlockingQueue<FloatArray>(QUEUE_CAPACITY)
@@ -274,6 +285,7 @@ class AudioRecorder(private val context: Context) {
                 releaseRecord()
                 false
             } else {
+                readDone.set(false)
                 running.set(true)
                 armed.set(true)
                 startThreads()
@@ -405,8 +417,10 @@ class AudioRecorder(private val context: Context) {
             addStatus(AudioStatus.ENDED_EARLY)
         } finally {
             // Prompt shutdown of the write side even if stop() has not been
-            // called yet; harmless if it already was.
+            // called yet; harmless if it already was. readDone must be set after
+            // the drain above, never before, or the writer can leave early again.
             running.set(false)
+            readDone.set(true)
         }
     }
 
@@ -461,7 +475,10 @@ class AudioRecorder(private val context: Context) {
                 break
             }
             if (chunk == null) {
-                if (!running.get() && queue.isEmpty()) break
+                // readDone, not !running: `running` goes false at the START of shutdown,
+                // while the read thread still has an in-flight read and a drain to go.
+                // Waiting on readDone is what lets the tail actually reach the file.
+                if (readDone.get() && queue.isEmpty()) break
                 continue
             }
 
@@ -707,6 +724,10 @@ class AudioRecorder(private val context: Context) {
         }
 
         readThread?.join(THREAD_JOIN_MS)
+        // Fallback: if the read thread is wedged and never reached its finally, the
+        // writer would otherwise wait on readDone forever. Setting it here bounds that,
+        // and is a no-op on every healthy stop.
+        readDone.set(true)
         writeThread?.join(THREAD_JOIN_MS)
         // Thread.join(timeout) returns whether or not the thread actually
         // terminated -- it only carries a happens-before guarantee when it

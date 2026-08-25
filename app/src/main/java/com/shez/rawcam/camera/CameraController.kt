@@ -259,6 +259,11 @@ class CameraController(private val context: Context) {
     val zebraMask: StateFlow<ZebraMask?> = _zebraMask.asStateFlow()
 
     @Volatile private var recording = false
+
+    // The take's frame rate, retained from startRecording because stopRecording needs
+    // it and only receives it as a parameter there. Used to size the audio overrun
+    // below -- see the note beside audioRecorder.stop().
+    @Volatile private var recordingFps = 24
     @Volatile private var manualSet = false
     @Volatile private var recordFps = 24
     @Volatile private var iso = 100
@@ -556,6 +561,7 @@ class CameraController(private val context: Context) {
         // Arm audio BEFORE the native writer and the session -- see this function's
         // kdoc for why the ordering matters. A failure never blocks the take.
         firstFrameSeen = false
+        recordingFps = fps
         audioArmed = false
         audioRequested = recordAudio
         lastAudioResult = null
@@ -1087,6 +1093,30 @@ class CameraController(private val context: Context) {
         // called on that path, and Capture::start()'s zeroed audioInfo_ made the
         // header byte-identical to a clip recorded with audio switched off --
         // PERMISSION_DENIED/OPEN_FAILED were unreachable in the .rawv header.
+        // Let audio overrun the video by one frame period before stopping it.
+        //
+        // Step 2 above returns as soon as the session is idle, which is a moment or two
+        // after the LAST frame's sensor timestamp -- not a frame period after it. A
+        // frame occupies 1/fps on the timeline, so audio that stops at session-idle
+        // covers the last frame's start but not its duration, and the tail of that
+        // frame plays silent. Draining the capture buffer (see AudioRecorder.readLoop)
+        // recovered most of the gap, from -47ms to +20ms measured, but 20ms is still
+        // under a 41.7ms frame at 24fps.
+        //
+        // Sleeping one frame period here is the rest of it. The audio is real captured
+        // sound, not padding, and running slightly LONG is harmless -- an editor trims
+        // to the video, whereas running short leaves a hole nothing can fill. The
+        // camera is already idle at this point, so this costs stop latency and nothing
+        // else, and it is bounded so a nonsense fps cannot stall finalize.
+        if (audioRequested && audioArmed) {
+            val overrunMs = (1000L / recordingFps.coerceAtLeast(1)).coerceIn(0L, 100L)
+            try {
+                Thread.sleep(overrunMs)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+
         if (audioRequested) {
             if (audioArmed) {
                 try {
