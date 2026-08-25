@@ -256,7 +256,11 @@ fun SettingsScreen(
                     subtitle = if (settings.audioInputKey.isNotEmpty() &&
                         AudioDeviceCatalog.resolve(inputs, settings.audioInputKey) == null
                     ) "Saved input unavailable -- using default" else null,
-                    options = listOf("" to "System default") + inputs.map { d -> d.key to d.displayName },
+                    // Zipped against displayNamesFor rather than reading displayName per
+                    // device: names that collide (two built-in mics) are numbered, and
+                    // that numbering can only be worked out across the whole list.
+                    options = listOf("" to "System default") +
+                        inputs.zip(AudioDeviceCatalog.displayNamesFor(inputs)) { d, n -> d.key to n },
                     selected = settings.audioInputKey,
                     onSelect = { v -> apply { it.copy(audioInputKey = v) } },
                 )

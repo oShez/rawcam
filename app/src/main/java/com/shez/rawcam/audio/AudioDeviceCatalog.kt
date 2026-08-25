@@ -86,9 +86,44 @@ object AudioDeviceCatalog {
         else -> productName
     }
 
-    /** The devices worth offering, in the order the platform reported them. */
+    /**
+     * The devices worth offering, in the order the platform reported them, with at
+     * most one entry per [keyOf].
+     *
+     * The de-duplication is not tidiness. A real Xiaomi 14 Ultra reports several
+     * TYPE_BUILTIN_MIC entries; any two sharing a productName share a key, and the key
+     * is the whole of what gets persisted. `resolve` therefore returns the first of
+     * them whichever one was picked, so offering both presents a choice that does not
+     * exist -- the user selects the second mic and silently gets the first. One entry
+     * per key is the honest count.
+     */
     fun selectable(devices: List<AudioInputDevice>): List<AudioInputDevice> =
-        devices.filter { !isExcluded(it.type) }
+        devices.filter { !isExcluded(it.type) }.distinctBy { it.key }
+
+    /**
+     * Labels for [devices], positionally aligned with the list passed in.
+     *
+     * [displayNameOf] maps by type, so every built-in mic on a device that has more
+     * than one comes back as the same literal "Built-in mic" -- which is what the input
+     * picker showed, twice, with no way to tell the entries apart. Names that collide
+     * within a list are numbered in the order the platform reported them; a name that
+     * does not collide is left exactly as it was.
+     *
+     * Numbering rather than appending the productName on purpose: where these collide
+     * the product name is typically the handset model, identical for both, so it would
+     * add width without adding information.
+     */
+    fun displayNamesFor(devices: List<AudioInputDevice>): List<String> {
+        val base = devices.map { it.displayName }
+        val total = base.groupingBy { it }.eachCount()
+        val seen = mutableMapOf<String, Int>()
+        return base.map { name ->
+            if (total.getOrDefault(name, 0) < 2) return@map name
+            val n = seen.getOrDefault(name, 0) + 1
+            seen[name] = n
+            "$name $n"
+        }
+    }
 
     /**
      * Resolves a persisted [key] against the live device list. Null means "use

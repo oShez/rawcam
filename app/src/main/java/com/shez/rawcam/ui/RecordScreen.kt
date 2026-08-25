@@ -1925,7 +1925,10 @@ fun RecordScreen(
                                         // choice, so it heads the list and the saved
                                         // key is matched against these same keys.
                                         val keys = listOf("") + inputs.map { it.key }
-                                        val labels = listOf("System default") + inputs.map { it.displayName }
+                                        // displayNamesFor, not displayName: a handset with two
+                                        // built-in mics labels both "Built-in mic" otherwise.
+                                        val labels = listOf("System default") +
+                                            AudioDeviceCatalog.displayNamesFor(inputs)
                                         val savedIdx = keys.indexOf(settings.audioInputKey)
                                         Spacer(Modifier.height(4.dp))
                                         ParamLabel("INPUT")

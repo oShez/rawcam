@@ -81,4 +81,65 @@ class AudioDeviceCatalogTest {
         assertEquals(2, usb.preferredChannels)
         assertEquals(1, dev(5, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Mono", intArrayOf(1)).preferredChannels)
     }
+
+    // --- Duplicate built-in mics (found on a real Xiaomi 14 Ultra) -----------------
+    //
+    // The device reports more than one TYPE_BUILTIN_MIC. displayNameOf maps every one
+    // of them to the literal string "Built-in mic", so the input picker showed two
+    // identical options -- in the capture rail and in Settings both.
+
+    @Test
+    fun `two built-in mics sharing a product name collapse to one selectable entry`() {
+        // Same type and same productName means the SAME key, and key is all that gets
+        // persisted. Offering both is offering a choice that does not exist: resolve()
+        // returns the first either way, so picking the second silently selects the
+        // first. One entry is the honest count.
+        val a = dev(1, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Builtin")
+        val b = dev(2, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Builtin")
+        val out = AudioDeviceCatalog.selectable(listOf(a, b, usb))
+        assertEquals(listOf(a, usb), out)
+    }
+
+    @Test
+    fun `distinct devices that merely share a display name are both kept`() {
+        val a = dev(1, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Top")
+        val b = dev(2, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Bottom")
+        assertEquals(listOf(a, b), AudioDeviceCatalog.selectable(listOf(a, b)))
+    }
+
+    @Test
+    fun `colliding display names are numbered in platform order`() {
+        val a = dev(1, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Top")
+        val b = dev(2, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Bottom")
+        assertEquals(
+            listOf("Built-in mic 1", "Built-in mic 2"),
+            AudioDeviceCatalog.displayNamesFor(listOf(a, b)),
+        )
+    }
+
+    @Test
+    fun `a display name that does not collide is left alone`() {
+        val a = dev(1, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Top")
+        assertEquals(
+            listOf("Built-in mic", "USB: Scarlett Solo"),
+            AudioDeviceCatalog.displayNamesFor(listOf(a, usb)),
+        )
+    }
+
+    @Test
+    fun `numbering counts only the colliding group`() {
+        // A third, differently-named device must not shift the numbering of the pair.
+        val a = dev(1, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Top")
+        val b = dev(2, AudioDeviceInfo.TYPE_BUILTIN_MIC, "Bottom")
+        assertEquals(
+            listOf("Built-in mic 1", "USB: Scarlett Solo", "Built-in mic 2"),
+            AudioDeviceCatalog.displayNamesFor(listOf(a, usb, b)),
+        )
+    }
+
+    @Test
+    fun `displayNamesFor lines up one-to-one with its input`() {
+        val input = listOf(builtin, usb, wired)
+        assertEquals(input.size, AudioDeviceCatalog.displayNamesFor(input).size)
+    }
 }
