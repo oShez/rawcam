@@ -29,9 +29,17 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -90,6 +98,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -1551,7 +1560,33 @@ fun RecordScreen(
         // sat directly over the left status rail; systemBarsPadding alone doesn't
         // account for the cutout, so the timer/frames text was under the hole.
         // Only the overlay is inset -- the preview underneath still fills the edge.
-        Box(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            // The sensor is 4:3 while the screen is ~20:9, so the preview -- which is
+            // height-bound and aspect-locked -- leaves a black bar down each side. Those
+            // bars were dead space holding two buttons and one readout, while the
+            // parameter strip sat on top of the picture. Measure the bar and put the
+            // parameters in it.
+            //
+            // Measured on the UN-INSET box on purpose: the preview is a sibling of this
+            // chrome inside the outer full-screen Box, so it is laid out against the full
+            // height. Measuring after systemBarsPadding/displayCutoutPadding made
+            // maxHeight smaller, which under-estimated the preview width, which
+            // over-estimated the bar -- and the rail's values spilled onto the picture.
+            //
+            // Clamped because the same app runs on other sensors:
+            // a 16:9 mode leaves a far narrower bar, and a rail wider than the bar would
+            // start covering the very image this move exists to uncover.
+            val previewWidth = maxHeight * (spec.width.toFloat() / spec.height.toFloat())
+            // The bar is measured in un-inset screen coordinates, but the rail is laid
+            // out inside the inset Box below, so it starts already pushed right by the
+            // display cutout. Subtract that or the rail's right edge lands past the bar
+            // and the values print over the picture -- which is exactly what happened.
+            val startInset = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+                .asPaddingValues().calculateStartPadding(LocalLayoutDirection.current)
+            val railWidth = (((maxWidth - previewWidth) / 2) - startInset).coerceIn(0.dp, 190.dp)
+            val railFits = railWidth >= 104.dp
+
+            Box(Modifier.fillMaxSize().systemBarsPadding().displayCutoutPadding()) {
             if (state.thermalSevere) {
                 Surface(
                     color = RawCamColors.Accent,
@@ -1566,19 +1601,40 @@ fun RecordScreen(
                 }
             }
 
-            // Benchmark (Task 8) + Settings entry, reachable but out of the way in the
-            // top-left gutter. BENCH disabled while recording: its ~6 GB write would
-            // compete with the ~376 MB/s capture hot path and force drops. SETTINGS
-            // disabled while recording/busy (settingsEnabled, from MainActivity's
-            // `locked`) -- leaving Record mid-recording would dispose the SurfaceView
-            // and stall the RAW stream, same reasoning as CLIPS below. BENCH itself is
-            // gated on Settings.showBench -- SETTINGS always renders below it (or alone,
-            // at the same TopStart slot) regardless of that toggle, since it's the only
-            // way back into the settings screen that turned it off.
-            Column(
-                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+            Row(
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
+                NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
+            }
+
+            // Left rail. Everything that used to be scattered across three separate
+            // alignments -- the stats column at CenterStart, the meter at BottomStart,
+            // and the parameter chips ON TOP OF THE PICTURE at BottomCenter -- is one
+            // column in the letterbox bar when the bar is wide enough to hold it.
+            //
+            // Vertical stacking is the point, not the styling: the chip row scrolled
+            // horizontally, so the seventh parameter (AUDIO) was permanently off-screen
+            // and you could not see lens and white balance in the same glance. A column
+            // shows all seven at once and cannot overflow.
+            //
+            // Top padding clears the TopStart nav buttons rather than sharing a parent
+            // with them, so the nav keeps working unchanged in the narrow-bar fallback.
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .width(if (railFits) railWidth else 168.dp)
+                    .padding(start = 14.dp, end = 8.dp, bottom = 12.dp, top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // Nav lives in the rail rather than in its own TopStart box. When it sat
+                // outside, the rail had to pad itself down past it by a hand-guessed
+                // 104dp -- a quarter of the screen spent dodging two buttons, which left
+                // the seven parameter rows and the status block fighting over what was
+                // left and clipped the list mid-row.
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (state.settings.showBench) {
                     NavButton(
                         text = if (benchRunning) "…" else "BENCH",
@@ -1598,68 +1654,93 @@ fun RecordScreen(
                     )
                 }
                 NavButton(text = "SETTINGS", enabled = settingsEnabled, onClick = onOpenSettings)
-            }
+                }
 
-            Row(
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
-                NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
-            }
+                if (railFits) {
+                    // weight(1f) with no competing weighted sibling: the list takes all
+                    // the room the status block below does not need, and scrolls inside
+                    // it. An earlier version paired weight(1f, fill = false) here with a
+                    // weighted Spacer, which split the free space in half and clipped
+                    // the list mid-row at ISO -- four of the seven parameters were
+                    // simply unreachable.
+                    Column(
+                        modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    ) {
+                        ParamRow("LENS", lens.label, expanded == Param.LENS, modeEnabled) {
+                            expanded = if (expanded == Param.LENS) null else Param.LENS
+                        }
+                        ParamRow("RES", selectedSize.label, expanded == Param.RES, modeEnabled) {
+                            expanded = if (expanded == Param.RES) null else Param.RES
+                        }
+                        ParamRow("ISO", "${state.iso}", expanded == Param.ISO) {
+                            expanded = if (expanded == Param.ISO) null else Param.ISO
+                        }
+                        ParamRow(
+                            "SHUTTER",
+                            shutterLabel(shutterDenom, state.fps, state.settings.shutterDisplay),
+                            expanded == Param.SHUTTER,
+                        ) { expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER }
+                        ParamRow("FOCUS", focusLabel(state.focusDiopters), expanded == Param.FOCUS) {
+                            expanded = if (expanded == Param.FOCUS) null else Param.FOCUS
+                        }
+                        ParamRow("WB", "${state.kelvin}K", expanded == Param.WB) {
+                            expanded = if (expanded == Param.WB) null else Param.WB
+                        }
+                        ParamRow(
+                            "AUDIO",
+                            audioRailValue(state.settings),
+                            expanded == Param.AUDIO,
+                            warn = state.settings.recordAudio && (state.audioFailed || audioDegraded),
+                        ) { expanded = if (expanded == Param.AUDIO) null else Param.AUDIO }
+                    }
+                }
 
-            // Left status rail, gated on Settings.showStatsSidebar. The action rails
-            // (right, bottom) and the top gutter buttons don't read anything from this
-            // column, so hiding it is a pure subtraction -- nothing else in the layout
-            // depends on it being present (each surviving element is independently
-            // aligned/positioned against the outer Box, not against this Column).
-            if (state.settings.showStatsSidebar) {
-                Column(
-                    modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    // Idle, the timer reads 00:00 and frames-written/dropped are both
-                    // 0 -- three dead readouts stacked down the left edge. Show the
-                    // live capture stats only while recording (when they mean
-                    // something); idle keeps just the one useful readout, space
-                    // remaining. This is the bulk of the left-side declutter.
-                    if (state.recording) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            RecDot()
-                            Text(
-                                formatTimer(state.elapsedSeconds),
-                                color = RawCamColors.OnSurface,
-                                style = RawCamType.Timecode,
+                // Capture stats, still gated on Settings.showStatsSidebar -- hiding them
+                // remains a pure subtraction, it just subtracts from the rail now.
+                if (state.settings.showStatsSidebar) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Idle, the timer reads 00:00 and frames-written/dropped are
+                        // both 0 -- dead readouts. Show the live capture stats only
+                        // while recording, when they mean something; idle keeps just
+                        // the one useful readout, space remaining.
+                        if (state.recording) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                RecDot()
+                                Text(
+                                    formatTimer(state.elapsedSeconds),
+                                    color = RawCamColors.OnSurface,
+                                    style = RawCamType.Timecode,
+                                )
+                            }
+                            StatItem("${state.written}", "frames written")
+                            StatItem(
+                                "${state.dropped}", "dropped",
+                                valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
                             )
                         }
-                        StatItem("${state.written}", "frames written")
                         StatItem(
-                            "${state.dropped}", "dropped",
-                            valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
+                            remainingLabel(state.freeSpaceBytes, state.fps, spec),
+                            "space remaining",
                         )
                     }
-                    StatItem(
-                        remainingLabel(state.freeSpaceBytes, state.fps, spec),
-                        "space remaining",
+                }
+
+                // Peak level meter: a recording-critical indicator, deliberately NOT
+                // gated on showStatsSidebar (see AudioMeter's own kdoc) -- only on
+                // whether audio is actually being recorded this take.
+                if (state.settings.recordAudio) {
+                    AudioMeter(
+                        levels = meterLevels,
+                        channels = state.audioChannels,
+                        noAudio = state.audioFailed,
+                        degraded = audioDegraded,
+                        recording = state.recording,
+                        modifier = Modifier.padding(top = 12.dp).fillMaxWidth(),
                     )
                 }
-            }
-
-            // Peak level meter: a recording-critical indicator, deliberately NOT
-            // gated on showStatsSidebar (see AudioMeter's own kdoc) -- only on
-            // whether audio is actually being recorded this take.
-            if (state.settings.recordAudio) {
-                AudioMeter(
-                    levels = meterLevels,
-                    channels = state.audioChannels,
-                    noAudio = state.audioFailed,
-                    degraded = audioDegraded,
-                    recording = state.recording,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 16.dp).width(120.dp),
-                )
             }
 
             // Right action rail.
@@ -1840,48 +1921,56 @@ fun RecordScreen(
                         color = RawCamColors.Muted, fontSize = 12.sp,
                     )
                 }
-                val chipScroll = rememberScrollState()
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(chipScroll)
-                        .horizontalFadingEdge(chipScroll),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
-                        expanded = if (expanded == Param.LENS) null else Param.LENS
-                    }
-                    ParamChip(selectedSize.label, expanded == Param.RES, enabled = modeEnabled) {
-                        expanded = if (expanded == Param.RES) null else Param.RES
-                    }
-                    ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
-                        expanded = if (expanded == Param.ISO) null else Param.ISO
-                    }
-                    ParamChip(shutterLabel(shutterDenom, state.fps, state.settings.shutterDisplay), expanded == Param.SHUTTER) {
-                        expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER
-                    }
-                    ParamChip("ƒ ${focusLabel(state.focusDiopters)}", expanded == Param.FOCUS) {
-                        expanded = if (expanded == Param.FOCUS) null else Param.FOCUS
-                    }
-                    ParamChip("${state.kelvin}K", expanded == Param.WB) {
-                        expanded = if (expanded == Param.WB) null else Param.WB
-                    }
-                    // Audio's only always-visible presence. Before this chip a
-                    // take with audio off looked identical to one with audio on,
-                    // since AudioMeter renders nothing at all when recordAudio is
-                    // false. `warn` re-states the meter's own NO AUDIO /
-                    // AUDIO DEGRADED verdict as a border tint, so a failure is
-                    // still legible with eyes on the frame rather than the meter.
-                    ParamChip(
-                        audioChipLabel(state.settings),
-                        expanded == Param.AUDIO,
-                        warn = state.settings.recordAudio && (state.audioFailed || audioDegraded),
+                // Fallback for sensors whose aspect ratio leaves a bar too narrow to
+                // hold the rail (see railWidth above). There the parameters stay where
+                // they always were, as a horizontally scrolling chip strip over the
+                // frame -- worse, but present and usable, which beats a rail squeezed
+                // to an unreadable width on hardware this build cannot test.
+                if (!railFits) {
+                    val chipScroll = rememberScrollState()
+                    Row(
+                        modifier = Modifier
+                            .horizontalScroll(chipScroll)
+                            .horizontalFadingEdge(chipScroll),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        expanded = if (expanded == Param.AUDIO) null else Param.AUDIO
-                    }
+                        ParamChip(lens.label, expanded == Param.LENS, enabled = modeEnabled) {
+                            expanded = if (expanded == Param.LENS) null else Param.LENS
+                        }
+                        ParamChip(selectedSize.label, expanded == Param.RES, enabled = modeEnabled) {
+                            expanded = if (expanded == Param.RES) null else Param.RES
+                        }
+                        ParamChip("ISO ${state.iso}", expanded == Param.ISO) {
+                            expanded = if (expanded == Param.ISO) null else Param.ISO
+                        }
+                        ParamChip(shutterLabel(shutterDenom, state.fps, state.settings.shutterDisplay), expanded == Param.SHUTTER) {
+                            expanded = if (expanded == Param.SHUTTER) null else Param.SHUTTER
+                        }
+                        ParamChip("ƒ ${focusLabel(state.focusDiopters)}", expanded == Param.FOCUS) {
+                            expanded = if (expanded == Param.FOCUS) null else Param.FOCUS
+                        }
+                        ParamChip("${state.kelvin}K", expanded == Param.WB) {
+                            expanded = if (expanded == Param.WB) null else Param.WB
+                        }
+                        // Audio's only always-visible presence. Before this chip a
+                        // take with audio off looked identical to one with audio on,
+                        // since AudioMeter renders nothing at all when recordAudio is
+                        // false. `warn` re-states the meter's own NO AUDIO /
+                        // AUDIO DEGRADED verdict as a border tint, so a failure is
+                        // still legible with eyes on the frame rather than the meter.
+                        ParamChip(
+                            audioChipLabel(state.settings),
+                            expanded == Param.AUDIO,
+                            warn = state.settings.recordAudio && (state.audioFailed || audioDegraded),
+                        ) {
+                            expanded = if (expanded == Param.AUDIO) null else Param.AUDIO
+                        }
+                }
                 }
             }
 
-            SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
+                SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
+            }
         }
     }
 }
@@ -2163,6 +2252,13 @@ private fun FpsToggle(options: List<Int>, selected: Int, enabled: Boolean, onSel
     }
 }
 
+/** [audioChipLabel] without the leading "AUDIO", for the rail, whose label column
+ * already says it. Keeps one source of truth for the state wording: OFF stays OFF and
+ * a trim stays "+6dB", so the two surfaces can never disagree about what audio is
+ * doing. */
+private fun audioRailValue(settings: com.shez.rawcam.settings.Settings): String =
+    audioChipLabel(settings).removePrefix("AUDIO").trim().ifEmpty { "ON" }
+
 /** The eight gain stops the AUDIO panel offers, identical to the Settings
  * screen's list -- the two surfaces write one [Settings.audioGainDb] field, so a
  * value chosen on one must be selectable on the other. */
@@ -2297,6 +2393,57 @@ private fun Modifier.horizontalFadingEdge(scrollState: ScrollState, edge: androi
                 )
             }
         }
+
+/**
+ * One parameter in the left rail: field name and current value on ONE line, name muted
+ * and left, value right.
+ *
+ * Stacked (name above value) is the more obvious layout and was the first attempt, but
+ * it does not fit. Seven stacked rows plus the nav, the status block and the meter come
+ * to roughly 495dp of content in a bar about 393dp tall, so two of the seven were always
+ * below the fold -- which defeats the entire reason for moving off the horizontal chip
+ * strip, where AUDIO was permanently off-screen. One line per row halves the row height
+ * and puts all seven on screen at once with room to spare.
+ *
+ * Deliberately not a [ParamChip]. A chip's border exists to make a tap target legible
+ * against arbitrary image content, which is what the strip needed when it floated over
+ * the picture. In the rail the background is the app's own surface, so seven stacked
+ * borders would be pure noise; the row signals its open state by tinting the value,
+ * exactly as the chip signals a fault.
+ */
+@Composable
+private fun ParamRow(
+    label: String,
+    value: String,
+    active: Boolean,
+    enabled: Boolean = true,
+    warn: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (enabled) 1f else 0.45f)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            label,
+            color = RawCamColors.Muted,
+            style = RawCamType.Label,
+            maxLines = 1,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            value,
+            color = if (warn || active) RawCamColors.Accent else RawCamColors.OnSurface,
+            style = RawCamType.Value,
+            maxLines = 1,
+        )
+    }
+}
 
 @Composable
 private fun ParamChip(
