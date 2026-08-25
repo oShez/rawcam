@@ -107,6 +107,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.AudioDeviceCatalog
+import com.shez.rawcam.audio.AudioInputDevice
 import com.shez.rawcam.audio.AudioResult
 import com.shez.rawcam.audio.AudioStatus
 import com.shez.rawcam.audio.MeterLevels
@@ -627,6 +629,32 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(kelvin = k) }
         pushManual()
         persistCaptureState()
+    }
+
+    /* ---- Audio, owned by Settings rather than CaptureState ---------------
+     *
+     * The AUDIO chip and the Settings screen are two views of the same three
+     * SettingsRepository fields, so these write the repository and let the
+     * settings collector above feed the value back into uiState.settings --
+     * they deliberately do NOT touch _uiState directly (that would put a
+     * second, briefly-disagreeing copy of the value on screen) and they do NOT
+     * call persistCaptureState(), which is for per-take capture parameters.
+     *
+     * RecordScreen gates all three on `modeEnabled`, so none of them can land
+     * mid-take: audio arming is read once when the take starts, and a chip
+     * that changed after that would describe a file the take is not writing.
+     */
+
+    fun setRecordAudio(enabled: Boolean) {
+        viewModelScope.launch { SettingsRepository.update { it.copy(recordAudio = enabled) } }
+    }
+
+    fun setAudioInput(key: String) {
+        viewModelScope.launch { SettingsRepository.update { it.copy(audioInputKey = key) } }
+    }
+
+    fun setAudioGainDb(db: Float) {
+        viewModelScope.launch { SettingsRepository.update { it.copy(audioGainDb = db) } }
     }
 
     fun toggleIsoLock() = _uiState.update { it.copy(isoLocked = !it.isoLocked) }
@@ -1228,7 +1256,7 @@ private fun gridPoint(x: Float, y: Float): Offset = Offset(x, y)
 internal val KELVIN_STOPS = (2000..10000 step 100).toList()
 internal val TINT_STOPS = (-50..50 step 2).toList()
 
-private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB }
+private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB, AUDIO }
 
 @Composable
 fun RecordScreen(
@@ -1239,6 +1267,10 @@ fun RecordScreen(
     onOpenExports: () -> Unit = {},
     settingsEnabled: Boolean = true,
     onOpenSettings: () -> Unit = {},
+    /** Same contract SettingsScreen already takes -- enumerated lazily, because
+     * AudioManager reports devices that come and go (USB-C, Bluetooth) and a list
+     * captured at composition would go stale the moment a mic is plugged in. */
+    audioInputs: () -> List<AudioInputDevice> = { emptyList() },
 ) {
     val context = LocalContext.current
     var hasPermission by remember { mutableStateOf(hasCameraPermission(context)) }
@@ -1250,6 +1282,19 @@ fun RecordScreen(
         if (granted) viewModel.ensureCameraInitialized()
     }
     LaunchedEffect(Unit) { if (!hasPermission) launcher.launch(Manifest.permission.CAMERA) }
+
+    // Mic permission, asked when the AUDIO chip is switched ON and never at
+    // record time -- a permission dialog appearing as the user hits record is
+    // how takes get lost (same rule the Settings toggle follows). Declared here,
+    // beside the camera launcher and ABOVE the !hasPermission early return, so
+    // both launchers occupy fixed positions in this composable's slot table.
+    //
+    // The result is intentionally ignored: a denial must not un-arm the setting
+    // or block anything. It surfaces at record time as
+    // AudioStatus.PERMISSION_DENIED, which lights the meter's NO AUDIO and
+    // tints the chip -- video always wins, warn loudly.
+    val audioPermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     if (!hasPermission) {
         // Matches the rest of the app's flat bordered-pill / accent-fill language
@@ -1357,6 +1402,21 @@ fun RecordScreen(
     val shutterStops = viewModel.shutterStops(state.fps)
     val shutterDenom = shutterStops.getOrElse(state.shutterIndex) { shutterStops.lastOrNull() ?: 0 }
     val modeEnabled = !state.recording && !state.busy
+
+    // UI-only predicate, deliberately wider than the header's
+    // kAudioSyncInvalidating (which stays exactly as-is): if the read thread dies
+    // mid-take, _meter freezes at its last emitted (non-silent) value and the
+    // ticking peak-hold in AudioMeter settles onto it, so the HUD would otherwise
+    // affirmatively show a steady, healthy-looking signal while the mic is
+    // actually dead. ENDED_EARLY is folded in here, UI-side only, so "warn
+    // loudly" holds even though ENDED_EARLY correctly stays out of the header's
+    // sync contract (it means "stopped early", not "sync is off").
+    //
+    // Hoisted out of the AudioMeter call so the AUDIO chip's warn tint and the
+    // meter's AUDIO DEGRADED label are one predicate rather than two that could
+    // drift apart.
+    val audioDegraded =
+        (audioStatusBits and (AudioStatus.SYNC_INVALIDATING or AudioStatus.ENDED_EARLY)) != 0
     // AUTO_ONLY lenses (no MANUAL_SENSOR capability, or no usable ISO range) don't
     // offer a real manual ISO/shutter/focus control; disabling-because-absent must
     // read differently from disabling-because-locked (see Task 8 in the plan) --
@@ -1596,17 +1656,7 @@ fun RecordScreen(
                     levels = meterLevels,
                     channels = state.audioChannels,
                     noAudio = state.audioFailed,
-                    // UI-only predicate, deliberately wider than the header's
-                    // kAudioSyncInvalidating (which stays exactly as-is): if the
-                    // read thread dies mid-take, _meter freezes at its last
-                    // emitted (non-silent) value and the ticking peak-hold in
-                    // AudioMeter settles onto it, so the HUD would otherwise
-                    // affirmatively show a steady, healthy-looking signal while
-                    // the mic is actually dead. ENDED_EARLY is folded in here,
-                    // UI-side only, so "warn loudly" holds even though
-                    // ENDED_EARLY correctly stays out of the header's sync
-                    // contract (it means "stopped early", not "sync is off").
-                    degraded = (audioStatusBits and (AudioStatus.SYNC_INVALIDATING or AudioStatus.ENDED_EARLY)) != 0,
+                    degraded = audioDegraded,
                     recording = state.recording,
                     modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 16.dp).width(120.dp),
                 )
@@ -1719,6 +1769,64 @@ fun RecordScreen(
                                         onSelect = { viewModel.setTint(it) },
                                     )
                                 }
+                                Param.AUDIO -> {
+                                    // Enumerated once per panel opening rather than
+                                    // per recomposition: listInputs() queries
+                                    // AudioManager, and the panel recomposes on every
+                                    // meter tick while a take rolls.
+                                    val inputs = remember(expanded) { audioInputs() }
+                                    val settings = state.settings
+                                    ParamLabel("AUDIO")
+                                    OptionPills(
+                                        labels = listOf("OFF", "ON"),
+                                        selectedIndex = if (settings.recordAudio) 1 else 0,
+                                        enabled = modeEnabled,
+                                        onSelect = { idx ->
+                                            val on = idx == 1
+                                            if (on) audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            viewModel.setRecordAudio(on)
+                                        },
+                                    )
+                                    if (settings.recordAudio) {
+                                        // "" (system default) is a real, selectable
+                                        // choice, so it heads the list and the saved
+                                        // key is matched against these same keys.
+                                        val keys = listOf("") + inputs.map { it.key }
+                                        val labels = listOf("System default") + inputs.map { it.displayName }
+                                        val savedIdx = keys.indexOf(settings.audioInputKey)
+                                        Spacer(Modifier.height(4.dp))
+                                        ParamLabel("INPUT")
+                                        OptionPills(
+                                            labels = labels,
+                                            scrollable = true,
+                                            // A saved input that has since been
+                                            // unplugged is not in `keys` at all;
+                                            // fall back to showing default selected,
+                                            // which is what the recorder will
+                                            // actually open (see the note below).
+                                            selectedIndex = if (savedIdx >= 0) savedIdx else 0,
+                                            enabled = modeEnabled,
+                                            onSelect = { viewModel.setAudioInput(keys[it]) },
+                                        )
+                                        if (settings.audioInputKey.isNotEmpty() &&
+                                            AudioDeviceCatalog.resolve(inputs, settings.audioInputKey) == null
+                                        ) {
+                                            Text(
+                                                "Saved input unavailable — using default",
+                                                color = RawCamColors.Accent, fontSize = 11.sp,
+                                            )
+                                        }
+                                        Spacer(Modifier.height(4.dp))
+                                        ParamLabel("GAIN")
+                                        OptionPills(
+                                            labels = AUDIO_GAIN_STOPS.map { gainLabel(it) },
+                                            selectedIndex = AUDIO_GAIN_STOPS.indexOfFirst { it == settings.audioGainDb }
+                                                .let { if (it >= 0) it else AUDIO_GAIN_STOPS.indexOf(0f) },
+                                            enabled = modeEnabled,
+                                            onSelect = { viewModel.setAudioGainDb(AUDIO_GAIN_STOPS[it]) },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -1756,6 +1864,19 @@ fun RecordScreen(
                     }
                     ParamChip("${state.kelvin}K", expanded == Param.WB) {
                         expanded = if (expanded == Param.WB) null else Param.WB
+                    }
+                    // Audio's only always-visible presence. Before this chip a
+                    // take with audio off looked identical to one with audio on,
+                    // since AudioMeter renders nothing at all when recordAudio is
+                    // false. `warn` re-states the meter's own NO AUDIO /
+                    // AUDIO DEGRADED verdict as a border tint, so a failure is
+                    // still legible with eyes on the frame rather than the meter.
+                    ParamChip(
+                        audioChipLabel(state.settings),
+                        expanded == Param.AUDIO,
+                        warn = state.settings.recordAudio && (state.audioFailed || audioDegraded),
+                    ) {
+                        expanded = if (expanded == Param.AUDIO) null else Param.AUDIO
                     }
                 }
             }
@@ -2042,17 +2163,41 @@ private fun FpsToggle(options: List<Int>, selected: Int, enabled: Boolean, onSel
     }
 }
 
+/** The eight gain stops the AUDIO panel offers, identical to the Settings
+ * screen's list -- the two surfaces write one [Settings.audioGainDb] field, so a
+ * value chosen on one must be selectable on the other. */
+private val AUDIO_GAIN_STOPS = listOf(-20f, -12f, -6f, 0f, 6f, 12f, 20f, 30f)
+
+/** Pill text for a gain stop: sign-carrying and unit-less, since the panel's own
+ * GAIN label supplies the unit and the pills have to fit six-plus abreast. */
+private fun gainLabel(db: Float): String {
+    val n = db.roundToInt()
+    return if (n > 0) "+$n" else "$n"
+}
+
 /** Horizontal pill selector for the LENS / RESOLUTION panels (FpsToggle, by index). */
 @Composable
 private fun OptionPills(
-    labels: List<String>, selectedIndex: Int, enabled: Boolean, onSelect: (Int) -> Unit,
+    labels: List<String>,
+    selectedIndex: Int,
+    enabled: Boolean,
+    /** Lets the row overflow sideways instead of growing. Off for the fixed,
+     * short label sets (LENS, RESOLUTION, gain stops); ON for anything whose
+     * labels come from the device -- see the note on wrapping below. */
+    scrollable: Boolean = false,
+    onSelect: (Int) -> Unit,
 ) {
+    val scroll = rememberScrollState()
     Row(
         Modifier
             .padding(vertical = 6.dp)
             .alpha(if (enabled) 1f else 0.45f)
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, RawCamColors.Outline, RoundedCornerShape(8.dp))
+            .then(
+                if (scrollable) Modifier.horizontalScroll(scroll).horizontalFadingEdge(scroll)
+                else Modifier
+            )
     ) {
         labels.forEachIndexed { i, label ->
             val on = i == selectedIndex
@@ -2066,6 +2211,13 @@ private fun OptionPills(
                     label,
                     color = if (on) RawCamColors.OnSurface else RawCamColors.Muted,
                     fontSize = 13.sp,
+                    // A wrapped pill label is not a cosmetic problem here: the Row
+                    // sizes to its tallest child, so ONE two-line label stretched
+                    // the whole bordered box to the height of the two lines and
+                    // shoved the GAIN row and the chip strip off the bottom of the
+                    // screen. Overflow has to go sideways, never downwards.
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
@@ -2147,7 +2299,16 @@ private fun Modifier.horizontalFadingEdge(scrollState: ScrollState, edge: androi
         }
 
 @Composable
-private fun ParamChip(text: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
+private fun ParamChip(
+    text: String,
+    active: Boolean,
+    enabled: Boolean = true,
+    /** Carries a fault on the chip's LABEL rather than its border, because the
+     * border already spends [RawCamColors.Accent] on [active]; a warning drawn
+     * there would be indistinguishable from an open panel. */
+    warn: Boolean = false,
+    onClick: () -> Unit,
+) {
     Surface(
         color = Color(0xB80A0B0D),
         shape = CircleShape,
@@ -2155,7 +2316,9 @@ private fun ParamChip(text: String, active: Boolean, enabled: Boolean = true, on
         modifier = Modifier.alpha(if (enabled) 1f else 0.45f),
     ) {
         Text(
-            text, color = RawCamColors.OnSurface, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+            text,
+            color = if (warn) RawCamColors.Accent else RawCamColors.OnSurface,
+            fontSize = 14.sp, fontFamily = FontFamily.Monospace,
             modifier = Modifier
                 .clickable(enabled = enabled, onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 7.dp),

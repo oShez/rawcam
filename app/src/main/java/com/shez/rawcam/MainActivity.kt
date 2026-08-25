@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
                             onOpenExports = { if (!locked) screen = Screen.Exports },
                             settingsEnabled = !locked,
                             onOpenSettings = { if (!locked) screen = Screen.Settings },
+                            audioInputs = { AudioRecorder(this).listInputs() },
                         )
                         Screen.Clips -> ClipsScreen(onBack = { screen = Screen.Record })
                         Screen.Exports -> ExportsScreen(onBack = { screen = Screen.Record })
