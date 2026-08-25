@@ -1552,6 +1552,44 @@ fun RecordScreen(
                     drawRect(c, topLeft = Offset(cx - r, cy - r), size = Size(r * 2, r * 2), style = Stroke(width = 3.dp.toPx()))
                 }
             }
+
+            // Viewfinder frame. Four corner ticks mark the recorded area, so the image
+            // reads as a framed picture rather than something letterboxed into black,
+            // and while rolling the whole edge turns accent.
+            //
+            // The edge, not a blinking light, is what says RECORDING. A pulsing dot has
+            // to be found before it can be read; an outline around the entire frame is
+            // already in view no matter where on the image the eye is. It is also
+            // static: this draws once per state change, never per frame, because on this
+            // device anything animating continuously during capture competes with the
+            // encoder for the cycles that decide whether frames land.
+            Canvas(Modifier.fillMaxSize()) {
+                val arm = 18.dp.toPx()
+                val gap = 8.dp.toPx()
+                val hair = 1.dp.toPx()
+                val tick = if (state.recording) RawCamColors.Accent else Color.White.copy(alpha = 0.55f)
+                val right = size.width - gap
+                val bottom = size.height - gap
+                // Each corner is two strokes; drawn inward from the inset so the arms
+                // never clip against the preview edge.
+                listOf(
+                    Offset(gap, gap) to listOf(Offset(gap + arm, gap), Offset(gap, gap + arm)),
+                    Offset(right, gap) to listOf(Offset(right - arm, gap), Offset(right, gap + arm)),
+                    Offset(gap, bottom) to listOf(Offset(gap + arm, bottom), Offset(gap, bottom - arm)),
+                    Offset(right, bottom) to listOf(Offset(right - arm, bottom), Offset(right, bottom - arm)),
+                ).forEach { (corner, arms) ->
+                    arms.forEach { end -> drawLine(tick, corner, end, strokeWidth = hair) }
+                }
+                if (state.recording) {
+                    val w = 2.dp.toPx()
+                    drawRect(
+                        RawCamColors.Accent,
+                        topLeft = Offset(w / 2, w / 2),
+                        size = Size(size.width - w, size.height - w),
+                        style = Stroke(width = w),
+                    )
+                }
+            }
         }
 
         // displayCutoutPadding (on top of systemBarsPadding) keeps the overlay
@@ -1634,7 +1672,14 @@ fun RecordScreen(
                 // 104dp -- a quarter of the screen spent dodging two buttons, which left
                 // the seven parameter rows and the status block fighting over what was
                 // left and clipped the list mid-row.
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Both nav buttons are already dead mid-take -- BENCH because its ~6 GB
+                // write would compete with the capture hot path, SETTINGS because
+                // leaving the Record screen disposes the SurfaceView and stalls the RAW
+                // stream. Greying them out still spends ~100dp of rail on two controls
+                // that do nothing, while ISO and AUDIO fall off the bottom. Rolling
+                // hides them instead: the chrome recedes and the room goes to what you
+                // can actually act on.
+                if (!state.recording) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (state.settings.showBench) {
                     NavButton(
                         text = if (benchRunning) "…" else "BENCH",
@@ -1666,11 +1711,18 @@ fun RecordScreen(
                     Column(
                         modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
                     ) {
-                        ParamRow("LENS", lens.label, expanded == Param.LENS, modeEnabled) {
-                            expanded = if (expanded == Param.LENS) null else Param.LENS
-                        }
-                        ParamRow("RES", selectedSize.label, expanded == Param.RES, modeEnabled) {
-                            expanded = if (expanded == Param.RES) null else Param.RES
+                        // Lens and resolution are locked for the whole take, so while
+                        // recording they are two rows of dead weight shoving the
+                        // controls you CAN still ride -- ISO, shutter, focus, WB --
+                        // off the bottom of the rail. Show them only when they mean
+                        // something.
+                        if (!state.recording) {
+                            ParamRow("LENS", lens.label, expanded == Param.LENS, modeEnabled) {
+                                expanded = if (expanded == Param.LENS) null else Param.LENS
+                            }
+                            ParamRow("RES", selectedSize.label, expanded == Param.RES, modeEnabled) {
+                                expanded = if (expanded == Param.RES) null else Param.RES
+                            }
                         }
                         ParamRow("ISO", "${state.iso}", expanded == Param.ISO) {
                             expanded = if (expanded == Param.ISO) null else Param.ISO
@@ -1698,7 +1750,7 @@ fun RecordScreen(
                 // Capture stats, still gated on Settings.showStatsSidebar -- hiding them
                 // remains a pure subtraction, it just subtracts from the rail now.
                 if (state.settings.showStatsSidebar) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column {
                         // Idle, the timer reads 00:00 and frames-written/dropped are
                         // both 0 -- dead readouts. Show the live capture stats only
                         // while recording, when they mean something; idle keeps just
@@ -1715,7 +1767,7 @@ fun RecordScreen(
                                     style = RawCamType.Timecode,
                                 )
                             }
-                            StatItem("${state.written}", "frames written")
+                            StatItem("${state.written}", "frames")
                             StatItem(
                                 "${state.dropped}", "dropped",
                                 valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
@@ -1723,7 +1775,7 @@ fun RecordScreen(
                         }
                         StatItem(
                             remainingLabel(state.freeSpaceBytes, state.fps, spec),
-                            "space remaining",
+                            "left",
                         )
                     }
                 }
@@ -2191,22 +2243,25 @@ private val ZebraShadowColor = Color(0xFF3385FF)
 
 @Composable
 private fun RecDot() {
-    val pulse by rememberInfiniteTransition(label = "rec").animateFloat(
-        initialValue = 1f, targetValue = 0.25f,
-        animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse),
-        label = "recAlpha",
-    )
-    Box(
-        Modifier.size(12.dp).graphicsLayer { alpha = pulse }
-            .background(RawCamColors.Accent, CircleShape)
-    )
+    // Static. The pulse this used to run was an infinite transition redrawing for the
+    // entire length of a take, and the accent frame edge now states the same thing
+    // without animating anything during capture.
+    Box(Modifier.size(12.dp).background(RawCamColors.Accent, CircleShape))
 }
 
 @Composable
 private fun StatItem(value: String, label: String, valueColor: Color = RawCamColors.OnSurface) {
-    Column {
-        Text(value, color = valueColor, style = RawCamType.Value)
-        Text(label.uppercase(), color = RawCamColors.Muted, style = RawCamType.Label)
+    // Same one-line shape as ParamRow, for two reasons: the rail reads as one
+    // instrument rather than two stacked idioms, and stacked stats cost ~30dp each,
+    // which while recording squeezed the parameter list down to three visible rows.
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(label.uppercase(), color = RawCamColors.Muted, style = RawCamType.Label, maxLines = 1)
+        Spacer(Modifier.weight(1f))
+        Text(value, color = valueColor, style = RawCamType.Value, maxLines = 1)
     }
 }
 
