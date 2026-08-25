@@ -2460,21 +2460,21 @@ private fun Modifier.horizontalFadingEdge(scrollState: ScrollState, edge: androi
         }
 
 /**
- * One parameter in the left rail: field name and current value on ONE line, name muted
- * and left, value right.
+ * One parameter in the left rail: field name and current value on one line, in a quiet
+ * bordered surface, with a chevron marking that the row opens something.
  *
- * Stacked (name above value) is the more obvious layout and was the first attempt, but
- * it does not fit. Seven stacked rows plus the nav, the status block and the meter come
- * to roughly 495dp of content in a bar about 393dp tall, so two of the seven were always
- * below the fold -- which defeats the entire reason for moving off the horizontal chip
- * strip, where AUDIO was permanently off-screen. One line per row halves the row height
- * and puts all seven on screen at once with room to spare.
+ * The first version of this row was bare text on the rail background. That was a
+ * mistake: it read as a readout rather than a control, so nothing on the capture screen
+ * announced that ISO or shutter could be tapped at all. The reasoning at the time --
+ * that seven stacked borders would be noise -- was right about density and wrong about
+ * priority. A control that does not look like a control is the worse failure, and the
+ * fill here is only a few percent off the bar, so the row reads as tappable without
+ * shouting.
  *
- * Deliberately not a [ParamChip]. A chip's border exists to make a tap target legible
- * against arbitrary image content, which is what the strip needed when it floated over
- * the picture. In the rail the background is the app's own surface, so seven stacked
- * borders would be pure noise; the row signals its open state by tinting the value,
- * exactly as the chip signals a fault.
+ * Stacked (name above value) does not fit: seven stacked rows plus the nav, status
+ * block and meter come to roughly 495dp of content in a bar about 393dp tall, so two of
+ * the seven were always below the fold -- which defeats the reason for leaving the
+ * horizontal chip strip, where AUDIO was permanently off-screen.
  */
 @Composable
 private fun ParamRow(
@@ -2485,28 +2485,48 @@ private fun ParamRow(
     warn: Boolean = false,
     onClick: () -> Unit,
 ) {
-    Row(
+    val accent = warn || active
+    Surface(
+        color = if (active) RawCamColors.SurfaceVariant else Color(0xFF14171B),
+        shape = RoundedCornerShape(7.dp),
+        border = BorderStroke(1.dp, if (accent) RawCamColors.Accent else RawCamColors.Outline),
         modifier = Modifier
             .fillMaxWidth()
-            .alpha(if (enabled) 1f else 0.45f)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(vertical = 2.dp)
+            .alpha(if (enabled) 1f else 0.45f),
     ) {
-        Text(
-            label,
-            color = RawCamColors.Muted,
-            style = RawCamType.Label,
-            maxLines = 1,
-        )
-        Spacer(Modifier.weight(1f))
-        Text(
-            value,
-            color = if (warn || active) RawCamColors.Accent else RawCamColors.OnSurface,
-            style = RawCamType.Value,
-            maxLines = 1,
-        )
+        Row(
+            modifier = Modifier
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(start = 8.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            // The LABEL carries the weight, not a Spacer between label and value.
+            // A Row measures unweighted children first, in order, so with the label
+            // and value both unweighted the chevron was measured last and got nothing
+            // left: SHUTTER (longest label, wide value) rendered with no chevron while
+            // every other row had one. Weighting the label makes it the only thing that
+            // can lose space, and the value and chevron are always laid out in full.
+            Box(Modifier.weight(1f)) {
+                Text(label, color = RawCamColors.Muted, style = RawCamType.Label, maxLines = 1)
+            }
+            Text(
+                value,
+                color = if (accent) RawCamColors.Accent else RawCamColors.OnSurface,
+                style = RawCamType.Value,
+                maxLines = 1,
+            )
+            // Points down when open, right when closed: the same glyph states whether
+            // the row is tappable AND whether its panel is currently showing, so the
+            // open row never depends on colour alone to be identified.
+            Text(
+                if (active) "▾" else "›",
+                color = if (accent) RawCamColors.Accent else RawCamColors.Muted,
+                fontSize = 11.sp,
+                fontFamily = RawCamMono,
+            )
+        }
     }
 }
 

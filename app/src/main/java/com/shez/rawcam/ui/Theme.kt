@@ -60,7 +60,11 @@ val RawCamMono = FontFamily(
  * [Label] is the only style that sets letter spacing: at 10sp, uppercase mono needs
  * the extra tracking to stay readable, while the larger steps do not. Because that
  * tracking assumes capitals, every caller must pass an UPPERCASE string -- spaced-out
- * lowercase reads as a rendering accident rather than a decision.
+ * lowercase reads as a rendering accident rather than a decision. The tracking is
+ * 0.6sp rather than the 1.5sp it started at: a monospaced face already carries generous
+ * side bearings, and at 1.5sp the widest rail label (SHUTTER) plus its value plus the
+ * chevron overran the ~93dp of content a letterbox rail actually has, clipping it to
+ * "SHUTTE". Guaranteeing the fit beats relying on truncation.
  *
  * Weights sit a step heavier than a screen UI would normally want. This is a camera
  * HUD read at arm's length, often as white text over a bright preview in daylight,
@@ -71,7 +75,7 @@ object RawCamType {
     /** Field names above a value. Muted, uppercase, never the thing you read first. */
     val Label = TextStyle(
         fontFamily = RawCamMono, fontSize = 10.sp,
-        fontWeight = FontWeight.Medium, letterSpacing = 1.5.sp,
+        fontWeight = FontWeight.Medium, letterSpacing = 0.6.sp,
     )
 
     /** Secondary readouts and list rows: menu labels, clip names, counters. */
