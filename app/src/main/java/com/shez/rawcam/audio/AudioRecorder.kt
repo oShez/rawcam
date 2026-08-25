@@ -327,12 +327,14 @@ class AudioRecorder(private val context: Context) {
         val buf = FloatArray(READ_SAMPLES)
         val ts = AudioTimestamp()
         var nextAnchorAt = 0L
+        var readFailed = false
         try {
             while (running.get()) {
                 val n = rec.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
                 if (n < 0) {
                     Log.e(TAG, "AudioRecord.read error $n")
                     addStatus(AudioStatus.ENDED_EARLY)
+                    readFailed = true
                     break
                 }
                 if (n == 0) continue
@@ -364,6 +366,36 @@ class AudioRecorder(private val context: Context) {
                 if (now >= nextAnchorAt) {
                     nextAnchorAt = now + ANCHOR_INTERVAL_NS
                     sampleClocks(rec, ts)
+                }
+            }
+            // Drain whatever the framework captured but never handed over.
+            //
+            // This is the tail-truncation fix. The loop above exits the moment
+            // `running` goes false, but AudioRecord is still recording at that
+            // instant and still holds everything it has captured since the last
+            // full read. stop() then calls AudioRecord.stop(), which discards it.
+            // With READ_SAMPLES at 4096 the orphaned amount is anything up to one
+            // chunk -- 85ms at 48kHz -- which is why a take lost ~46ms and its
+            // final video frame came out silent.
+            //
+            // Non-blocking on purpose: this runs while the device is still live,
+            // so a blocking read would sit waiting for audio that is never coming
+            // and turn a clean stop into a join timeout. NON_BLOCKING returns what
+            // is there and 0 when the buffer is empty, which is the exit condition.
+            //
+            // Skipped when the loop exited on an error: a recorder that just
+            // failed a read is not one to keep reading from.
+            if (!readFailed) {
+                var guard = 0
+                while (guard++ < DRAIN_MAX_READS) {
+                    val n = rec.read(buf, 0, buf.size, AudioRecord.READ_NON_BLOCKING)
+                    if (n <= 0) break
+                    val g = gainLinear
+                    for (i in 0 until n) buf[i] = buf[i] * g
+                    if (!queue.offer(buf.copyOf(n))) {
+                        addStatus(AudioStatus.OVERRUNS)
+                        break
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -654,13 +686,20 @@ class AudioRecorder(private val context: Context) {
         }
         running.set(false)
 
-        // Call AudioRecord.stop() BEFORE joining, not after: the framework
-        // documents stop() as the mechanism that unblocks a thread currently
-        // parked in a blocking read() on the same AudioRecord. Doing this
-        // first means the join below only has to cover ordinary shutdown
-        // latency, not a read that is merely waiting on the next buffer of
-        // live audio -- and gives a genuinely wedged HAL a real chance to
-        // respond before the join times out.
+        // Ordering here is a compromise between two requirements that pull
+        // opposite ways.
+        //
+        // AudioRecord.stop() is the framework's documented way to unblock a
+        // thread parked in a blocking read(), so calling it first keeps a wedged
+        // HAL from holding the join open. But it also throws away everything the
+        // device has captured and not yet handed over -- which is precisely the
+        // tail this take needs, and precisely what used to go missing.
+        //
+        // So: give the read thread a bounded window to finish its in-flight read
+        // and run its drain while the device is still live, and only reach for
+        // stop() if it is still parked after that. The healthy path keeps its
+        // tail; the wedged path still gets unblocked.
+        readThread?.join(DRAIN_JOIN_MS)
         try {
             record?.stop()
         } catch (e: Exception) {
@@ -798,6 +837,17 @@ class AudioRecorder(private val context: Context) {
         private const val QUEUE_CAPACITY = 32
         private const val POLL_TIMEOUT_MS = 100L
         private const val THREAD_JOIN_MS = 2_000L
+
+        /** Bound on the post-stop drain. Each pass takes at most one buffer's
+         *  worth, so this cannot spin: it exists only so a misbehaving HAL that
+         *  keeps returning data forever cannot hold the stop path open. */
+        private const val DRAIN_MAX_READS = 8
+
+        /** How long stop() lets the read thread finish its in-flight read and
+         *  drain before falling back to AudioRecord.stop() to unblock it. One
+         *  blocking read is READ_SAMPLES/sampleRate -- 85ms at 48kHz -- so this
+         *  clears the ordinary case several times over. */
+        private const val DRAIN_JOIN_MS = 400L
         private const val ANCHOR_INTERVAL_NS = 1_000_000_000L
         private const val PAD_CHUNK = 4096
         private const val DRIFT_WARN_PPM = 100
