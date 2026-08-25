@@ -26,6 +26,13 @@ import com.shez.rawcam.R
  * - [Success] is the same green family, deepened, for status readouts in lists. It is
  *   never used on anything tappable.
  *
+ * No green ever touches the picture. A colour-grading suite is painted neutral grey
+ * because chromatic adaptation drags your white balance toward whatever fills your
+ * peripheral vision, and this app hands the user a manual white-balance control they
+ * set by eye against the live preview. Saturated chrome beside that image would bias
+ * the very judgement the app exists to support, so the greens stay in the letterbox
+ * bars and the frame carries nothing but its corner ticks.
+ *
  * The greens are a three-step ramp by volume, not three different meanings:
  *
  * - jade [InteractiveSurface] -- the bed under a row you have opened. Quietest.
@@ -47,15 +54,36 @@ object RawCamColors {
     val Outline = Color(0xFF3A3E45)
     val Accent = Color(0xFFE5484D)
 
-    /** Forest, lifted. Plain forest #228B22 measures 4.09:1 on the rail surface, under
-     *  the 4.5:1 that text needs; parrot #32CD32 cleared it at 8.49:1 but glared. This
-     *  sits at 5.18:1 -- unmistakably forest, legible at arm's length, no neon. */
-    val Interactive = Color(0xFF2C9E2C)
+    /**
+     * Jade. The only green in the app that is ever set as TEXT, and it is blue-shifted
+     * rather than a pure green for two measured reasons.
+     *
+     * Legibility: WCAG 2 ratios are unreliable on dark grounds -- they are symmetric,
+     * ignore stroke width, and a "passing" 4.5:1 can still be unreadable near black. On
+     * APCA, which is built for this case, forest #2C9E2C scores Lc 38.8 on the rail
+     * surface. APCA wants 60 for body text and 45 even for large or bold. The forest
+     * that felt right was failing by a wide margin; the WCAG 5.18:1 that said otherwise
+     * was measuring the wrong thing. Jade #35C99B scores Lc 60.5.
+     *
+     * Colour vision: red-green is the single worst pair to carry meaning, affecting
+     * ~8% of men. Simulated, #E5484D lands on #8F8F44 for a deuteranope -- and forest
+     * green lands almost exactly there too, separation 0.043 in linear light. Jade
+     * keeps blue in it, so it survives the collapse: separation 0.353, eight times
+     * further apart, because deuteranopia leaves the blue-yellow axis intact.
+     *
+     * Glare: this sits at essentially the same APCA contrast as the parrot it replaces
+     * (60.5 vs 60.4), yet reads calmer, because pure green sits at the eye's peak
+     * luminous sensitivity near 555nm. Shifting hue toward blue buys comfort without
+     * paying any legibility for it -- which is why the answer to "too bright" was to
+     * move the hue, not to darken it. Darkening was what broke legibility in the first
+     * place.
+     */
+    val Interactive = Color(0xFF35C99B)
 
     /** True forest. The middle of the ramp: a standing selection -- the chosen pill,
-     *  the current frame rate -- where the lifted forest above is louder than a
-     *  not-currently-touched control deserves. At 4.09:1 it is fine as a FILL (UI
-     *  components need 3:1) and is deliberately never set as text. */
+     *  the current frame rate -- where jade is louder than a not-currently-touched
+     *  control deserves. Fills are not text: APCA asks Lc 15 of them, not 60, so the
+     *  calm dark green that could never carry a value is exactly right here. */
     val InteractiveMid = Color(0xFF228B22)
 
     /** Jade. Far too dark to set type on a near-black ground, which is exactly what

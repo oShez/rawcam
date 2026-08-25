@@ -2530,8 +2530,16 @@ private fun ParamRow(
             // Points down when open, right when closed: the same glyph states whether
             // the row is tappable AND whether its panel is currently showing, so the
             // open row never depends on colour alone to be identified.
+            // Three states, three glyphs. Red-green is the worst possible pair to carry
+            // meaning -- to a deuteranope the accent red collapses onto olive #8F8F44
+            // and a pure green lands nearly on top of it -- so a fault must be legible
+            // without seeing colour at all. Jade widens the colour gap; this closes it.
             Text(
-                if (active) "▾" else "›",
+                when {
+                    warn -> "!"
+                    active -> "▾"
+                    else -> "›"
+                },
                 color = mark ?: RawCamColors.Muted,
                 fontSize = 11.sp,
                 fontFamily = RawCamMono,
