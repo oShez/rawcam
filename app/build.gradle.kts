@@ -50,6 +50,13 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
+        debug {
+            // Distinct package so a debug build installs ALONGSIDE the
+            // release-signed app on a test device instead of failing with
+            // INSTALL_FAILED_UPDATE_INCOMPATIBLE -- and, more importantly, so
+            // installing one never wipes the other's DataStore settings.
+            applicationIdSuffix = ".debug"
+        }
     }
     buildFeatures { compose = true; buildConfig = true }
     testOptions { unitTests.isReturnDefaultValues = true }
