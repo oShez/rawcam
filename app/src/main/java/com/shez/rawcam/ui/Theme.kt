@@ -30,9 +30,13 @@ import com.shez.rawcam.R
  *
  * - jade [InteractiveSurface] -- the bed under a row you have opened. Quietest.
  * - forest [InteractiveMid] -- a standing selection you are not touching right now.
- * - parrot [Interactive] -- the live value and edge you are reading. Loudest, and the
- *   only one used for text, because it is the only one that clears 4.5:1 contrast on
- *   these surfaces. Forest measures 4.09:1, fine for a fill and not for type.
+ * - lifted forest [Interactive] -- the live value and edge you are reading, and the
+ *   only one ever set as text.
+ *
+ * The whole ramp is one hue family. An earlier pass used parrot #32CD32 at the top; it
+ * cleared contrast easily but glared on a dark instrument, so the top step came down to
+ * the least-bright forest that still clears 4.5:1 as type. Brightness here is bounded
+ * from below by legibility and from above by taste, and 5.18:1 is where both hold.
  */
 object RawCamColors {
     val Background = Color(0xFF0A0B0D)
@@ -43,13 +47,15 @@ object RawCamColors {
     val Outline = Color(0xFF3A3E45)
     val Accent = Color(0xFFE5484D)
 
-    /** Parrot green. Bright and saturated so it still reads over a daylit preview. */
-    val Interactive = Color(0xFF32CD32)
+    /** Forest, lifted. Plain forest #228B22 measures 4.09:1 on the rail surface, under
+     *  the 4.5:1 that text needs; parrot #32CD32 cleared it at 8.49:1 but glared. This
+     *  sits at 5.18:1 -- unmistakably forest, legible at arm's length, no neon. */
+    val Interactive = Color(0xFF2C9E2C)
 
-    /** Forest. The middle of the ramp: a standing selection -- the chosen pill, the
-     *  current frame rate -- where a solid parrot block shouts and jade disappears.
-     *  At 4.09:1 on the rail surface it is fine as a FILL (UI components need 3:1) and
-     *  is deliberately never used for text, which needs 4.5:1. */
+    /** True forest. The middle of the ramp: a standing selection -- the chosen pill,
+     *  the current frame rate -- where the lifted forest above is louder than a
+     *  not-currently-touched control deserves. At 4.09:1 it is fine as a FILL (UI
+     *  components need 3:1) and is deliberately never set as text. */
     val InteractiveMid = Color(0xFF228B22)
 
     /** Jade. Far too dark to set type on a near-black ground, which is exactly what

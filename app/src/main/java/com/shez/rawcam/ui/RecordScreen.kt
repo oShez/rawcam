@@ -2696,7 +2696,12 @@ internal fun <T> TickedSlider(
                         sliderState = state,
                         thumbTrackGapSize = 0.dp,
                         colors = SliderDefaults.colors(
-                            activeTrackColor = RawCamColors.Interactive,
+                            // The track is the largest solid green on screen, and a
+                            // large fill reads brighter than the same colour in type.
+                            // It takes the ramp's fill step, like the pills and the
+                            // frame-rate chip; the thumb and bubble keep the lighter
+                            // step so they still separate from it.
+                            activeTrackColor = RawCamColors.InteractiveMid,
                             inactiveTrackColor = RawCamColors.SurfaceVariant,
                             activeTickColor = RawCamColors.Background,
                             inactiveTickColor = RawCamColors.Muted,
