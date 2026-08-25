@@ -191,15 +191,9 @@ fun ExportsScreen(onBack: () -> Unit = {}) {
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("←", fontSize = 18.sp) }
-            Text("Exports", style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(8.dp))
+        ScreenHeader(title = "Exports", onBack = onBack)
         if (exports.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No exports yet — export a clip from Clips.", color = RawCamColors.Muted)
-            }
+            EmptyState("No exports yet", "Export a clip from Clips and it will appear here.")
         } else {
             LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(exports, key = { it.dir.absolutePath }) { entry ->

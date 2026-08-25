@@ -129,12 +129,10 @@ fun SettingsScreen(
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("←", fontSize = 18.sp) }
-            Text("Settings", style = MaterialTheme.typography.titleLarge)
-        }
-        Spacer(Modifier.height(8.dp))
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        ScreenHeader(title = "Settings", onBack = onBack)
+        // Width-capped: full-bleed rows put a label and its value ~1870px apart on this
+        // screen, so reading one row meant crossing the display. See ScreenBody.
+        ScreenBody(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             SectionHeader("CAPTURE DEFAULTS")
             EnumRow(
                 title = "Startup metering", subtitle = null,
@@ -413,7 +411,7 @@ fun SettingsScreen(
 @Composable
 private fun SectionHeader(title: String) {
     Text(
-        title, color = RawCamColors.Muted, fontSize = 11.sp, letterSpacing = 1.5.sp,
+        title, color = RawCamColors.Muted, style = RawCamType.Label,
         modifier = Modifier.padding(top = 20.dp, bottom = 6.dp),
     )
 }

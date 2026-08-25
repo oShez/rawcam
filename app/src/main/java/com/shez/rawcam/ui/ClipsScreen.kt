@@ -253,20 +253,14 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("←", fontSize = 18.sp) }
-            Text("Clips", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.weight(1f))
+        ScreenHeader(title = "Clips", onBack = onBack) {
             Text(
-                humanSize(freeBytes) + " free",
-                color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = RawCamMono,
+                humanSize(freeBytes) + " FREE",
+                color = RawCamColors.Muted, style = RawCamType.Label,
             )
         }
-        Spacer(Modifier.height(8.dp))
         if (clips.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No clips yet — record something.", color = RawCamColors.Muted)
-            }
+            EmptyState("No clips yet", "Recordings you make will be listed here.")
         } else {
             LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(clips, key = { it.file.absolutePath }) { clip ->

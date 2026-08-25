@@ -1639,14 +1639,6 @@ fun RecordScreen(
                 }
             }
 
-            Row(
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
-                NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
-            }
-
             // Left rail. Everything that used to be scattered across three separate
             // alignments -- the stats column at CenterStart, the meter at BottomStart,
             // and the parameter chips ON TOP OF THE PICTURE at BottomCenter -- is one
@@ -1672,35 +1664,6 @@ fun RecordScreen(
                 // 104dp -- a quarter of the screen spent dodging two buttons, which left
                 // the seven parameter rows and the status block fighting over what was
                 // left and clipped the list mid-row.
-                // Both nav buttons are already dead mid-take -- BENCH because its ~6 GB
-                // write would compete with the capture hot path, SETTINGS because
-                // leaving the Record screen disposes the SurfaceView and stalls the RAW
-                // stream. Greying them out still spends ~100dp of rail on two controls
-                // that do nothing, while ISO and AUDIO fall off the bottom. Rolling
-                // hides them instead: the chrome recedes and the room goes to what you
-                // can actually act on.
-                if (!state.recording) Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (state.settings.showBench) {
-                    NavButton(
-                        text = if (benchRunning) "…" else "BENCH",
-                        enabled = !state.recording && !state.busy,
-                        onClick = {
-                            if (benchRunning) return@NavButton
-                            benchRunning = true
-                            scope.launch {
-                                val mbps = withContext(Dispatchers.IO) {
-                                    val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
-                                    NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
-                                }
-                                benchRunning = false
-                                snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
-                            }
-                        },
-                    )
-                }
-                NavButton(text = "SETTINGS", enabled = settingsEnabled, onClick = onOpenSettings)
-                }
-
                 if (railFits) {
                     // weight(1f) with no competing weighted sibling: the list takes all
                     // the room the status block below does not need, and scrolls inside
@@ -1795,23 +1758,67 @@ fun RecordScreen(
                 }
             }
 
-            // Right action rail.
+            // Right rail: everything you navigate or trigger, in the opposite bar to
+            // everything you read. Navigation used to be split for no reason -- BENCH
+            // and SETTINGS in the left rail, EXPORTS and CLIPS in a top-right row that
+            // started at x~1590 while the picture ran to x~1600, so two of the four
+            // were sitting on the image. Stacking all four in the bar puts them in one
+            // place and takes them off the frame.
             Column(
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 24.dp),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(if (railFits) railWidth else 168.dp)
+                    .padding(start = 8.dp, end = 14.dp, top = 8.dp, bottom = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
+                // Hidden while rolling, like the left rail's: every one of these is
+                // already disabled mid-take, so greying them just spends rail on
+                // controls that do nothing.
+                if (!state.recording) {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        NavButton(text = "CLIPS", enabled = clipsEnabled, onClick = onOpenClips)
+                        NavButton(text = "EXPORTS", enabled = exportsEnabled, onClick = onOpenExports)
+                if (state.settings.showBench) {
+                    NavButton(
+                        text = if (benchRunning) "…" else "BENCH",
+                        enabled = !state.recording && !state.busy,
+                        onClick = {
+                            if (benchRunning) return@NavButton
+                            benchRunning = true
+                            scope.launch {
+                                val mbps = withContext(Dispatchers.IO) {
+                                    val path = File(context.getExternalFilesDir(null), "bench.bin").absolutePath
+                                    NativeBridge.nativeBenchmarkWrite(path, 25_000_000, 240)
+                                }
+                                benchRunning = false
+                                snackbarHostState.showSnackbar("Bench: %.0f MB/s".format(mbps))
+                            }
+                        },
+                    )
+                }
+                NavButton(text = "SETTINGS", enabled = settingsEnabled, onClick = onOpenSettings)
+                    }
+                }
+
+                Spacer(Modifier.weight(1f))
+
                 ShutterButton(
                     recording = state.recording,
                     enabled = state.previewReady && !state.busy,
                     onClick = { viewModel.toggleRecord() },
                 )
+                Spacer(Modifier.height(16.dp))
                 FpsToggle(
                     options = viewModel.fpsOptions(spec),
                     selected = state.fps,
                     enabled = !state.recording,
                     onSelect = { viewModel.setFps(it) },
                 )
+                Spacer(Modifier.weight(1f))
             }
 
             // Bottom: one expandable slider + the parameter chips.
