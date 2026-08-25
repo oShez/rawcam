@@ -11,7 +11,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.shez.rawcam.R
 
-/** RawCam palette — single dark theme; the app is a camera and commits to it. */
+/**
+ * RawCam palette. Single dark theme; the app is a camera and commits to it.
+ *
+ * TWO accents, deliberately, because one was carrying two unrelated meanings. Red used
+ * to mean both "this control is open" and "something is wrong", which is fine until
+ * they appear together -- and on the capture screen they always do.
+ *
+ * - [Interactive] (green) is the user's own doing: the open parameter row, a selected
+ *   pill, a locked control, a slider you are dragging. It never appears on its own.
+ * - [Accent] (red) is the camera's doing: rolling, or wrong. A recording indicator is
+ *   red on every camera ever built, and a fault has to be able to shout over a green
+ *   interface without competing with it.
+ * - [Success] is the same green family, deepened, for status readouts in lists. It is
+ *   never used on anything tappable.
+ *
+ * The greens are a three-step ramp by volume, not three different meanings:
+ *
+ * - jade [InteractiveSurface] -- the bed under a row you have opened. Quietest.
+ * - forest [InteractiveMid] -- a standing selection you are not touching right now.
+ * - parrot [Interactive] -- the live value and edge you are reading. Loudest, and the
+ *   only one used for text, because it is the only one that clears 4.5:1 contrast on
+ *   these surfaces. Forest measures 4.09:1, fine for a fill and not for type.
+ */
 object RawCamColors {
     val Background = Color(0xFF0A0B0D)
     val Surface = Color(0xFF17191D)
@@ -20,7 +42,24 @@ object RawCamColors {
     val Muted = Color(0xFF8F959D)
     val Outline = Color(0xFF3A3E45)
     val Accent = Color(0xFFE5484D)
-    val Success = Color(0xFF6FBF73)
+
+    /** Parrot green. Bright and saturated so it still reads over a daylit preview. */
+    val Interactive = Color(0xFF32CD32)
+
+    /** Forest. The middle of the ramp: a standing selection -- the chosen pill, the
+     *  current frame rate -- where a solid parrot block shouts and jade disappears.
+     *  At 4.09:1 on the rail surface it is fine as a FILL (UI components need 3:1) and
+     *  is deliberately never used for text, which needs 4.5:1. */
+    val InteractiveMid = Color(0xFF228B22)
+
+    /** Jade. Far too dark to set type on a near-black ground, which is exactly what
+     *  makes it the right bed: a deep green fill under a parrot border, so an open row
+     *  reads as lit rather than merely outlined. */
+    val InteractiveSurface = Color(0xFF06402B)
+
+    /** Status readouts in lists. A deeper, calmer parrot rather than the unrelated
+     *  sage it used to be -- one green family across the app, not two. */
+    val Success = Color(0xFF2AA82A)
 }
 
 /**
@@ -107,8 +146,11 @@ fun RawCamTheme(content: @Composable () -> Unit) {
             onSurface = RawCamColors.OnSurface,
             onSurfaceVariant = RawCamColors.Muted,
             outline = RawCamColors.Outline,
-            primary = RawCamColors.Accent,
-            onPrimary = Color.White,
+            // Material's own controls -- the exposure sliders' track and thumb, dialog
+            // actions -- read `primary`. They are all things the user operates, so they
+            // follow Interactive; `error` below keeps red for the states that are not.
+            primary = RawCamColors.Interactive,
+            onPrimary = RawCamColors.Background,
             secondary = RawCamColors.Muted,
             error = RawCamColors.Accent,
         ),

@@ -1733,7 +1733,7 @@ fun RecordScreen(
                             StatItem("${state.written}", "frames")
                             StatItem(
                                 "${state.dropped}", "dropped",
-                                valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.Success,
+                                valueColor = if (state.dropped > 0) RawCamColors.Accent else RawCamColors.OnSurface,
                             )
                         }
                         StatItem(
@@ -2069,10 +2069,10 @@ private fun UnsupportedDeviceScreen(reason: String, detail: String, reportText: 
             }
             Surface(
                 color = Color.Transparent, shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, RawCamColors.Accent),
+                border = BorderStroke(1.dp, RawCamColors.Interactive),
             ) {
                 Text(
-                    "COPY REPORT", color = RawCamColors.Accent, fontSize = 13.sp, letterSpacing = 1.sp,
+                    "COPY REPORT", color = RawCamColors.Interactive, fontSize = 13.sp, letterSpacing = 1.sp,
                     modifier = Modifier
                         .clickable { clipboard.setText(AnnotatedString(reportText)) }
                         .padding(horizontal = 24.dp, vertical = 12.dp),
@@ -2308,7 +2308,7 @@ private fun FpsToggle(options: List<Int>, selected: Int, enabled: Boolean, onSel
             Box(
                 Modifier
                     .clickable(enabled = enabled) { onSelect(fps) }
-                    .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
+                    .background(if (on) RawCamColors.InteractiveMid else Color.Transparent)
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text("$fps", color = if (on) RawCamColors.OnSurface else RawCamColors.Muted, fontSize = 13.sp)
@@ -2365,7 +2365,7 @@ private fun OptionPills(
             Box(
                 Modifier
                     .clickable(enabled = enabled) { onSelect(i) }
-                    .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
+                    .background(if (on) RawCamColors.InteractiveMid else Color.Transparent)
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text(
@@ -2485,11 +2485,21 @@ private fun ParamRow(
     warn: Boolean = false,
     onClick: () -> Unit,
 ) {
-    val accent = warn || active
+    // A fault outranks an open panel: if audio has failed you need to see that even
+    // while the row happens to be the one you are editing.
+    val mark = when {
+        warn -> RawCamColors.Accent
+        active -> RawCamColors.Interactive
+        else -> null
+    }
     Surface(
-        color = if (active) RawCamColors.SurfaceVariant else Color(0xFF14171B),
+        color = when {
+            warn -> Color(0xFF2A1113)
+            active -> RawCamColors.InteractiveSurface
+            else -> Color(0xFF14171B)
+        },
         shape = RoundedCornerShape(7.dp),
-        border = BorderStroke(1.dp, if (accent) RawCamColors.Accent else RawCamColors.Outline),
+        border = BorderStroke(1.dp, mark ?: RawCamColors.Outline),
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
@@ -2513,7 +2523,7 @@ private fun ParamRow(
             }
             Text(
                 value,
-                color = if (accent) RawCamColors.Accent else RawCamColors.OnSurface,
+                color = mark ?: RawCamColors.OnSurface,
                 style = RawCamType.Value,
                 maxLines = 1,
             )
@@ -2522,7 +2532,7 @@ private fun ParamRow(
             // open row never depends on colour alone to be identified.
             Text(
                 if (active) "▾" else "›",
-                color = if (accent) RawCamColors.Accent else RawCamColors.Muted,
+                color = mark ?: RawCamColors.Muted,
                 fontSize = 11.sp,
                 fontFamily = RawCamMono,
             )
@@ -2544,7 +2554,7 @@ private fun ParamChip(
     Surface(
         color = Color(0xB80A0B0D),
         shape = CircleShape,
-        border = BorderStroke(1.dp, if (active) RawCamColors.Accent else RawCamColors.Outline),
+        border = BorderStroke(1.dp, if (active) RawCamColors.Interactive else RawCamColors.Outline),
         modifier = Modifier.alpha(if (enabled) 1f else 0.45f),
     ) {
         Text(
@@ -2572,11 +2582,11 @@ private fun LockToggle(locked: Boolean, onClick: () -> Unit) {
     Surface(
         color = Color(0xB80A0B0D),
         shape = CircleShape,
-        border = BorderStroke(1.dp, if (locked) RawCamColors.Accent else RawCamColors.Outline),
+        border = BorderStroke(1.dp, if (locked) RawCamColors.Interactive else RawCamColors.Outline),
     ) {
         Text(
             if (locked) "LOCKED" else "LOCK",
-            color = if (locked) RawCamColors.Accent else RawCamColors.Muted,
+            color = if (locked) RawCamColors.Interactive else RawCamColors.Muted,
             fontSize = 10.sp, letterSpacing = 1.sp,
             modifier = Modifier
                 .clickable(onClick = onClick)
@@ -2677,7 +2687,24 @@ internal fun <T> TickedSlider(
                 // this dark panel background that gap reads as black bars flanking the
                 // thumb. Zeroing it restores a continuous track, matching how the slider
                 // looked before the value bubble was added.
-                track = { state -> SliderDefaults.Track(sliderState = state, thumbTrackGapSize = 0.dp) },
+                // Colours pinned rather than inherited. Material derives the inactive
+                // track and tick marks from the scheme's tonal palette, and against a
+                // green primary that derivation came out visibly purple on the dark
+                // panel -- it had simply been unnoticeable while the accent was red.
+                track = { state ->
+                    SliderDefaults.Track(
+                        sliderState = state,
+                        thumbTrackGapSize = 0.dp,
+                        colors = SliderDefaults.colors(
+                            activeTrackColor = RawCamColors.Interactive,
+                            inactiveTrackColor = RawCamColors.SurfaceVariant,
+                            activeTickColor = RawCamColors.Background,
+                            inactiveTickColor = RawCamColors.Muted,
+                            disabledActiveTrackColor = RawCamColors.Outline,
+                            disabledInactiveTrackColor = RawCamColors.SurfaceVariant,
+                        ),
+                    )
+                },
             )
             Text(
                 labelFor(stops.last()), color = RawCamColors.Muted,
@@ -2698,7 +2725,7 @@ private fun ValueBubble(text: String, modifier: Modifier = Modifier) {
         modifier = modifier,
         color = Color(0xE60A0B0D),
         shape = RoundedCornerShape(6.dp),
-        border = BorderStroke(1.dp, RawCamColors.Accent),
+        border = BorderStroke(1.dp, RawCamColors.Interactive),
     ) {
         Text(
             text, color = RawCamColors.OnSurface,
