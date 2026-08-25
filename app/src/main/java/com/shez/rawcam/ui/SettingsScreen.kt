@@ -40,7 +40,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -392,15 +391,15 @@ fun SettingsScreen(
             SectionHeader("ABOUT")
             Text(
                 "RawCam " + com.shez.rawcam.BuildConfig.VERSION_NAME, color = RawCamColors.Muted, fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp),
+                fontFamily = RawCamMono, modifier = Modifier.padding(vertical = 2.dp),
             )
             Text(
                 "Core " + NativeBridge.nativeVersion(), color = RawCamColors.Muted, fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp),
+                fontFamily = RawCamMono, modifier = Modifier.padding(vertical = 2.dp),
             )
             Text(
                 Build.MODEL, color = RawCamColors.Muted, fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp),
+                fontFamily = RawCamMono, modifier = Modifier.padding(vertical = 2.dp),
             )
             Spacer(Modifier.height(24.dp))
         }
@@ -475,7 +474,7 @@ private fun SliderRow(
             Text(title, color = RawCamColors.OnSurface, fontSize = 15.sp)
             Text(
                 labelFor(selected), color = RawCamColors.Muted,
-                fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp, fontFamily = RawCamMono,
             )
         }
         Spacer(Modifier.height(6.dp))
@@ -558,7 +557,7 @@ private fun CompatibilityReportScreen(reportText: String, onBack: () -> Unit) {
             reportText,
             color = RawCamColors.OnSurface,
             fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = RawCamMono,
             modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
         )
         Spacer(Modifier.height(12.dp))

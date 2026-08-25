@@ -35,7 +35,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -238,13 +237,13 @@ private fun ExportCard(entry: ExportEntry, onShare: () -> Unit, onDelete: () -> 
                 Text(exportTitle(entry.dir), style = MaterialTheme.typography.titleMedium)
                 Text(
                     "${entry.dngCount} DNGs · ${humanSize(entry.totalBytes)}",
-                    color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                    color = RawCamColors.Muted, fontSize = 12.sp, fontFamily = RawCamMono,
                 )
                 // Mirrors ClipsScreen's own "A" badge for a clip with a sidecar WAV.
                 if (entry.hasAudio) {
                     Text(
                         "A", color = RawCamColors.Success, fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = RawCamMono,
                     )
                 }
             }

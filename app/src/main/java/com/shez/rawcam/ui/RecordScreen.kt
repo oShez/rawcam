@@ -92,7 +92,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1631,8 +1631,8 @@ fun RecordScreen(
                             RecDot()
                             Text(
                                 formatTimer(state.elapsedSeconds),
-                                color = RawCamColors.OnSurface, fontSize = 24.sp,
-                                fontFamily = FontFamily.Monospace,
+                                color = RawCamColors.OnSurface,
+                                style = RawCamType.Timecode,
                             )
                         }
                         StatItem("${state.written}", "frames written")
@@ -2116,8 +2116,8 @@ private fun RecDot() {
 @Composable
 private fun StatItem(value: String, label: String, valueColor: Color = RawCamColors.OnSurface) {
     Column {
-        Text(value, color = valueColor, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
-        Text(label, color = RawCamColors.Muted, fontSize = 11.sp)
+        Text(value, color = valueColor, style = RawCamType.Value)
+        Text(label.uppercase(), color = RawCamColors.Muted, style = RawCamType.Label)
     }
 }
 
@@ -2318,7 +2318,7 @@ private fun ParamChip(
         Text(
             text,
             color = if (warn) RawCamColors.Accent else RawCamColors.OnSurface,
-            fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp, fontFamily = RawCamMono, fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .clickable(enabled = enabled, onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 7.dp),
@@ -2328,7 +2328,7 @@ private fun ParamChip(
 
 @Composable
 private fun ParamLabel(text: String) {
-    Text(text, color = RawCamColors.Muted, fontSize = 10.sp, letterSpacing = 1.5.sp)
+    Text(text, color = RawCamColors.Muted, style = RawCamType.Label)
 }
 
 /** Small bordered pill toggling a slider's lock state -- same visual language as
@@ -2408,7 +2408,7 @@ internal fun <T> TickedSlider(
                 LockToggle(locked = locked, onClick = onToggleLock)
                 Text(
                     labelFor(selected), color = RawCamColors.OnSurface,
-                    fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp, fontFamily = RawCamMono,
                 )
             }
             Spacer(Modifier.height(6.dp))
@@ -2416,7 +2416,7 @@ internal fun <T> TickedSlider(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 labelFor(stops.first()), color = RawCamColors.Muted,
-                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp, fontFamily = RawCamMono,
             )
             val thumbInteraction = remember { MutableInteractionSource() }
             Slider(
@@ -2449,7 +2449,7 @@ internal fun <T> TickedSlider(
             )
             Text(
                 labelFor(stops.last()), color = RawCamColors.Muted,
-                fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp, fontFamily = RawCamMono,
             )
         }
     }
@@ -2470,7 +2470,7 @@ private fun ValueBubble(text: String, modifier: Modifier = Modifier) {
     ) {
         Text(
             text, color = RawCamColors.OnSurface,
-            fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp, fontFamily = RawCamMono,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }
