@@ -1,7 +1,9 @@
-# Clip preview: poster thumbnails and a scrubbable viewer
+# Clip preview: pre-rendered proxy frames
 
 **Date:** 2026-08-26
 **Status:** approved design, not yet planned
+**Supersedes:** the on-demand decode design first committed at this path
+(270e767), which decoded frames live while the user scrubbed.
 
 ## Problem
 
@@ -10,44 +12,66 @@ three buttons, so the only way to find out what is in a take is to export it to
 DNG and open it somewhere else. With takes that run to tens of gigabytes, that
 is an expensive way to answer "which one was the good one?".
 
+## Approach
+
+Decode roughly every fifth frame of a clip **once, in the background, after
+recording**, and write each one as a small JPEG. The viewer then flips through
+those JPEGs in order. Nothing is developed while the user is looking at it.
+
+This is what makes the feature safe. Rice decoding is sequential across 12.6 M
+samples and cannot be subsampled, so a design that decodes during a drag stakes
+its usability on a per-frame latency nobody has measured. Pre-rendering removes
+that bet: the job takes as long as it takes, off the interaction path, and
+viewing is then just loading small JPEGs.
+
+Playback is deliberately choppy. Every fifth frame of 24 fps material is 4.8 fps
+-- enough to see what happened in a take, which is the entire goal.
+
 ## Goals
 
 - Every clip shows a poster thumbnail in its Clips row.
-- Tapping a clip opens a viewer: one large developed frame, plus a scrub bar
-  that moves through the take frame by frame.
-- Works for every pack mode the app writes -- Raw16, Packed10, Packed12 and
-  CompressedPredictive -- and for every lens, since geometry and CFA order come
-  from the clip's own header.
+- Tapping a clip opens a viewer that plays through the proxy frames in order and
+  can be scrubbed by hand.
+- A clip whose proxies are still being generated says so, with progress, rather
+  than appearing broken or empty.
+- Works for every pack mode -- Raw16, Packed10, Packed12, CompressedPredictive
+  -- and every lens, since geometry and CFA order come from the clip's header.
 
 ## Non-goals
 
-- Playback at frame rate. Scrubbing is driven by the finger, not a clock. No
-  transport controls, no audio.
-- Colour accuracy. This is a "which take is this" preview, not a grading view.
+- Real-time playback at capture frame rate.
+- Colour accuracy. This answers "which take is this", not "is this graded".
   DNG export remains the path to real colour.
-- Editing, trimming, or exporting a single frame from the viewer.
+- Audio during preview playback.
+- Editing, trimming, or exporting a frame from the viewer.
 
-## Why this is not a decoder project
+## Sampling and cost
 
-`RawvReader` already provides random access:
+Default stride 5, i.e. 20% of frames, 4.8 fps at 24 fps capture.
 
-```cpp
-static std::unique_ptr<RawvReader> open(const std::string& path);
-uint64_t frameCount() const;
-bool readFrame(uint64_t index, FrameMeta* meta, uint8_t* payload);
-```
+| Take | Frames | Proxies at stride 5 | Approx. disk |
+|---|---|---|---|
+| 6 s | 152 | 30 | ~4 MB |
+| 40 s | 960 | 192 | ~23 MB |
+| 10 min | 14,400 | 2,880 | ~350 MB |
 
-`offsets_` is built once at `open()` by scanning records via
-`FrameMeta.payloadBytes`, which is what makes variable-stride
-CompressedPredictive frames addressable at all. `exporter.cpp` already depends
-on this. So seeking is solved; what is missing is only the step that turns a
-Bayer payload into something displayable.
+At 1024x768, JPEG quality 80, a proxy is roughly 120 KB.
+
+350 MB for one long take is too much, so **the stride grows to hold the proxy
+count at or below 1200 per clip**. Under about 4 minutes nothing changes and the
+stride stays 5; beyond that the preview gets progressively coarser instead of
+progressively more expensive. A 10-minute take samples every 12th frame and
+costs ~145 MB.
+
+*Decision needed from you: 1200 is a guess at where "coarse but still useful"
+sits. Lower it if 145 MB still feels heavy.*
 
 ## Architecture
 
 ### Develop pipeline (new, native)
 
-`core/include/rawcam/preview.h`, `core/src/preview.cpp`:
+Still required -- turning a Bayer payload into RGB is the same work regardless of
+when it runs. `core/include/rawcam/preview.h`, `core/src/preview.cpp`:
 
 ```cpp
 // Develops frame `index` into `out` as RGBA8, downscaled to fit within
@@ -58,30 +82,22 @@ bool developFrame(RawvReader& reader, uint64_t index,
                   std::vector<uint8_t>& out, uint32_t* outW, uint32_t* outH);
 ```
 
-Stages, in order:
+Stages: `readFrame` -> unpack by mode (`unpack10` / `unpack12` / `decodeFrame`,
+exactly as `exportFrame()` does, **including the `meta.compressed == 0`
+stored-fallback path**, which is plain RAW16 and must not reach the Rice
+decoder) -> subtract `blackLevel[quad]`, clamp at zero, scale to `whiteLevel` ->
+multiply by `asShotNeutral` -> 2x2 CFA bin -> sRGB gamma -> box downscale.
 
-1. `readFrame(index, &meta, payload)`.
-2. Unpack to RAW16 by mode -- reuse `unpack10` / `unpack12` /
-   `decodeFrame`, exactly as `exportFrame()` does, including the
-   `meta.compressed == 0` stored-fallback path that must be treated as plain
-   RAW16 rather than fed to the Rice decoder.
-3. Subtract `blackLevel[quad]` per CFA quadrant, clamp at zero, scale to
-   `whiteLevel`.
-4. Multiply by `asShotNeutral` so the preview is roughly neutral rather than
-   green.
-5. Demosaic by 2x2 CFA binning: each Bayer quad becomes one RGB pixel, taking R
-   and B directly and averaging the two greens. `cfa` from the header decides
-   which corner is which. 4096x3072 becomes 2048x1536 in a single pass.
-6. sRGB gamma.
-7. Box downscale to fit maxW x maxH.
+2x2 binning rather than an interpolating demosaic: each Bayer quad becomes one
+RGB pixel, R and B taken directly and the two greens averaged, 4096x3072 to
+2048x1536 in one pass. At proxy size the output is downscaled again anyway, so
+interpolation would cost more and show nothing.
 
-Binning rather than interpolating is deliberate: at a viewer width around 1000px
-the output is downscaled by 2x again anyway, so an interpolating demosaic would
-cost more and show nothing. It also sidesteps edge artefacts entirely.
+`RawvReader` already random-accesses frames -- `offsets_` is built at `open()`
+by chaining `FrameMeta.payloadBytes`, which is what makes variable-stride
+compressed frames addressable. Seeking is solved; only development is new.
 
 ### JNI surface
-
-`jni_bridge.cpp` and `NativeBridge.kt`:
 
 ```kotlin
 external fun nativeOpenClip(path: String): Long        // 0 on failure
@@ -90,92 +106,83 @@ external fun nativeDecodeFrame(handle: Long, index: Long, maxW: Int, maxH: Int):
 external fun nativeCloseClip(handle: Long)
 ```
 
-The handle owns a `RawvReader`. It exists because `open()` builds the offset
-index by scanning the whole file: opening per frame would make every scrub step
-pay for a full-file scan. Open once when the viewer is entered, close when it
-leaves.
+The handle owns a `RawvReader` so the offset index is built once per clip, not
+once per frame. The generator opens a clip, loops strided indices, closes.
+JPEG encoding stays in Kotlin via `Bitmap.compress` -- Android's encoder is
+already there, and the per-frame `IntArray` copy is irrelevant inside a
+background job.
 
-`nativeDecodeFrame` returns ARGB_8888 ints for `Bitmap.createBitmap(...)`. At
-1024x768 that is 786 KB per call -- one copy that buys a much smaller JNI
-surface than locking an Android `Bitmap` from native.
+### Proxy store
 
-### Poster thumbnails
+```
+cacheDir/proxies/<clipName>/000000.jpg, 000001.jpg, ...
+cacheDir/proxies/<clipName>/index.json   {stride, sourceFrames, proxyCount, complete}
+```
 
-`ui/ClipThumbnails.kt`: JPEG at `cacheDir/thumbs/<clipName>.jpg`, roughly 320px
-wide, developed from the clip's **middle** frame.
+Files are numbered by proxy ordinal, not source frame; `stride` maps back when
+the viewer shows a frame number. `complete` distinguishes "finished" from
+"interrupted", and a partial set is resumable by counting files already present.
 
-Middle, not first: the opening frames of a take are routinely dark or
-motion-blurred -- the A/V clap test on 2026-08-24 had f38 blurred and f39 sharp.
-Seeking to the middle costs one lookup in an index that already exists.
+`cacheDir`, so the OS can reclaim it under storage pressure and nothing is
+corrupted by its loss -- proxies regenerate. The cost of that choice is that
+reclaiming a long take's proxies means regenerating them, which is minutes of
+work. The alternative, `filesDir`, never gets reclaimed but then needs its own
+management UI. *Flagging rather than deciding: cacheDir is my recommendation.*
 
-Generated when a recording stops, and lazily on first view for clips that
-predate the feature. Production goes through the same JNI as the viewer --
-`nativeDecodeFrame` at thumbnail size, then `Bitmap.compress(JPEG)` -- so there
-is one develop path, not two.
+### Generation service
 
-`cacheDir` rather than a sidecar next to the `.rawv`, because a sidecar would
-have to be threaded through the delete-pairing, share and export paths the way
-the `.wav` sidecar is, and would clutter a directory the user browses. A cache
-entry whose clip no longer exists is deleted on the next Clips load; the cache
-is disposable by definition, so nothing else has to react to it going missing.
+`export/PreviewService.kt`, modelled on the existing `ExportService`: a started
+service with a progress notification, queueing one clip at a time.
+
+**It must not run while recording.** Developing frames is CPU-heavy and this
+project has spent five optimisation rounds defending the capture path's landing
+rate; a proxy job competing with an active take would undo that. The service
+defers while `recording || busy` and resumes at stop.
+
+Triggered when a recording stops, and on demand from the Clips screen for clips
+that predate the feature or whose cache was reclaimed.
 
 ### UI
 
-- `ClipsScreen.kt`: a thumbnail column on each row; the row becomes tappable.
-- `ui/ClipViewerScreen.kt` (new): large frame, scrub bar, frame counter
-  ("f=38 / 152"), back.
-- `MainActivity.kt`: a `Screen.ClipViewer` entry, gated by the same `locked`
+- `ClipsScreen.kt`: thumbnail column per row -- proxy 0, or a pending/progress
+  chip while generating. Row becomes tappable.
+- `ui/ClipViewerScreen.kt` (new): the frame, a play/pause control at 4.8 fps, a
+  scrub bar, and a frame counter showing the source frame number
+  (`proxyIndex * stride`).
+- Pending state: viewer shows "Preparing preview -- 42 / 192" and starts playing
+  what exists as it arrives, rather than blocking until complete.
+- `MainActivity.kt`: a `Screen.ClipViewer` route, gated by the same `locked`
   rule that already blocks navigation while recording.
-
-### Scrub concurrency
-
-One decode job at a time, conflated. A drag produces touch events far faster
-than frames can be developed, so requests collapse to the newest index: the
-in-flight decode is left to finish (cancelling mid-Rice-decode buys nothing),
-its result is discarded if a newer index has been requested since, and the last
-decoded frame stays on screen meanwhile. No decode queue, no per-event job.
 
 ## Error handling
 
-- `nativeOpenClip` returns 0 for an unreadable or truncated file; the viewer
-  shows "Cannot read clip" and offers back. It must not crash on a clip whose
-  recording was interrupted -- `frameCount == 0` in the header already means
-  "recover by scan" elsewhere in the codebase.
-- `developFrame` returns false rather than producing garbage when the header
+- Unreadable or truncated clip: `nativeOpenClip` returns 0, generation records
+  the failure, the row shows "Preview unavailable". Must survive a clip whose
+  recording was interrupted -- `frameCount == 0` already means "recover by scan"
+  elsewhere in this codebase.
+- `developFrame` returns false rather than emitting garbage when the header
   cannot support development (`whiteLevel == 0` on a packed or compressed clip).
-- A missing or unwritable thumbnail cache degrades to no thumbnail, never to a
-  failed list render.
+- Generation interrupted by process death: `complete` stays false, the next run
+  resumes from the highest numbered file present.
+- Deleting a clip deletes its proxy directory; an orphaned directory is removed
+  on the next Clips load.
+- A full disk during generation fails that clip only, leaving the partial set.
 
 ## Testing
 
 Host `ctest`, following `test_pack10` / `test_dng_writer`:
 
-- `core/tests/test_preview.cpp`: synthetic Bayer input with known values ->
-  expected RGBA out. Covers all four CFA orders, black-level subtraction
-  including a clamp-at-zero case, `asShotNeutral` application, and downscale
-  geometry (aspect preservation, odd dimensions).
-- Each pack mode reaches the same RGB from equivalent input: a Packed12 clip and
-  a CompressedPredictive clip of identical pixels must develop identically.
+- `core/tests/test_preview.cpp`: synthetic Bayer in, known RGBA out. All four
+  CFA orders; black-level subtraction including a clamp-at-zero case;
+  `asShotNeutral` application; downscale geometry including odd dimensions.
+- Equivalence: a Packed12 clip and a CompressedPredictive clip of identical
+  pixels must develop to identical RGB.
+- Stride selection: the 1200-proxy cap holds for a 14,400-frame clip, and stride
+  stays 5 below the threshold.
 
-On-device: a clip from each lens, compressed and uncompressed, opened and
-scrubbed end to end.
-
-## Risk: per-frame decode latency
-
-Unmeasured, and it decides whether the design survives. Rice decoding is
-sequential across 12.6 M samples and cannot be subsampled -- there is no way to
-decode "just a downscaled version" of a compressed frame.
-
-- around 50-100 ms: scrubbing feels responsive with conflation. Design stands.
-- around 400 ms or worse: scrubbing needs rethinking -- a decimated scrub that
-  only lands on every Nth frame, or a proxy strip of small JPEGs written at
-  record time.
-
-**The first task in the implementation plan is measuring this**, on device,
-using the existing `benchmark.cpp` harness, before any UI work begins. Binning
-during the unpack pass rather than after it is the obvious first optimisation if
-the number is marginal, since it cuts memory traffic without touching decode
-cost.
+On device: a clip per lens, compressed and uncompressed; generation while a
+second recording is started (must defer); viewer opened mid-generation (must
+show progress and play what exists).
 
 ## Files
 
@@ -187,8 +194,9 @@ cost.
 | `core/CMakeLists.txt` | add sources and test |
 | `app/src/main/cpp/jni_bridge.cpp` | four externs |
 | `NativeBridge.kt` | four declarations |
-| `ui/ClipViewerScreen.kt` | new |
-| `ui/ClipThumbnails.kt` | new |
-| `ui/ClipsScreen.kt` | thumbnail column, tap target |
+| `export/PreviewService.kt` | new -- background generation |
+| `ui/ClipProxies.kt` | new -- store layout, index.json, resume/cleanup |
+| `ui/ClipViewerScreen.kt` | new -- playback and scrub |
+| `ui/ClipsScreen.kt` | thumbnail column, pending chip, tap target |
 | `MainActivity.kt` | viewer route |
-| `ui/RecordScreen.kt` | generate poster on stop |
+| `ui/RecordScreen.kt` | enqueue generation on stop |
