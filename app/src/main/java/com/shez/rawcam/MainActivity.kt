@@ -2,6 +2,7 @@ package com.shez.rawcam
 
 import android.Manifest
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +35,11 @@ class MainActivity : ComponentActivity() {
         ViewModelProvider(this)[RecordViewModel::class.java]
     }
 
+    // Which screen is showing. Hoisted out of setContent so the volume-key
+    // handler below can tell whether the Record screen -- and with it the
+    // preview surface a recording needs -- is actually up.
+    private var screen by mutableStateOf(Screen.Record)
+
     // A denial surfaces at record time via AudioResult/AudioStatus.PERMISSION_DENIED,
     // never as a blocked recording -- video always wins over audio.
     private val audioPermissionLauncher =
@@ -45,7 +51,6 @@ class MainActivity : ComponentActivity() {
         SettingsRepository.init(applicationContext)
         setContent {
             RawCamTheme {
-                var screen by remember { mutableStateOf(Screen.Record) }
                 // Leaving the Record screen disposes its SurfaceView; mid-recording
                 // that abandons the session's preview target and silently stalls the
                 // RAW stream (the timer keeps counting, no frames land). Lock
@@ -86,6 +91,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // Volume up/down doubles as a shutter: the on-screen button is an awkward
+    // reach one-handed, and a physical key shakes the phone far less than
+    // tapping the display does. Record screen only -- everywhere else these
+    // stay ordinary volume keys.
+    //
+    // Both ACTION_DOWN and ACTION_UP are swallowed, repeats included: letting
+    // the UP through pops the system volume panel over the viewfinder even
+    // though the DOWN never changed the volume.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val isVolumeKey = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+        if (!isVolumeKey || screen != Screen.Record) return super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            // toggleRecord() carries its own busy/metering guards, so a mashed
+            // key cannot start two recordings or race a stop.
+            viewModel.toggleRecord()
+        }
+        return true
     }
 
     override fun onStop() {
