@@ -6,6 +6,7 @@ local.properties
 .idea/
 *.iml
 core/build/
+core/build_android/
 .cxx/
 testfootage/
 keystore.properties

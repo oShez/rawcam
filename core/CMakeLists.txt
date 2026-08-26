@@ -9,7 +9,8 @@ add_library(rawcam_core STATIC
   src/pack10.cpp
   src/rawv_codec.cpp
   src/dng_writer.cpp
-  src/exporter.cpp)
+  src/exporter.cpp
+  src/preview.cpp)
 target_include_directories(rawcam_core PUBLIC include)
 
 # Host (non-Android) builds get the ARM_NEON_2_SSE shim so the SIMD path in
@@ -26,22 +27,43 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(rawcam_core PUBLIC Threads::Threads)
 
-if(NOT ANDROID)
+# Tests build for the host by default. They can also be built FOR ANDROID and
+# run on a device over adb -- configure a separate NDK-toolchain build dir with
+# -DRAWCAM_BUILD_TESTS=ON. That path exists because the host toolchain is not
+# always usable, and because running on arm64 exercises the real NEON code
+# instead of the SSE shim.
+if(NOT DEFINED RAWCAM_BUILD_TESTS)
+  if(ANDROID)
+    set(RAWCAM_BUILD_TESTS OFF)
+  else()
+    set(RAWCAM_BUILD_TESTS ON)
+  endif()
+endif()
+
+if(RAWCAM_BUILD_TESTS)
   enable_testing()
   file(GLOB TEST_SOURCES tests/*.cpp)
   foreach(t ${TEST_SOURCES})
     get_filename_component(name ${t} NAME_WE)
     add_executable(${name} ${t})
     target_link_libraries(${name} rawcam_core)
+    # rawv_codec.cpp logs via __android_log_print on Android, so the test
+    # executables need liblog just like the app's .so does.
+    if(ANDROID)
+      target_link_libraries(${name} log)
+    endif()
     target_include_directories(${name} PRIVATE third_party/doctest)
     # rawcam_core's ARM_NEON_2_SSE include dir/define/flag above are PRIVATE
     # to that library target and do not propagate to these separate test
     # executables; test_rawv_simd_spike.cpp needs them directly to exercise
     # the real NEON2SSE path instead of falling through to its #else branch.
     # Harmless no-op for test files that don't touch NEON_2_SSE.h.
-    target_include_directories(${name} PRIVATE third_party/neon2sse)
-    target_compile_definitions(${name} PRIVATE RAWV_USE_NEON2SSE)
-    target_compile_options(${name} PRIVATE -msse4.1)
+    # x86-only: on Android these compile against the real arm_neon.h.
+    if(NOT ANDROID)
+      target_include_directories(${name} PRIVATE third_party/neon2sse)
+      target_compile_definitions(${name} PRIVATE RAWV_USE_NEON2SSE)
+      target_compile_options(${name} PRIVATE -msse4.1)
+    endif()
     add_test(NAME ${name} COMMAND ${name})
   endforeach()
 endif()
