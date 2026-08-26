@@ -23,8 +23,8 @@ android {
         applicationId = "com.shez.rawcam"
         minSdk = 33
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
         ndk { abiFilters += "arm64-v8a" }
         // AGP defaults the native (C++) build to CMAKE_BUILD_TYPE=Debug for a
         // debug variant, i.e. no optimizations at all for the export/unpack
