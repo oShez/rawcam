@@ -22,4 +22,9 @@ bool developRaw16(const uint16_t* raw16, uint32_t width, uint32_t height,
                   const uint32_t blackLevel[4], uint32_t whiteLevel,
                   const float asShotNeutral[3], PreviewImage* out);
 
+// Box-averages `src` down to fit within maxW x maxH, preserving aspect ratio.
+// Never upscales: a source already inside the box is copied unchanged.
+// Returns false on an empty source or a zero-sized box.
+bool downscaleTo(const PreviewImage& src, uint32_t maxW, uint32_t maxH, PreviewImage* out);
+
 }  // namespace rawcam

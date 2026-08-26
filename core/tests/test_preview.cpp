@@ -91,3 +91,53 @@ TEST_CASE("developRaw16 rejects a zero white level") {
   PreviewImage out;
   CHECK(developRaw16(raw.data(), 2, 2, 2, Cfa::RGGB, black, 0, neutral, &out) == false);
 }
+
+static PreviewImage solid(uint32_t w, uint32_t h, uint8_t r, uint8_t g, uint8_t b) {
+  PreviewImage p;
+  p.width = w; p.height = h;
+  p.rgba.assign((size_t)w * h * 4, 255);
+  for (size_t i = 0; i < (size_t)w * h; i++) {
+    p.rgba[i * 4 + 0] = r; p.rgba[i * 4 + 1] = g; p.rgba[i * 4 + 2] = b;
+  }
+  return p;
+}
+
+TEST_CASE("downscaleTo fits within the box and preserves aspect") {
+  PreviewImage src = solid(2048, 1536, 10, 20, 30), out;
+  CHECK(downscaleTo(src, 1024, 768, &out));
+  CHECK(out.width == 1024);
+  CHECK(out.height == 768);
+}
+
+TEST_CASE("downscaleTo is bounded by the tighter dimension") {
+  // 4:3 source into a wide box: height binds, width lands below the max.
+  PreviewImage src = solid(2048, 1536, 0, 0, 0), out;
+  CHECK(downscaleTo(src, 4000, 768, &out));
+  CHECK(out.height == 768);
+  CHECK(out.width == 1024);
+}
+
+TEST_CASE("downscaleTo preserves a solid colour") {
+  PreviewImage src = solid(400, 300, 10, 20, 30), out;
+  CHECK(downscaleTo(src, 200, 150, &out));
+  CHECK(out.rgba[0] == 10);
+  CHECK(out.rgba[1] == 20);
+  CHECK(out.rgba[2] == 30);
+  CHECK(out.rgba[3] == 255);
+}
+
+TEST_CASE("downscaleTo never upscales") {
+  PreviewImage src = solid(100, 75, 1, 2, 3), out;
+  CHECK(downscaleTo(src, 1024, 768, &out));
+  CHECK(out.width == 100);
+  CHECK(out.height == 75);
+}
+
+TEST_CASE("downscaleTo handles odd dimensions without losing the last row") {
+  PreviewImage src = solid(101, 77, 9, 9, 9), out;
+  CHECK(downscaleTo(src, 50, 50, &out));
+  CHECK(out.width >= 1);
+  CHECK(out.height >= 1);
+  CHECK(out.rgba.size() == (size_t)out.width * out.height * 4);
+  CHECK(out.rgba[0] == 9);
+}

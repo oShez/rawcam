@@ -79,4 +79,46 @@ bool developRaw16(const uint16_t* raw16, uint32_t width, uint32_t height,
   return true;
 }
 
+
+bool downscaleTo(const PreviewImage& src, uint32_t maxW, uint32_t maxH, PreviewImage* out) {
+  if (!out || src.width == 0 || src.height == 0 || maxW == 0 || maxH == 0) return false;
+  if (src.rgba.size() < (size_t)src.width * src.height * 4) return false;
+
+  const double scale = std::min({1.0,
+                                 (double)maxW / (double)src.width,
+                                 (double)maxH / (double)src.height});
+  const uint32_t ow = std::max(1u, (uint32_t)std::lround(src.width * scale));
+  const uint32_t oh = std::max(1u, (uint32_t)std::lround(src.height * scale));
+
+  out->width = ow;
+  out->height = oh;
+  out->rgba.assign((size_t)ow * oh * 4, 255);
+
+  for (uint32_t y = 0; y < oh; y++) {
+    // Half-open source span for this destination row. The last box always
+    // reaches the final source row, so odd sizes lose nothing.
+    const uint32_t y0 = (uint32_t)((uint64_t)y * src.height / oh);
+    const uint32_t y1 = std::max(y0 + 1, (uint32_t)((uint64_t)(y + 1) * src.height / oh));
+    for (uint32_t x = 0; x < ow; x++) {
+      const uint32_t x0 = (uint32_t)((uint64_t)x * src.width / ow);
+      const uint32_t x1 = std::max(x0 + 1, (uint32_t)((uint64_t)(x + 1) * src.width / ow));
+      uint32_t sum[3] = {0, 0, 0};
+      uint32_t n = 0;
+      for (uint32_t sy = y0; sy < y1 && sy < src.height; sy++) {
+        const uint8_t* row = src.rgba.data() + (size_t)sy * src.width * 4;
+        for (uint32_t sx = x0; sx < x1 && sx < src.width; sx++) {
+          sum[0] += row[sx * 4 + 0];
+          sum[1] += row[sx * 4 + 1];
+          sum[2] += row[sx * 4 + 2];
+          n++;
+        }
+      }
+      uint8_t* dst = out->rgba.data() + ((size_t)y * ow + x) * 4;
+      for (int c = 0; c < 3; c++) dst[c] = n ? (uint8_t)(sum[c] / n) : 0;
+      dst[3] = 255;
+    }
+  }
+  return true;
+}
+
 }  // namespace rawcam
