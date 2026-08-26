@@ -117,6 +117,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.RggbChannelVector
 import com.shez.rawcam.NativeBridge
 import com.shez.rawcam.audio.AudioDeviceCatalog
+import com.shez.rawcam.audio.AudioRecorder
 import com.shez.rawcam.audio.AudioInputDevice
 import com.shez.rawcam.audio.AudioResult
 import com.shez.rawcam.audio.AudioStatus
@@ -186,6 +187,13 @@ data class RecordUiState(
     val focusDiopters: Float = 0f,
     val fps: Int = 24,
     val freeSpaceBytes: Long = 0,
+    /** Measured bytes per frame as a FRACTION of the modelled uncompressed frame
+     *  size, per lens/geometry/compression (see captureRateKey). Seeded from what
+     *  earlier takes persisted and refreshed live during one. This is what lets the
+     *  time-left readout tell the truth about compressed capture -- where the real
+     *  frame size is scene- and sensor-dependent, so no formula can predict it -- and
+     *  about every lens on the device rather than just the one last recorded with. */
+    val captureRates: Map<String, Float> = emptyMap(),
     val lensIndex: Int = 0,
     val sizeIndex: Int = 0,
     val kelvin: Int = 5600,
@@ -267,6 +275,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     // the read happen on cameraOps, which is single-lane FIFO, so there is no
     // cross-thread visibility concern (same reasoning as autoMeteredLensIndices below).
     private var lastClipName: String? = null
+    // The capture-rate measurement from the take in progress, handed from the poll
+    // (Dispatchers.Default) to the stop completion (cameraOps) that persists it --
+    // @Volatile for that cross-thread hand-off, unlike lastClipName above which stays
+    // on cameraOps throughout.
+    @Volatile private var pendingRateKey: String? = null
+    @Volatile private var pendingRatio: Float = 0f
     // Runs on application.mainExecutor (see the addThermalStatusListener call in
     // init{} below) -- NOT the camera thread. stopRecordingInternal() itself only
     // touches _uiState/_events directly and launches the actual controller.stopRecording()
@@ -337,6 +351,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 controller.zebraHighlightEnabled = s.zebraHighlightEnabled
                 controller.zebraShadowEnabled = s.zebraShadowEnabled
                 previous = s
+            }
+        }
+        viewModelScope.launch {
+            SettingsRepository.captureRates.collect { stored ->
+                // Merged the other way round -- anything measured in THIS session is
+                // newer than the store, and DataStore re-emits the whole record on
+                // every unrelated settings write, which would otherwise clobber the
+                // measurement from the take currently running.
+                _uiState.update { it.copy(captureRates = stored + it.captureRates) }
             }
         }
         ensureCameraInitialized()
@@ -945,6 +968,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // nearestIso's comment for the full chain. controller.rawSpec is valid.
                 val spec = controller.rawSpec
                 val frameBytes = frameRecordBytes(spec)
+                val rateKey = captureRateKey(
+                    s.lenses.getOrNull(s.lensIndex), spec, s.settings.compressRecordings,
+                )
                 val available = StatFs(controller.clipsDir.absolutePath).availableBytes
                 val required = frameBytes * s.fps * s.settings.freeSpaceReserveSeconds.toLong()
                 if (available < required) {
@@ -985,7 +1011,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                             audioChannels = 1, audioFailed = failed,
                         )
                     }
-                    withContext(Dispatchers.Main) { startPolling() }
+                    withContext(Dispatchers.Main) { startPolling(File(path), frameBytes, rateKey) }
                 } else {
                     _events.tryEmit("Failed to start recording")
                 }
@@ -995,7 +1021,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun startPolling() {
+    private fun startPolling(clipFile: File, modelledFrameBytes: Long, rateKey: String) {
         pollJob?.cancel()
         // Dispatchers.Default, not Main: nativeGetStats() is a JNI call, and
         // _uiState.update is a thread-safe StateFlow write, so there's no reason to
@@ -1005,7 +1031,25 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 delay(500)
                 val stats = NativeBridge.nativeGetStats()
                 val elapsed = ((System.currentTimeMillis() - recordStartMs) / 1000).toInt()
-                _uiState.update { it.copy(written = stats[0], dropped = stats[1], elapsedSeconds = elapsed) }
+                // What this take actually costs per frame, against what the model
+                // predicted. Measured per FRAME, not per second: that makes it
+                // independent of fps and of dropped frames, and sidesteps the
+                // truncated-seconds error a per-second rate carries early in a take.
+                // length() is a stat syscall -- cheaper than the JNI hop above it.
+                val frames = stats[0]
+                val clipBytes = clipFile.length()
+                val ratio = if (frames >= RATE_SETTLE_FRAMES && clipBytes > 0 && modelledFrameBytes > 0)
+                    (clipBytes.toDouble() / (frames.toDouble() * modelledFrameBytes)).toFloat()
+                        .takeIf { it.isFinite() && it in RATE_SANE_RANGE }
+                else null
+                if (ratio != null) { pendingRateKey = rateKey; pendingRatio = ratio }
+                _uiState.update {
+                    it.copy(
+                        written = frames, dropped = stats[1], elapsedSeconds = elapsed,
+                        captureRates = if (ratio != null) it.captureRates + (rateKey to ratio)
+                        else it.captureRates,
+                    )
+                }
                 // Max clip length (0 = off). stopRecordingInternal() itself cancels this
                 // pollJob (see its `pollJob?.cancel()`), so the `break` below is
                 // belt-and-braces against this loop iterating once more before that
@@ -1071,6 +1115,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // are on, the clip just recorded is exported and then its source .rawv
                 // is deleted by ExportService once the export completes successfully
                 // (see ExportService.onStartCommand).
+                // Persist what this take measured, so the readout is right for this
+                // lens/geometry/compression from the next launch onwards -- including
+                // before the first take on that combination in a session.
+                val measuredKey = pendingRateKey
+                if (stats[0] > 0 && measuredKey != null && pendingRatio > 0f) {
+                    val measured = pendingRatio
+                    viewModelScope.launch { SettingsRepository.saveCaptureRate(measuredKey, measured) }
+                }
                 if (stats[0] > 0) {
                     val st = _uiState.value.settings
                     if (st.autoExport) {
@@ -1199,17 +1251,65 @@ private fun frameRecordBytes(spec: CameraController.RawSpec): Long {
     return payload + 64
 }
 
-/** Free space -> recordable time at the current fps/frame size ("~23 min"). */
-private fun remainingLabel(freeBytes: Long, fps: Int, spec: CameraController.RawSpec): String {
-    val frameBytes = frameRecordBytes(spec)
-    val perSecond = frameBytes * fps
+/**
+ * Identity of the setup a capture-rate measurement belongs to: the lens (its sensor
+ * and its noise floor decide how well frames compress -- an ultrawide and a tele on
+ * the same phone do not compress alike), the geometry and bit depth, and whether
+ * compression is on at all.
+ *
+ * fps is deliberately absent: what gets measured is bytes per FRAME, so a ratio
+ * learned at 24fps is equally true at 30 and the readout never has to relearn it.
+ */
+private fun captureRateKey(lens: LensProfile?, spec: CameraController.RawSpec?, compress: Boolean): String =
+    if (lens == null || spec == null) ""
+    else "${lens.cameraId}|${spec.width}x${spec.height}|${spec.whiteLevel}|${if (compress) "c" else "r"}"
+
+/** Frames a take must have written before its bytes-per-frame ratio means anything:
+ *  the writer buffers, so early frames' bytes reach the file late and drag the ratio
+ *  down. 48 = two seconds at 24fps. */
+private const val RATE_SETTLE_FRAMES = 48L
+
+/** A ratio outside this isn't a measurement, it's a half-written file or a bug.
+ *  Slightly above 1.0 because an incompressible frame plus its header can exceed the
+ *  modelled payload. */
+private val RATE_SANE_RANGE = 0.02f..1.5f
+
+/** "0:07", "12:34", "1:02:34" -- second-accurate, never rounded to whole minutes. */
+private fun formatDuration(totalSeconds: Long): String {
+    val s = totalSeconds.coerceAtLeast(0)
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+    else "%d:%02d".format(s / 60, s % 60)
+}
+
+/**
+ * Free space -> recordable time left, to the second ("12:34").
+ *
+ * Scales the modelled frame size by what this exact lens, geometry and compression
+ * setting was last MEASURED to cost per frame (see [RecordUiState.captureRates]).
+ * Those measurements persist, so switching to a lens you have recorded with before --
+ * or turning compression back on -- gives a true number immediately rather than only
+ * after another take. It matters most with compression on, where the real frame size
+ * is data-dependent and well below the model, which otherwise understates how much
+ * footage the card holds.
+ *
+ * With nothing measured for the current setup yet it falls back to the bare model.
+ * That is a floor rather than an estimate (compression can only shrink a frame), so
+ * it is marked "~" to say so; it firms up a couple of seconds into the next take.
+ */
+private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec): String {
+    // The WAV sidecar is a separate file, so it is outside the measured .rawv rate
+    // and has to be added to both branches. 24-bit at 48 kHz = 144 kB/s per channel:
+    // trivial against RAW, but free at this point.
+    val audioPerSecond =
+        if (state.settings.recordAudio) 3L * AudioRecorder.SAMPLE_RATE * state.audioChannels else 0L
+    val ratio = state.captureRates[
+        captureRateKey(state.lenses.getOrNull(state.lensIndex), spec, state.settings.compressRecordings)
+    ]
+    val frameBytes = (frameRecordBytes(spec) * (ratio ?: 1f).toDouble()).toLong()
+    val perSecond = frameBytes * state.fps + audioPerSecond
     if (perSecond <= 0) return "—"
-    val seconds = freeBytes / perSecond
-    return when {
-        seconds >= 6000 -> "99+ min"
-        seconds >= 120 -> "~${seconds / 60} min"
-        else -> "~$seconds s"
-    }
+    val text = formatDuration(state.freeSpaceBytes / perSecond)
+    return if (ratio == null) "~$text" else text
 }
 
 // Standard 1/3-stop photographic ISO scale (vs the old full-stop-only list) for
@@ -1368,13 +1468,15 @@ fun RecordScreen(
     // Free-space poll lives here (not in the viewmodel) so it's lifecycle-gated:
     // repeatOnLifecycle cancels the loop below STARTED (backgrounded) and restarts
     // it on return to the foreground, instead of spinning a StatFs + uiState.update
-    // every 2s regardless of visibility.
+    // every second regardless of visibility.
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
                 viewModel.refreshFreeSpace()
-                delay(2000)
+                // 1s, not 2s: the readout below is second-accurate now, and a 2s
+                // poll made it visibly tick down in jumps of two.
+                delay(1000)
             }
         }
     }
@@ -1737,7 +1839,7 @@ fun RecordScreen(
                             )
                         }
                         StatItem(
-                            remainingLabel(state.freeSpaceBytes, state.fps, spec),
+                            remainingLabel(state, spec),
                             "left",
                         )
                     }

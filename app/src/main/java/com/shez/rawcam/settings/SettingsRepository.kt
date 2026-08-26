@@ -11,6 +11,9 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
@@ -329,6 +332,42 @@ object SettingsRepository {
     }
 
     /** Reset-all: clears both [Settings] and [CaptureState] -- every key, unconditionally. */
+    // ---- Measured capture rates ----
+
+    /** Bytes-per-frame ratios measured from real takes, keyed by lens/geometry/
+     *  compression (see RecordScreen's captureRateKey). Persisted so the time-left
+     *  readout is accurate for a lens the moment it is selected, rather than only
+     *  after recording a take with it in this session. Same corrupt-key contract as
+     *  everything else here: unreadable JSON decodes to "no measurements", which
+     *  costs accuracy, never a crash. */
+    val captureRates: Flow<Map<String, Float>>
+        get() = dataStore.data
+            .catch { emit(emptyPreferences()) }
+            .map { decodeCaptureRates(it[KEY_CAPTURE_RATES]) }
+
+    /** Records [ratio] for [key], merging with what is already stored. */
+    suspend fun saveCaptureRate(key: String, ratio: Float) {
+        if (key.isEmpty() || !ratio.isFinite() || ratio <= 0f) return
+        dataStore.edit { prefs ->
+            val merged = decodeCaptureRates(prefs[KEY_CAPTURE_RATES]) + (key to ratio)
+            // A device has a handful of lenses, so this map is naturally small -- the
+            // trim is only so that adding a future axis to the key cannot grow the
+            // record without bound. Oldest-inserted goes first.
+            val trimmed =
+                if (merged.size <= MAX_CAPTURE_RATES) merged
+                else merged.entries.drop(merged.size - MAX_CAPTURE_RATES).associate { it.key to it.value }
+            prefs[KEY_CAPTURE_RATES] = Json.encodeToString(CAPTURE_RATES, trimmed)
+        }
+    }
+
+    private fun decodeCaptureRates(raw: String?): Map<String, Float> =
+        if (raw.isNullOrEmpty()) emptyMap()
+        else runCatching { Json.decodeFromString(CAPTURE_RATES, raw) }.getOrDefault(emptyMap())
+
+    private val KEY_CAPTURE_RATES = stringPreferencesKey("captureRates")
+    private val CAPTURE_RATES = MapSerializer(String.serializer(), Float.serializer())
+    private const val MAX_CAPTURE_RATES = 32
+
     suspend fun clearAll() {
         dataStore.edit { it.clear() }
     }
