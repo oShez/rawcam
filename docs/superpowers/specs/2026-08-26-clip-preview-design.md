@@ -58,13 +58,25 @@ Default stride 5, i.e. 20% of frames, 4.8 fps at 24 fps capture.
 At 1024x768, JPEG quality 80, a proxy is roughly 120 KB.
 
 350 MB for one long take is too much, so **the stride grows to hold the proxy
-count at or below 1200 per clip**. Under about 4 minutes nothing changes and the
-stride stays 5; beyond that the preview gets progressively coarser instead of
-progressively more expensive. A 10-minute take samples every 12th frame and
-costs ~145 MB.
+count at or below 1200 per clip**:
 
-*Decision needed from you: 1200 is a guess at where "coarse but still useful"
-sits. Lower it if 145 MB still feels heavy.*
+```
+stride = max(5, ceil(frameCount / 1200))
+indices = 0, stride, 2*stride, ... while index < frameCount
+```
+
+Under about 4 minutes nothing changes and the stride stays 5; beyond that the
+preview gets progressively coarser instead of progressively more expensive. A
+10-minute take samples every 12th frame and costs ~145 MB.
+
+**Sampling always spans the whole clip.** The cap raises the stride; it never
+truncates the range. A 14,400-frame take yields 1200 proxies reaching frame
+14,388, not the first 1200 frames. The last sampled index is always within one
+stride of the end.
+
+Generation itself walks those indices in chronological order, so an interrupted
+run leaves a set covering the clip from its start up to wherever it stopped --
+which is what the viewer plays while the rest arrives.
 
 ## Architecture
 
@@ -123,11 +135,10 @@ Files are numbered by proxy ordinal, not source frame; `stride` maps back when
 the viewer shows a frame number. `complete` distinguishes "finished" from
 "interrupted", and a partial set is resumable by counting files already present.
 
-`cacheDir`, so the OS can reclaim it under storage pressure and nothing is
-corrupted by its loss -- proxies regenerate. The cost of that choice is that
-reclaiming a long take's proxies means regenerating them, which is minutes of
-work. The alternative, `filesDir`, never gets reclaimed but then needs its own
-management UI. *Flagging rather than deciding: cacheDir is my recommendation.*
+`cacheDir` (decided), so the OS can reclaim it under storage pressure and
+nothing is corrupted by its loss -- proxies regenerate. The accepted cost is
+that reclaiming a long take's proxies means minutes of regeneration; `filesDir`
+would avoid that but needs its own management UI, which this does not build.
 
 ### Generation service
 
@@ -177,8 +188,9 @@ Host `ctest`, following `test_pack10` / `test_dng_writer`:
   `asShotNeutral` application; downscale geometry including odd dimensions.
 - Equivalence: a Packed12 clip and a CompressedPredictive clip of identical
   pixels must develop to identical RGB.
-- Stride selection: the 1200-proxy cap holds for a 14,400-frame clip, and stride
-  stays 5 below the threshold.
+- Stride selection: stride stays 5 below the cap threshold; a 14,400-frame clip
+  yields <= 1200 proxies whose last sampled index is within one stride of the
+  final frame, proving the cap raises stride rather than truncating the range.
 
 On device: a clip per lens, compressed and uncompressed; generation while a
 second recording is started (must defer); viewer opened mid-generation (must
