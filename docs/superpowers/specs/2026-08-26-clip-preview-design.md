@@ -1,7 +1,7 @@
 # Clip preview: pre-rendered proxy frames
 
 **Date:** 2026-08-26
-**Status:** approved design, not yet planned
+**Status:** Implemented, merged to `main`, device-verified, and pushed to `origin/main` 2026-08-27 (`800f1b6`) (see `docs/superpowers/open-items-2026-08-27-clip-preview.md`)
 **Supersedes:** the on-demand decode design first committed at this path
 (270e767), which decoded frames live while the user scrubbed.
 

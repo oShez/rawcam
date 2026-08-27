@@ -1,7 +1,7 @@
 # Round 4 (NEON) design — SIMD predict+zigzag for the compressed-.rawv encoder
 
 **Date:** 2026-08-13
-**Status:** Design, pending user review → writing-plans
+**Status:** Implemented and merged to `main` 2026-08-13 (`7ff2c9a` host SIMD wiring, `82794a1` NEON residual primitive, `4bd657b` NEON predict+zigzag in `computeAndPackBand`), bit-exact against the scalar oracle. The device A/B was thermally confounded and showed NO clean win: encode CPU splits ~8% predict / ~84% pack, so this vectorized the wrong 8%. That result is what motivated round 5 (optimized serial Rice packer), which is where the pack cost actually lives.
 **Effort:** Round 4, final approved throughput round (NEON). Follows stage 1
 (band-parallel write), stage 2 (Compute/Finish pipeline), stage 3
 (thread-topology tuning).

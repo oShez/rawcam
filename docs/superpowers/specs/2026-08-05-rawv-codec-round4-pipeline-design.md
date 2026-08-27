@@ -1,7 +1,7 @@
 # `rawv_codec` Round 4: Band-Parallel Write + Frame Pipeline
 
 **Date:** 2026-08-05
-**Status:** Design approved, not yet planned/implemented.
+**Status:** Implemented in three stages. Stage 1 (band-parallel fused predict+residual+pack) took loss to ~58%; stage 2 (compute/finish pipeline) to 19.4% -- the single biggest jump of the whole effort; stage 3 (thread-topology tuning, 5 workers pinned to the big cores: `59d49af`, `0243f4f`, `e97c8a8`) measured flat on its first on-device checkpoint (`d3f1859`) but a later A/B showed it IS a real ~5-6% gain that the earlier run had masked with thermal throttling. The win is sublinear, i.e. memory-bandwidth-bound, so adding threads is a dead end.
 **Predecessors:**
 - Round 2 (`docs/superpowers/plans/2026-08-05-rawv-codec-throughput.md`): batched `BitWriter`/`BitReader` + strided k-sampling. ~91%→~75-79% frame loss.
 - Round 3 (`docs/superpowers/specs/2026-08-05-rawv-codec-round3-throughput-design.md` /

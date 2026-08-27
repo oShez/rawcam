@@ -1,7 +1,7 @@
 # `rawv_codec` Round 3: Row-Band Threading + NEON Vectorization
 
 **Date:** 2026-08-05
-**Status:** Design approved, not yet planned/implemented.
+**Status:** Implemented (plan `3b81560`, `ParallelFrameEncoder` row-band threading `3ece3d3`). Result was FLAT at ~78% frame loss (`907f317`); root-caused in `30b7b60` -- the serial `writeRice` write pass, not predict+residual, is the real bottleneck, which is what redirected rounds 4 and 5. Superseded by `docs/superpowers/specs/2026-08-05-rawv-codec-round4-pipeline-design.md`.
 **Predecessor:** `docs/superpowers/plans/2026-08-05-rawv-codec-throughput.md` (round 2:
 batched `BitWriter`/`BitReader` + strided Rice-k sampling, commits `e31c46d`/
 `e930cd1`). Full history: `docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md`.

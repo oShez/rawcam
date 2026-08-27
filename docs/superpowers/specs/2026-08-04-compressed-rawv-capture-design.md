@@ -1,18 +1,19 @@
 # Compressed `.rawv` Capture — Design Spec
 
 **Date:** 2026-08-04
-**Status:** Implemented, still FAILS on-device throughput verification after
-two rounds (2026-08-05). Round 1: real-time capture at this project's usual
-4096x3072@24fps class dropped ~91% of frames with compression on (a
-same-session compression-off control at identical settings dropped 0).
-Round 2, after `docs/superpowers/plans/2026-08-05-rawv-codec-throughput.md`
-(batched `BitWriter`/`BitReader` + strided Rice-k sampling): improved to
-~75-79% dropped — real progress, still far from the 0-dropped bar this spec
-requires. See
+**Status:** ACCEPTED/CLOSED 2026-08-17 after five optimization rounds.
+Frame loss went ~91% (round 1) -> ~75-79% (round 2, batched bit I/O) -> ~58%
+(round 4 stage 1, band-parallel fused encode) -> 19.4% (round 4 stage 2,
+compute/finish pipeline) -> 9-22% (round 5, optimized serial Rice packer).
+The user accepted this as a large real win rather than re-measure at a lower
+temperature; the spec's own 0-dropped bar was therefore never formally
+confirmed, and no cool re-measure is pending. Two findings worth carrying
+forward: the round-3/4 threading work is memory-bandwidth-bound, so more
+threads is a dead end, and encode CPU splits ~8% predict / ~84% pack, so NEON
+on the predictor vectorized the wrong 8%. 12-bit truncation remains an
+available future lever, not scheduled. See
 `docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md` for full
-findings. Not ready to ship; needs a further round of `rawv_codec.cpp`
-optimization (multi-core parallelization and/or NEON) — scope as its own
-follow-up plan, per the round-2 plan's own recommendation.
+findings.
 **Feature:** Lossless compression of the `.rawv` capture container's per-frame RAW
 payload, cutting on-device recording storage use by a scene-dependent amount
 (ballpark ~20-50%, matching the general class of technique used by lossless-

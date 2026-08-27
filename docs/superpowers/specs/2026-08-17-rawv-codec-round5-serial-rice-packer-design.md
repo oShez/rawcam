@@ -1,6 +1,6 @@
 # Round 5 — Optimized serial Rice packer — Design Spec
 
-**Status:** DESIGN (approved to spec 2026-08-17). Not yet planned/implemented.
+**Status:** Implemented and shipped to `main` 2026-08-17 -- plan `6c23dba`, tier 1 `d06a85c` (Rice q=0 fast path), tier 2 `f2b5370` (per-row adaptive capacity check), both bit-exact. ACCEPTED/CLOSED by the user on the strength of a hot, AC-plugged on-device run landing 78-91% of frames against the codec's ~91%-loss history; the spec's 0-dropped bar was never formally confirmed and no cool re-measure is pending. See `docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md`.
 
 **Context:** `docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md`
 **Predecessor:** `docs/superpowers/specs/2026-08-13-rawv-codec-round4-neon-predict-simd-design.md` (NEON, host-complete/merge-clean; device A/B thermally confounded; predict shown to be only ~8% of encode CPU)
