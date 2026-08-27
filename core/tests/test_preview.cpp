@@ -141,3 +141,86 @@ TEST_CASE("downscaleTo handles odd dimensions without losing the last row") {
   CHECK(out.rgba.size() == (size_t)out.width * out.height * 4);
   CHECK(out.rgba[0] == 9);
 }
+
+#include "rawcam/rawv_writer.h"
+#include "rawcam/rawv_reader.h"
+#include <cstdio>
+
+// A 4x2 RGGB frame whose first quad is full-scale red.
+static std::vector<uint16_t> samplePixels(uint32_t white) {
+  return { (uint16_t)white, 0, 0, 0,
+           0,     0, 0, 0 };
+}
+
+static FileHeader previewHeader(PackMode mode, uint32_t white, uint32_t frameBytes) {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 4; h.height = 2; h.rowStrideBytes = 8;
+  h.packMode = (uint32_t)mode;
+  h.cfa = (uint32_t)Cfa::RGGB;
+  h.whiteLevel = white;
+  h.asShotNeutral[0] = 1.0f; h.asShotNeutral[1] = 1.0f; h.asShotNeutral[2] = 1.0f;
+  h.fpsNum = 24; h.fpsDen = 1;
+  h.frameSizeBytes = frameBytes;
+  return h;
+}
+
+static void writeOneFrameClip(const char* path, const FileHeader& h,
+                              const std::vector<uint16_t>& pixels, uint32_t compressed) {
+  auto w = RawvWriter::create(path, h);
+  FrameMeta m{};
+  m.frameIndex = 0;
+  m.payloadBytes = (uint32_t)(pixels.size() * 2);
+  m.compressed = compressed;
+  w->writeFrame(m, reinterpret_cast<const uint8_t*>(pixels.data()), m.payloadBytes);
+  w->finalize();
+}
+
+TEST_CASE("developFrame develops a Raw16 clip") {
+  const char* path = "preview_raw16.rawv";
+  writeOneFrameClip(path, previewHeader(PackMode::Raw16, 1023, 16), samplePixels(1023), 0);
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 0, 1024, 768, &out));
+  CHECK(out.width == 2);
+  CHECK(out.height == 1);
+  CHECK(out.rgba[0] == 255);  // full-scale red in the first quad
+  CHECK(out.rgba[2] == 0);
+  std::remove(path);
+}
+
+TEST_CASE("developFrame refuses an out-of-range index") {
+  const char* path = "preview_range.rawv";
+  writeOneFrameClip(path, previewHeader(PackMode::Raw16, 1023, 16), samplePixels(1023), 0);
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 99, 1024, 768, &out) == false);
+  std::remove(path);
+}
+
+TEST_CASE("developFrame rejects a clip with a zero white level") {
+  const char* path = "preview_nowhite.rawv";
+  writeOneFrameClip(path, previewHeader(PackMode::Raw16, 0, 16), samplePixels(1023), 0);
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 0, 1024, 768, &out) == false);
+  std::remove(path);
+}
+
+TEST_CASE("a stored-fallback frame in a compressed clip develops as plain RAW16") {
+  // packMode says CompressedPredictive but meta.compressed == 0: the payload is
+  // raw, and feeding it to the Rice decoder would produce garbage.
+  const char* path = "preview_fallback.rawv";
+  writeOneFrameClip(path, previewHeader(PackMode::CompressedPredictive, 1023, 64),
+                    samplePixels(1023), 0);
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 0, 1024, 768, &out));
+  CHECK(out.rgba[0] == 255);
+  CHECK(out.rgba[2] == 0);
+  std::remove(path);
+}

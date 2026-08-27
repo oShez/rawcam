@@ -27,4 +27,13 @@ bool developRaw16(const uint16_t* raw16, uint32_t width, uint32_t height,
 // Returns false on an empty source or a zero-sized box.
 bool downscaleTo(const PreviewImage& src, uint32_t maxW, uint32_t maxH, PreviewImage* out);
 
+class RawvReader;
+
+// Reads frame `index` from `reader`, unpacks it according to the clip's pack
+// mode, develops it, and downscales the result to fit maxW x maxH.
+// Returns false if the frame cannot be read, the index is out of range, or the
+// header cannot support development (whiteLevel == 0).
+bool developFrame(RawvReader& reader, uint64_t index,
+                  uint32_t maxW, uint32_t maxH, PreviewImage* out);
+
 }  // namespace rawcam

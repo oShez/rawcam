@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <cmath>
 
+#include "rawcam/pack10.h"
+#include "rawcam/rawv_codec.h"
+#include "rawcam/rawv_reader.h"
+
 namespace rawcam {
 namespace {
 
@@ -119,6 +123,65 @@ bool downscaleTo(const PreviewImage& src, uint32_t maxW, uint32_t maxH, PreviewI
     }
   }
   return true;
+}
+
+
+bool developFrame(RawvReader& reader, uint64_t index,
+                  uint32_t maxW, uint32_t maxH, PreviewImage* out) {
+  if (!out || index >= reader.frameCount()) return false;
+  const FileHeader& h = reader.header();
+  if (h.whiteLevel == 0 || h.width < 2 || h.height < 2) return false;
+  if (h.rowStrideBytes < h.width * 2) return false;
+
+  const size_t pixelCount = (size_t)h.width * h.height;
+  std::vector<uint8_t> payload(h.frameSizeBytes);
+  FrameMeta meta{};
+  if (!reader.readFrame(index, &meta, payload.data())) return false;
+
+  // Mirrors exporter.cpp's exportFrame(): the mode picks the unpack, and a
+  // CompressedPredictive frame with meta.compressed == 0 is the compressor's
+  // stored fallback -- already plain RAW16, so it takes the Raw16 path.
+  std::vector<uint16_t> unpacked;
+  const uint16_t* raw16 = nullptr;
+  const PackMode mode = (PackMode)h.packMode;
+  // Packed10/12 unpack to a CONTIGUOUS plane, so their stride is the active
+  // width; every other mode keeps the sensor's stride-padded rows.
+  uint32_t strideSamples = h.width;
+
+  if (mode == PackMode::Packed10) {
+    unpacked.resize(pixelCount);
+    unpack10(payload.data(), pixelCount, unpacked.data());
+    raw16 = unpacked.data();
+  } else if (mode == PackMode::Packed12) {
+    unpacked.resize(pixelCount);
+    unpack12(payload.data(), pixelCount, unpacked.data());
+    raw16 = unpacked.data();
+  } else if (mode == PackMode::CompressedPredictive && meta.compressed) {
+    // The decode target must match the ORIGINAL, possibly stride-padded frame
+    // layout the encoder used -- decodeFrame's predictor addresses samples via
+    // rowStrideSamples, so it writes height * rowStrideSamples samples, not
+    // pixelCount. Same sizing exporter.cpp uses for this mode.
+    strideSamples = h.rowStrideBytes / 2;
+    unpacked.resize(h.frameSizeBytes / 2);
+    const uint32_t bitDepth = 32 - __builtin_clz(h.whiteLevel);
+    if (!decodeFrame(payload.data(), meta.payloadBytes, unpacked.data(), h.width,
+                     h.height, strideSamples, bitDepth)) {
+      return false;  // corrupt/truncated compressed frame
+    }
+    raw16 = unpacked.data();
+  } else {
+    // Raw16 and the stored-fallback case. The plane arrives with the header's
+    // row stride, which can be wider than the active width.
+    raw16 = reinterpret_cast<const uint16_t*>(payload.data());
+    strideSamples = h.rowStrideBytes / 2;
+  }
+
+  PreviewImage full;
+  if (!developRaw16(raw16, h.width, h.height, strideSamples, (Cfa)h.cfa,
+                    h.blackLevel, h.whiteLevel, h.asShotNeutral, &full)) {
+    return false;
+  }
+  return downscaleTo(full, maxW, maxH, out);
 }
 
 }  // namespace rawcam
