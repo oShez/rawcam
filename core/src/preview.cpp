@@ -40,8 +40,8 @@ inline float normalise(uint16_t sample, uint32_t black, float range) {
 bool developRaw16(const uint16_t* raw16, uint32_t width, uint32_t height,
                   uint32_t rowStrideSamples, Cfa cfa,
                   const uint32_t blackLevel[4], uint32_t whiteLevel,
-                  const float asShotNeutral[3], PreviewImage* out) {
-  if (!raw16 || !out || !blackLevel || !asShotNeutral) return false;
+                  const float channelGains[3], PreviewImage* out) {
+  if (!raw16 || !out || !blackLevel || !channelGains) return false;
   if (whiteLevel == 0 || width < 2 || height < 2) return false;
   if (rowStrideSamples < width) return false;
 
@@ -74,7 +74,7 @@ bool developRaw16(const uint16_t* raw16, uint32_t width, uint32_t height,
       acc[q.br] += normalise(r1[sx + 1], blackLevel[3], range[3]); count[q.br]++;
       for (int c = 0; c < 3; c++) {
         float v = count[c] > 1 ? acc[c] / (float)count[c] : acc[c];
-        v *= (asShotNeutral[c] > 0.0f ? asShotNeutral[c] : 1.0f);
+        v *= (channelGains[c] > 0.0f ? channelGains[c] : 1.0f);
         dst[x * 4 + c] = (uint8_t)std::lround(std::clamp(srgbGamma(v), 0.0f, 1.0f) * 255.0f);
       }
       dst[x * 4 + 3] = 255;
@@ -176,9 +176,29 @@ bool developFrame(RawvReader& reader, uint64_t index,
     strideSamples = h.rowStrideBytes / 2;
   }
 
+  // White balance. FileHeader.asShotNeutral is dead weight in practice --
+  // capture.cpp writes 0,0,0 into it and the real per-frame AWB estimate rides
+  // in FrameMeta.wbNeutral, which is what dng_writer emits as DNG AsShotNeutral
+  // (tag 50728). Prefer the frame's own value and keep the header field as a
+  // fallback for any clip that does populate it.
+  const float* neutral = (meta.wbNeutral[0] > 0.0f && meta.wbNeutral[1] > 0.0f &&
+                          meta.wbNeutral[2] > 0.0f)
+                             ? meta.wbNeutral
+                             : h.asShotNeutral;
+  // AsShotNeutral is the camera-space coordinate of a neutral subject, so the
+  // correcting gain is its RECIPROCAL. Normalising against green -- the channel
+  // AWB pins at 1.0 and the one with two photosites per quad -- lifts red and
+  // blue instead of pulling green down, so the frame keeps its exposure. With
+  // no usable neutral the frame stays as the sensor saw it: green-heavy, but
+  // honest, rather than scaled by a fabricated gain.
+  float gains[3] = {1.0f, 1.0f, 1.0f};
+  if (neutral[0] > 0.0f && neutral[1] > 0.0f && neutral[2] > 0.0f) {
+    for (int c = 0; c < 3; c++) gains[c] = neutral[1] / neutral[c];
+  }
+
   PreviewImage full;
   if (!developRaw16(raw16, h.width, h.height, strideSamples, (Cfa)h.cfa,
-                    h.blackLevel, h.whiteLevel, h.asShotNeutral, &full)) {
+                    h.blackLevel, h.whiteLevel, gains, &full)) {
     return false;
   }
   return downscaleTo(full, maxW, maxH, out);

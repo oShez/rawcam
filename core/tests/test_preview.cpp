@@ -166,10 +166,16 @@ static FileHeader previewHeader(PackMode mode, uint32_t white, uint32_t frameByt
 }
 
 static void writeOneFrameClip(const char* path, const FileHeader& h,
-                              const std::vector<uint16_t>& pixels, uint32_t compressed) {
+                              const std::vector<uint16_t>& pixels, uint32_t compressed,
+                              const float wbNeutral[3] = nullptr) {
   auto w = RawvWriter::create(path, h);
   FrameMeta m{};
   m.frameIndex = 0;
+  if (wbNeutral) {
+    m.wbNeutral[0] = wbNeutral[0];
+    m.wbNeutral[1] = wbNeutral[1];
+    m.wbNeutral[2] = wbNeutral[2];
+  }
   m.payloadBytes = (uint32_t)(pixels.size() * 2);
   m.compressed = compressed;
   w->writeFrame(m, reinterpret_cast<const uint8_t*>(pixels.data()), m.payloadBytes);
@@ -222,5 +228,53 @@ TEST_CASE("a stored-fallback frame in a compressed clip develops as plain RAW16"
   CHECK(developFrame(*reader, 0, 1024, 768, &out));
   CHECK(out.rgba[0] == 255);
   CHECK(out.rgba[2] == 0);
+  std::remove(path);
+}
+
+
+// A flat mid-grey 4x2 RGGB frame: every photosite reads the same value, so any
+// channel difference in the output can only have come from white balance.
+static std::vector<uint16_t> flatPixels(uint16_t v) {
+  return { v, v, v, v,
+           v, v, v, v };
+}
+
+TEST_CASE("developFrame white-balances with the frame's own wbNeutral") {
+  // FileHeader.asShotNeutral is dead weight -- capture.cpp writes 0,0,0 into it
+  // and puts the real AWB estimate in FrameMeta.wbNeutral, frame by frame, which
+  // is what dng_writer emits as DNG AsShotNeutral (tag 50728).
+  const char* path = "test_preview_wb.rawv";
+  FileHeader h = previewHeader(PackMode::Raw16, 1023, 16);
+  h.asShotNeutral[0] = h.asShotNeutral[1] = h.asShotNeutral[2] = 0.0f;
+  // Green is the most sensitive channel, so AWB reports it at 1.0 and the other
+  // two below it. Correcting DIVIDES by these, lifting red and blue.
+  const float wb[3] = {0.5f, 1.0f, 0.5f};
+  writeOneFrameClip(path, h, flatPixels(256), 0, wb);
+
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 0, 64, 64, &out));
+  // A flat frame under a green-heavy AWB must come back with red and blue
+  // LIFTED above green. Multiplying by the neutral instead would push them down.
+  CHECK(out.rgba[0] > out.rgba[1]);
+  CHECK(out.rgba[2] > out.rgba[1]);
+  std::remove(path);
+}
+
+TEST_CASE("developFrame leaves a frame with no wbNeutral unbalanced") {
+  // Nothing to correct with: every channel keeps its raw level rather than
+  // being scaled by a garbage gain.
+  const char* path = "test_preview_nowb.rawv";
+  FileHeader h = previewHeader(PackMode::Raw16, 1023, 16);
+  h.asShotNeutral[0] = h.asShotNeutral[1] = h.asShotNeutral[2] = 0.0f;
+  writeOneFrameClip(path, h, flatPixels(256), 0);
+
+  auto reader = RawvReader::open(path);
+  REQUIRE(reader != nullptr);
+  PreviewImage out;
+  CHECK(developFrame(*reader, 0, 64, 64, &out));
+  CHECK(out.rgba[0] == out.rgba[1]);
+  CHECK(out.rgba[2] == out.rgba[1]);
   std::remove(path);
 }
