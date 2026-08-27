@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelProvider
 import com.shez.rawcam.audio.AudioRecorder
 import com.shez.rawcam.settings.SettingsRepository
+import com.shez.rawcam.ui.ClipViewerScreen
 import com.shez.rawcam.ui.ClipsScreen
 import com.shez.rawcam.ui.ExportsScreen
 import com.shez.rawcam.ui.RawCamTheme
@@ -25,9 +26,10 @@ import com.shez.rawcam.ui.RecordScreen
 import com.shez.rawcam.ui.RecordViewModel
 import com.shez.rawcam.ui.SettingsScreen
 import kotlinx.coroutines.flow.distinctUntilChanged
+import java.io.File
 import kotlinx.coroutines.flow.map
 
-private enum class Screen { Record, Clips, Exports, Settings }
+private enum class Screen { Record, Clips, ClipViewer, Exports, Settings }
 
 class MainActivity : ComponentActivity() {
 
@@ -39,6 +41,10 @@ class MainActivity : ComponentActivity() {
     // handler below can tell whether the Record screen -- and with it the
     // preview surface a recording needs -- is actually up.
     private var screen by mutableStateOf(Screen.Record)
+
+    // Which clip the viewer is showing. Held beside `screen` rather than inside
+    // the enum so returning to the list does not have to re-derive it.
+    private var viewerClip by mutableStateOf<File?>(null)
 
     // A denial surfaces at record time via AudioResult/AudioStatus.PERMISSION_DENIED,
     // never as a blocked recording -- video always wins over audio.
@@ -77,7 +83,15 @@ class MainActivity : ComponentActivity() {
                             onOpenSettings = { if (!locked) screen = Screen.Settings },
                             audioInputs = { AudioRecorder(this).listInputs() },
                         )
-                        Screen.Clips -> ClipsScreen(onBack = { screen = Screen.Record })
+                        Screen.Clips -> ClipsScreen(
+                            onBack = { screen = Screen.Record },
+                            onOpenViewer = { file -> viewerClip = file; screen = Screen.ClipViewer },
+                        )
+                        Screen.ClipViewer -> {
+                            val c = viewerClip
+                            if (c == null) screen = Screen.Clips
+                            else ClipViewerScreen(clip = c, onBack = { screen = Screen.Clips })
+                        }
                         Screen.Exports -> ExportsScreen(onBack = { screen = Screen.Record })
                         Screen.Settings -> SettingsScreen(
                             onBack = { screen = Screen.Record },
