@@ -2,6 +2,7 @@ package com.shez.rawcam.ui
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.StatFs
@@ -9,6 +10,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,10 +22,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -40,7 +46,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.shez.rawcam.preview.PreviewService
+import com.shez.rawcam.preview.ProxyStore
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -68,6 +79,7 @@ private data class ClipEntry(
     val fps: Int,
     val frameCount: Int,
     val exportedFrameCount: Int,   // -1 if never exported / no output folder yet
+    val posterPath: String?,       // proxy 0 on disk, or null while it does not exist yet
 )
 
 private fun clipsDirOf(context: android.content.Context) =
@@ -139,6 +151,8 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
         val exportedCount = if (outDir != null) {
             outDir.listFiles { of -> of.name.endsWith(".dng") }?.size ?: 0
         } else -1
+        val proxyDir = ProxyStore.dirFor(context, f.name)
+        val poster = ProxyStore.frameFile(proxyDir, 0).takeIf { it.isFile }?.absolutePath
         ClipEntry(
             file = f,
             width = info.getOrElse(0) { 0 },
@@ -146,8 +160,9 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
             fps = info.getOrElse(2) { 0 },
             frameCount = info.getOrElse(3) { 0 },
             exportedFrameCount = exportedCount,
+            posterPath = poster,
         )
-    }
+    }.also { ProxyStore.pruneOrphans(context, files.map { f -> f.name }.toSet()) }
 }
 
 /**
@@ -160,7 +175,7 @@ private fun loadClips(context: android.content.Context): List<ClipEntry> {
  * user action.
  */
 @Composable
-fun ClipsScreen(onBack: () -> Unit = {}) {
+fun ClipsScreen(onBack: () -> Unit = {}, onOpenViewer: (File) -> Unit = {}) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -266,6 +281,7 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
                 items(clips, key = { it.file.absolutePath }) { clip ->
                     ClipCard(
                         clip = clip,
+                        onOpen = { onOpenViewer(clip.file) },
                         onExport = {
                             scope.launch {
                                 val deleteAfter = SettingsRepository.settings.first().deleteAfterExport
@@ -299,7 +315,8 @@ fun ClipsScreen(onBack: () -> Unit = {}) {
 
 @Composable
 private fun ClipCard(
-    clip: ClipEntry, onExport: () -> Unit, onCancel: () -> Unit, onShare: () -> Unit, onDelete: () -> Unit,
+    clip: ClipEntry, onOpen: () -> Unit, onExport: () -> Unit, onCancel: () -> Unit,
+    onShare: () -> Unit, onDelete: () -> Unit,
 ) {
     val status = ExportService.status[baseName(clip.file)]
     val running = status == ExportService.ExportStatus.RUNNING
@@ -309,9 +326,34 @@ private fun ClipCard(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            Modifier.clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Box(
+                Modifier.size(96.dp, 72.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(RawCamColors.SurfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                val poster = clip.posterPath
+                val pending = PreviewService.progressFor(clip.file.name)
+                when {
+                    poster != null -> {
+                        val bmp = remember(poster) { BitmapFactory.decodeFile(poster) }
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
+                    pending >= 0 -> Text("...", color = RawCamColors.Muted, fontSize = 12.sp)
+                    else -> Text("--", color = RawCamColors.Muted, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(clipTitle(clip.file), style = MaterialTheme.typography.titleMedium)
                 Row(verticalAlignment = Alignment.CenterVertically) {
