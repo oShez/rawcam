@@ -133,6 +133,7 @@ import com.shez.rawcam.camera.UnsupportedReason
 import com.shez.rawcam.camera.ZebraMask
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.export.ExportPaths
+import com.shez.rawcam.preview.PreviewService
 import com.shez.rawcam.settings.CaptureState
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -1124,6 +1125,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     viewModelScope.launch { SettingsRepository.saveCaptureRate(measuredKey, measured) }
                 }
                 if (stats[0] > 0) {
+                    // Preview proxies. Enqueued only once the take has finished --
+                    // developing frames is CPU-heavy and must never compete with an
+                    // active capture (see PreviewService's kdoc).
+                    lastClipName?.let { name ->
+                        PreviewService.start(
+                            getApplication(),
+                            File(controller.clipsDir, name).absolutePath,
+                            name,
+                        )
+                    }
                     val st = _uiState.value.settings
                     if (st.autoExport) {
                         lastClipName?.let { name ->
