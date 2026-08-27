@@ -1,9 +1,11 @@
 #include <jni.h>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "rawcam/rawv.h"
 #include "rawcam/rawv_reader.h"
 #include "rawcam/exporter.h"
+#include "rawcam/preview.h"
 #include "benchmark.h"
 #include "capture.h"
 
@@ -190,4 +192,54 @@ Java_com_shez_rawcam_NativeBridge_nativeClipInfo(JNIEnv* env, jobject, jstring j
   jint values[4] = {(jint)h.width, (jint)h.height, fps, (jint)reader->frameCount()};
   env->SetIntArrayRegion(arr, 0, 4, values);
   return arr;
+}
+
+// Owns a reader for the life of a decoding session. RawvReader::open scans the
+// whole file to build its offset index, so opening per frame would make every
+// decode pay for a full-file scan.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeOpenClip(JNIEnv* env, jobject, jstring jPath) {
+  const char* pathChars = env->GetStringUTFChars(jPath, nullptr);
+  std::string path(pathChars ? pathChars : "");
+  env->ReleaseStringUTFChars(jPath, pathChars);
+  auto reader = rawcam::RawvReader::open(path);
+  if (!reader) return 0;
+  return (jlong)(intptr_t)reader.release();
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeClipFrameCount(JNIEnv*, jobject, jlong handle) {
+  auto* reader = (rawcam::RawvReader*)(intptr_t)handle;
+  if (!reader) return 0;
+  return (jlong)reader->frameCount();
+}
+
+// Returns [width, height, argb...] for Bitmap.createBitmap, or null.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeDecodeFrame(JNIEnv* env, jobject, jlong handle,
+                                                    jlong index, jint maxW, jint maxH) {
+  auto* reader = (rawcam::RawvReader*)(intptr_t)handle;
+  if (!reader || maxW <= 0 || maxH <= 0) return nullptr;
+  rawcam::PreviewImage img;
+  if (!rawcam::developFrame(*reader, (uint64_t)index, (uint32_t)maxW, (uint32_t)maxH, &img)) {
+    return nullptr;
+  }
+  const jsize count = (jsize)(img.width * img.height);
+  jintArray arr = env->NewIntArray(count + 2);
+  if (!arr) return nullptr;
+  std::vector<jint> pixels((size_t)count + 2);
+  pixels[0] = (jint)img.width;
+  pixels[1] = (jint)img.height;
+  for (jsize i = 0; i < count; i++) {
+    const uint8_t* p = img.rgba.data() + (size_t)i * 4;
+    pixels[(size_t)i + 2] =
+        (jint)(((uint32_t)0xFF << 24) | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2]);
+  }
+  env->SetIntArrayRegion(arr, 0, count + 2, pixels.data());
+  return arr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeCloseClip(JNIEnv*, jobject, jlong handle) {
+  delete (rawcam::RawvReader*)(intptr_t)handle;
 }

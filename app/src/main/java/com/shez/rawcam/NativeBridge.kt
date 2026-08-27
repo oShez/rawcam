@@ -38,6 +38,17 @@ object NativeBridge {
     // Returns intArrayOf(width, height, fps, frameCount), or all-zero if unreadable.
     external fun nativeClipInfo(path: String): IntArray
 
+    // Opens a clip for preview decoding, returning an opaque handle (0 = failure).
+    // RawvReader builds its frame-offset index on open, so a handle MUST be held
+    // across a decoding session rather than opened per frame. Every successful
+    // open must be paired with nativeCloseClip.
+    external fun nativeOpenClip(path: String): Long
+    external fun nativeClipFrameCount(handle: Long): Long
+    // Returns intArrayOf(width, height, argb...) developed and downscaled to fit
+    // maxW x maxH, or null if the frame cannot be developed.
+    external fun nativeDecodeFrame(handle: Long, index: Long, maxW: Int, maxH: Int): IntArray?
+    external fun nativeCloseClip(handle: Long)
+
     fun interface ExportCallback {
         fun onProgress(done: Long, total: Long): Boolean
     }
