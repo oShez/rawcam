@@ -4,6 +4,7 @@ package com.shez.rawcam.camera
 enum class SnapshotField {
     FOCAL_LENGTH, PHYSICAL_SIZE, COLOR_TRANSFORM1, COLOR_TRANSFORM2,
     ILLUMINANTS, ISO_RANGE, EXPOSURE_RANGE, ACTIVE_ARRAY, MIN_FOCUS, OIS_MODES,
+    ZOOM_RANGE,
 }
 
 /** How much manual control a lens actually offers. */
@@ -44,6 +45,12 @@ data class LensProfile(
     val exposureRangeNs: LongRange?,
     val minFocusDiopters: Float,
     val activeArray: RectSpec,
+    /** CONTROL_ZOOM_RATIO_RANGE upper bound. 1.0 means the lens offers no zoom --
+     *  either the HAL omitted the key or it advertised a nonsense range. Feeds
+     *  ZoomLadder.build's maxRatio, which DROPS stops past this rather than
+     *  capping them: a capped preview over an uncapped RAW crop is a preview
+     *  that lies about the file. */
+    val maxZoomRatio: Float,
     val oisModes: IntArray?,
     val sensorOrientation: Int?,
     val standalone: Boolean,

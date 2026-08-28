@@ -64,4 +64,30 @@ class LensDiscoverySoftFieldsTest {
         assertEquals(4096, lens.activeArray.width)
         assertNotNull(lens.activeArray)
     }
+
+    /** A HAL that omits CONTROL_ZOOM_RATIO_RANGE must yield maxZoomRatio 1.0
+     *  (no zoom) and say so via ZOOM_RANGE -- never an optimistic guess, which
+     *  would let the RAW crop outrun a preview that cannot follow it. */
+    @Test
+    fun `missing zoom range defaults to no zoom and is flagged`() {
+        val lens = onlyLens(rawLens("0").copy(zoomRatioRange = null))
+        assertEquals(1.0f, lens.maxZoomRatio, 1e-6f)
+        assertTrue(SnapshotField.ZOOM_RANGE in lens.defaulted)
+    }
+
+    @Test
+    fun `present zoom range is carried through unflagged`() {
+        val lens = onlyLens(rawLens("0").copy(zoomRatioRange = listOf(1.0f, 8.0f)))
+        assertEquals(8.0f, lens.maxZoomRatio, 1e-6f)
+        assertTrue(SnapshotField.ZOOM_RANGE !in lens.defaulted)
+    }
+
+    /** A HAL reporting a nonsense upper bound below 1.0 must be treated as
+     *  "no zoom", not propagated into the ladder where it would drop even 1x. */
+    @Test
+    fun `nonsense zoom range is treated as no zoom`() {
+        val lens = onlyLens(rawLens("0").copy(zoomRatioRange = listOf(1.0f, 0.5f)))
+        assertEquals(1.0f, lens.maxZoomRatio, 1e-6f)
+        assertTrue(SnapshotField.ZOOM_RANGE in lens.defaulted)
+    }
 }

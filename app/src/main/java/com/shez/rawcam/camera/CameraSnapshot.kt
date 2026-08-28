@@ -49,6 +49,10 @@ data class CameraSnapshot(
     /** SENSOR_INFO_EXPOSURE_TIME_RANGE in ns, [min, max]. */
     val exposureRangeNs: List<Long>? = null,
     val activeArray: RectSpec? = null,
+    /** CONTROL_ZOOM_RATIO_RANGE as [min, max]. Null when the HAL omits the key
+     *  (or CAMERA permission is redacted) -- absence is data, never an error,
+     *  and LensDiscovery substitutes "no zoom" rather than guessing. */
+    val zoomRatioRange: List<Float>? = null,
     val minFocusDiopters: Float? = null,
     val oisModes: List<Int>? = null,
     /** Captured for Spec B (orientation correctness); unused by this spec. */

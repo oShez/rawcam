@@ -112,6 +112,7 @@ class Camera2SnapshotSource(private val cameraManager: CameraManager) {
         val iso = read(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val exp = read(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val arr = read(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val zoomRange = read(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
 
         return CameraSnapshot(
             cameraId = id,
@@ -132,6 +133,7 @@ class Camera2SnapshotSource(private val cameraManager: CameraManager) {
             isoRange = iso?.let { listOf(it.lower, it.upper) },
             exposureRangeNs = exp?.let { listOf(it.lower, it.upper) },
             activeArray = arr?.let { RectSpec(it.left, it.top, it.right, it.bottom) },
+            zoomRatioRange = zoomRange?.let { listOf(it.lower, it.upper) },
             minFocusDiopters = read(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE),
             oisModes = read(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList(),
             sensorOrientation = read(CameraCharacteristics.SENSOR_ORIENTATION),

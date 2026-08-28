@@ -225,6 +225,14 @@ object LensDiscovery {
             ?: 0f.also { defaulted += SnapshotField.MIN_FOCUS }
         if (cam.oisModes == null) defaulted += SnapshotField.OIS_MODES
 
+        // A HAL that omits CONTROL_ZOOM_RATIO_RANGE, or advertises an upper bound
+        // at or below 1.0, gets "no zoom" -- the conservative default. Guessing a
+        // range would let the RAW crop zoom past a preview that cannot follow,
+        // which is precisely the failure zoom exists to prevent.
+        val zoomUpper = cam.zoomRatioRange?.getOrNull(1)
+        val maxZoomRatio = if (zoomUpper != null && zoomUpper > 1.0f) zoomUpper else 1.0f
+        if (zoomUpper == null || zoomUpper <= 1.0f) defaulted += SnapshotField.ZOOM_RANGE
+
         // FULL requires the MANUAL_SENSOR capability AND a usable ISO range: a
         // manual ISO slider with no real bounds would be a lie. A missing
         // exposure range does NOT demote -- it only means the shutter stop table
@@ -254,6 +262,7 @@ object LensDiscovery {
             illuminant1 = cam.illuminant1, illuminant2 = cam.illuminant2,
             isoRange = iso ?: (DEFAULT_ISO_LOW..DEFAULT_ISO_HIGH),
             exposureRangeNs = exposure, minFocusDiopters = minFocus, activeArray = activeArray,
+            maxZoomRatio = maxZoomRatio,
             oisModes = cam.oisModes?.toIntArray(), sensorOrientation = cam.sensorOrientation,
             standalone = cam.standalone, isMain = false, controlTier = tier, defaulted = defaulted,
         )
