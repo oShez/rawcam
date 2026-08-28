@@ -90,4 +90,18 @@ class LensDiscoverySoftFieldsTest {
         assertEquals(1.0f, lens.maxZoomRatio, 1e-6f)
         assertTrue(SnapshotField.ZOOM_RANGE in lens.defaulted)
     }
+
+    /** A HAL can legally report NaN as the upper bound: Range<Float> orders via
+     *  boxed Float.compareTo, which ranks NaN above everything, so a Range with
+     *  a NaN upper still passes Range's own lower <= upper check. Both `> 1.0f`
+     *  and `<= 1.0f` are false for NaN, so a naively mirrored `<=` flag check
+     *  would silently stop reporting the substitution even though the value
+     *  correctly falls back to 1.0 -- assert BOTH, since the value alone was
+     *  already correct before this fix. */
+    @Test
+    fun `NaN zoom range upper bound is treated as no zoom and is flagged`() {
+        val lens = onlyLens(rawLens("0").copy(zoomRatioRange = listOf(1.0f, Float.NaN)))
+        assertEquals(1.0f, lens.maxZoomRatio, 1e-6f)
+        assertTrue(SnapshotField.ZOOM_RANGE in lens.defaulted)
+    }
 }

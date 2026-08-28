@@ -229,9 +229,19 @@ object LensDiscovery {
         // at or below 1.0, gets "no zoom" -- the conservative default. Guessing a
         // range would let the RAW crop zoom past a preview that cannot follow,
         // which is precisely the failure zoom exists to prevent.
+        //
+        // zoomUsable is the single source of truth for BOTH the value and the
+        // defaulted flag -- the flag is deliberately the negation of the
+        // usability test, not an independently written `<= 1.0f` check. A HAL
+        // can legally report NaN as the upper bound (Range<Float> orders via
+        // boxed Float.compareTo, which ranks NaN above everything, so it still
+        // passes Range's own lower <= upper check); for NaN, both `> 1.0f` and
+        // `<= 1.0f` are false, so two separately written conditions would
+        // silently stop reporting the substitution.
         val zoomUpper = cam.zoomRatioRange?.getOrNull(1)
-        val maxZoomRatio = if (zoomUpper != null && zoomUpper > 1.0f) zoomUpper else 1.0f
-        if (zoomUpper == null || zoomUpper <= 1.0f) defaulted += SnapshotField.ZOOM_RANGE
+        val zoomUsable = zoomUpper != null && zoomUpper > 1.0f
+        val maxZoomRatio = if (zoomUsable) zoomUpper else 1.0f
+        if (!zoomUsable) defaulted += SnapshotField.ZOOM_RANGE
 
         // FULL requires the MANUAL_SENSOR capability AND a usable ISO range: a
         // manual ISO slider with no real bounds would be a lie. A missing
