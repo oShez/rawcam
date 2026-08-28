@@ -997,7 +997,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // cannot be true until controller.initialize() has completed -- see
                 // nearestIso's comment for the full chain. controller.rawSpec is valid.
                 val spec = controller.rawSpec
-                val frameBytes = frameRecordBytes(spec)
+                val frameBytes = frameRecordBytes(spec, s.zoomStops.getOrNull(s.zoomIndex))
                 val rateKey = captureRateKey(
                     s.lenses.getOrNull(s.lensIndex), spec, s.settings.compressRecordings,
                     s.zoomStops.getOrNull(s.zoomIndex),
@@ -1282,11 +1282,19 @@ private fun formatTimer(totalSeconds: Int): String {
  * Was hardcoded to the Packed10 formula, which under-reserved free space ~20% on
  * a 12-bit sensor and ~60% on anything recording Raw16.
  */
-private fun frameRecordBytes(spec: CameraController.RawSpec): Long {
-    val pixels = spec.width.toLong() * spec.height
+private fun frameRecordBytes(spec: CameraController.RawSpec, zoom: ZoomStop?): Long {
+    // Zoom is a real crop, so a frame at 4x holds about a SIXTEENTH of the bytes
+    // a full-sensor frame does. Sizing this from spec alone would overstate every
+    // zoomed frame by the square of the crop factor, which refuses recordings for
+    // lack of space that is actually free and shows a time-left roughly 16x short.
+    val w = zoom?.cropW ?: spec.width
+    val h = zoom?.cropH ?: spec.height
+    val pixels = w.toLong() * h
     val payload = when {
-        spec.whiteLevel <= 0x3FF && spec.width % 4 == 0 -> (pixels / 4) * 5
-        spec.whiteLevel <= 0xFFF && spec.width % 2 == 0 -> (pixels / 2) * 3
+        // Gated on the CROPPED width, mirroring capture.cpp's w4/w2 pack gates,
+        // which are themselves now computed from cropW.
+        spec.whiteLevel <= 0x3FF && w % 4 == 0 -> (pixels / 4) * 5
+        spec.whiteLevel <= 0xFFF && w % 2 == 0 -> (pixels / 2) * 3
         else -> pixels * 2
     }
     return payload + 64
@@ -1361,7 +1369,8 @@ private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec)
         captureRateKey(state.lenses.getOrNull(state.lensIndex), spec, state.settings.compressRecordings,
                        state.zoomStops.getOrNull(state.zoomIndex))
     ]
-    val frameBytes = (frameRecordBytes(spec) * (ratio ?: 1f).toDouble()).toLong()
+    val frameBytes = (frameRecordBytes(spec, state.zoomStops.getOrNull(state.zoomIndex))
+        * (ratio ?: 1f).toDouble()).toLong()
     val perSecond = frameBytes * state.fps + audioPerSecond
     if (perSecond <= 0) return "—"
     val text = formatDuration(state.freeSpaceBytes / perSecond)
