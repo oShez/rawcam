@@ -12,6 +12,9 @@ class ZoomLadderTest {
     private val sweepSizes = listOf(
         4096 to 3072, 4000 to 3000, 3840 to 2160, 2048 to 1536,
         1998 to 1123, 1279 to 719, 977 to 541, 64 to 48, 16 to 12,
+        // 17x12 is not filler: it is the smallest width at which the R5 cap
+        // clamp fires on a NON-top nominal (2.8x floors to cropW=4 -> 4.25x).
+        17 to 12,
     )
 
     /** The 14 Ultra main camera, the reference case from the spec. This is the
@@ -69,6 +72,30 @@ class ZoomLadderTest {
 
     /** 1x must be the untouched full frame -- this is what keeps the 1x capture
      *  path byte-identical to what ships today. */
+    /** The R5 clamp is written against the ACTUAL ratio, not the nominal, and this
+     *  is the case that proves the difference matters. At fullW=17 the 2.8x stop --
+     *  NOT the top rung -- floors to cropW=4 and would realize 17/4 = 4.25x, over
+     *  the hard 4x product cap. Clamping lifts it to cropW=8 (2.125x), which then
+     *  collides with the already-accepted 2.0x stop and is dropped by the R1(a)
+     *  dedup, so the ladder ends at 2.0x rather than exposing an over-cap rung. */
+    @Test fun nonTopStopAlsoGetsCapClamped() {
+        val stops = ZoomLadder.build(17, 12, 10f, false)
+        assertEquals(listOf(1.0f, 1.4f, 2.0f), stops.map { it.nominal })
+        assertEquals(listOf(17, 12, 0, 0), stops[0].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(12, 8, 2, 2), stops[1].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(8, 4, 4, 4), stops[2].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        // The unclamped 2.8x rung would have been 4.25x. Nothing here exceeds 4x.
+        for (s in stops) assertTrue("ratio ${s.ratio} exceeds the 4x cap", s.ratio <= 4.0f)
+    }
+
+    /** [ZoomStop.label] is what the rail shows, and its integer/decimal branch is
+     *  the kind of thing that silently renders "2.0x" instead of "2x". Pins every
+     *  nominal the ladder can actually emit. */
+    @Test fun labelDropsTheTrailingZeroOnWholeStops() {
+        val stops = ZoomLadder.build(4096, 3072, 10f, false)
+        assertEquals(listOf("1x", "1.4x", "2x", "2.8x", "4x"), stops.map { it.label })
+    }
+
     @Test fun oneXIsAlwaysTheWholeFrame() {
         for ((w, h) in listOf(4096 to 3072, 4000 to 3000, 2048 to 1536, 1998 to 1123)) {
             val first = ZoomLadder.build(w, h, 10f, false).first()

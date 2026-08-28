@@ -72,13 +72,20 @@ object ZoomLadder {
             if (cropW < 4) continue
             var ratio = fullW.toFloat() / cropW.toFloat()
             // RULING R5: rounding cropW DOWN always pushes the ACTUAL ratio ABOVE
-            // nominal, so the top stop can silently overshoot the spec's hard 4x
-            // product cap -- invisible on a 4096-wide sensor purely because
-            // 4096/4=1024 is already a multiple of 4. Round-down stays the general
-            // rule (it is what produces the spec's committed 4096x3072 table), but
-            // when the actual ratio would break the 4x cap, round cropW UP one
-            // step instead: cropW+4 is always enough, since cropW+4 > fullW/4
-            // implies fullW/(cropW+4) < 4x.
+            // nominal, so a stop can silently overshoot the spec's hard 4x product
+            // cap -- invisible on a 4096-wide sensor purely because 4096/4=1024 is
+            // already a multiple of 4. Round-down stays the general rule (it is
+            // what produces the spec's committed 4096x3072 table), but when the
+            // actual ratio would break the 4x cap, round cropW UP one step
+            // instead: cropW+4 is always enough, since cropW+4 > fullW/4 implies
+            // fullW/(cropW+4) < 4x.
+            //
+            // This is NOT confined to the 4.0 nominal, which is how it was first
+            // described. Flooring bites proportionally harder on a small sensor,
+            // so a LOWER rung can overshoot too: at fullW 17..22 the 2.8x stop
+            // floors to cropW=4 and would realize 4.25x. The guard therefore
+            // tests the ACTUAL ratio and never the nominal -- pinned by
+            // nonTopStopAlsoGetsCapClamped.
             if (ratio > 4.0f) {
                 val roundedUp = cropW + 4
                 if (roundedUp > fullW) continue
