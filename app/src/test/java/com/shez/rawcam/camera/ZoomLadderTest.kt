@@ -35,6 +35,38 @@ class ZoomLadderTest {
         assertEquals(4096f / 1460f, stops[3].ratio, 1e-6f)
     }
 
+    /** Fix round 2 [Important]: pins exact numbers at a size where R5's round-up
+     *  clamp actually fires. Without this, the round-up path was covered only by
+     *  generic sweep invariants (aligned, in bounds, increasing, <=4x) -- an R5
+     *  that was subtly wrong but still happened to satisfy all of those would
+     *  pass every other test here.
+     *
+     *  1998 is chosen precisely because 1998/4 = 499.5 is NOT a multiple of 4:
+     *  flooring the 4x stop's cropW gives 496, actual ratio 1998/496 ~= 4.028,
+     *  over the cap -- so the clamp rounds cropW back UP to 500 (ratio 3.996).
+     *  Contrast with 4096, where 4096/4=1024 is already aligned and the clamp
+     *  never triggers (dead code there) -- that contrast is the point of this
+     *  test, and why [mainCameraLadderMatchesSpecTable] alone can't catch a
+     *  broken R5. */
+    @Test fun capClampProducesExactRectangleWhenItFires() {
+        val stops = ZoomLadder.build(1998, 1123, maxRatio = 10f, activeArrayDefaulted = false)
+        assertEquals(5, stops.size)
+
+        assertEquals(listOf(1998, 1123, 0, 0), stops[0].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(1424, 800, 286, 160), stops[1].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(996, 558, 500, 282), stops[2].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(712, 400, 642, 360), stops[3].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        // The clamp-fired stop: floored cropW 496 (ratio 4.028, over cap) rounds
+        // UP one step to 500 (ratio 3.996) -- the exact numbers from RULING R5.
+        assertEquals(listOf(500, 280, 748, 420), stops[4].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+
+        assertEquals(1.0f, stops[0].ratio, 1e-6f)
+        assertEquals(1998f / 1424f, stops[1].ratio, 1e-6f)
+        assertEquals(1998f / 996f, stops[2].ratio, 1e-6f)
+        assertEquals(1998f / 712f, stops[3].ratio, 1e-6f)
+        assertEquals(1998f / 500f, stops[4].ratio, 1e-6f)
+    }
+
     /** 1x must be the untouched full frame -- this is what keeps the 1x capture
      *  path byte-identical to what ships today. */
     @Test fun oneXIsAlwaysTheWholeFrame() {
@@ -125,15 +157,27 @@ class ZoomLadderTest {
         assertEquals(4096, stops[0].cropW)
     }
 
-    /** Degenerate sizes must drop stops, never emit a nonsense rectangle. */
+    /** Degenerate sizes must drop stops, never emit a nonsense rectangle.
+     *  Fix round 2 [Minor]: pins the actual resulting ladder (not just generic
+     *  bounds) -- 8x4 keeps 1.0x and 1.4x (both floor/round to a valid rect) and
+     *  drops 2.0x (dedups to the same ratio as 1.4x, per R1(a)), 2.8x and 4.0x
+     *  (floor to cropW<4). Also applies the same R6 1x exemption that
+     *  [everyStopIsAlignedAndInBounds] uses, rather than asserting %4/%2 on the
+     *  1x stop too -- that only passed before because 8x4 happens to already be
+     *  aligned, which contradicts R6's actual invariant. */
     @Test fun degenerateSizesDropStopsInsteadOfEmittingBadRects() {
         val stops = ZoomLadder.build(8, 4, 10f, false)
-        assertTrue(stops.isNotEmpty())
+        assertEquals(listOf(1.0f, 1.4f), stops.map { it.nominal })
+        assertEquals(listOf(8, 4, 0, 0), stops[0].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
+        assertEquals(listOf(4, 2, 2, 0), stops[1].let { listOf(it.cropW, it.cropH, it.cropX, it.cropY) })
         assertEquals(1.0f, stops[0].ratio, 1e-6f)
+        assertEquals(2.0f, stops[1].ratio, 1e-6f)
         for (s in stops) {
             assertTrue(s.cropW >= 4 && s.cropH >= 2)
-            assertEquals(0, s.cropW % 4)
-            assertEquals(0, s.cropH % 2)
+            if (s.nominal != 1.0f) {
+                assertEquals(0, s.cropW % 4)
+                assertEquals(0, s.cropH % 2)
+            }
         }
     }
 

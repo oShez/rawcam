@@ -91,8 +91,13 @@ object ZoomLadder {
             // 8x4 sensor, nominal 1.4 and 2.0 both floor to cropW=4, ratio=2.0).
             // The spec invariant is that ratios strictly increase, so a stop
             // that repeats the previously accepted stop's (FINAL, post-R5) ratio
-            // is skipped.
-            if (ratio == out.last().ratio) continue
+            // is skipped. Exact float equality is correct here, not sloppy: two
+            // colliding stops share an identical cropW, so fullW.toFloat() /
+            // cropW.toFloat() is bit-identical for both -- an epsilon would
+            // actually be the looser, more error-prone choice. lastOrNull()
+            // (not last()) keeps this safe even if NOMINAL is ever reordered or
+            // edited so nominal==1.0f is no longer guaranteed to run first.
+            if (ratio == out.lastOrNull()?.ratio) continue
             val cropH = floorTo((fullH / ratio).toInt(), 2)
             if (cropH < 2) continue
             val cropX = floorTo((fullW - cropW) / 2, 2)
