@@ -157,6 +157,28 @@ class CameraController(private val context: Context) {
      * refetched on the open/select hot path. */
     @Volatile private var activeArraySize: Rect? = null
 
+    /** The ladder for the CURRENTLY selected lens+size. Rebuilt by
+     *  [applySelectedLens]; once built it always has at least one entry (1x).
+     *
+     *  Starts EMPTY rather than holding a placeholder stop: before a lens is
+     *  selected there is no sensor size to build a rectangle from, and a
+     *  placeholder would have to carry a 0x0 crop that could reach native and
+     *  be written into a file header. An empty list makes that unrepresentable
+     *  instead of merely unlikely -- every read below goes through [zoomStop],
+     *  which is nullable, and each caller states its own explicit fallback. */
+    @Volatile var zoomStops: List<ZoomStop> = emptyList()
+        private set
+
+    /** Index into [zoomStops]. Locked for the duration of a take -- .rawv
+     *  carries one frameSizeBytes per file, so a mid-take crop change cannot
+     *  be represented. */
+    @Volatile var zoomIndex: Int = 0
+        private set
+
+    /** Null until a lens has been selected, or if [zoomIndex] somehow falls
+     *  outside the current ladder. Callers must supply an explicit fallback. */
+    private val zoomStop: ZoomStop? get() = zoomStops.getOrNull(zoomIndex)
+
     /** Active lens's supported OIS modes ([LensProfile.oisModes]), tracked
      * alongside [activeArraySize] with the same lifecycle (set in [initialize] and
      * [selectMode], read by [applyManual] to gate [oisMode] ON/OFF requests against
@@ -445,6 +467,23 @@ class CameraController(private val context: Context) {
      * [activePhysicalId] and [rawSpec] — the same proven path as returning
      * from background.
      */
+    /**
+     * Selects the zoom stop for the NEXT take. Refused while recording: .rawv
+     * has one width/height/frameSizeBytes for the whole file, so a crop that
+     * changed mid-take could not be written as smaller frames.
+     *
+     * Takes effect on the live preview immediately (the zoom key goes on the
+     * repeating request); the crop reaches the file at the next record start.
+     */
+    fun setZoomIndex(index: Int): Boolean {
+        if (recording) return false
+        if (index !in zoomStops.indices) return false
+        if (index == zoomIndex) return true
+        zoomIndex = index
+        session?.let { setRepeatingPreview(it) }
+        return true
+    }
+
     fun selectMode(lensIndex: Int, sizeIndex: Int): Boolean {
         if (recording) return false
         val lens = lenses.getOrNull(lensIndex) ?: return false
@@ -472,6 +511,17 @@ class CameraController(private val context: Context) {
     private fun applySelectedLens(lens: LensProfile, sizeIndex: Int) {
         activePhysicalId = lens.cameraId          // WB identity key -- unchanged meaning
         rawSpec = specFor(lens, sizeIndex)
+        // The ladder is a function of the SELECTED size, not the lens maximum:
+        // a lens may offer several RAW sizes and zoom must follow the active one.
+        zoomStops = ZoomLadder.build(
+            fullW = rawSpec.width,
+            fullH = rawSpec.height,
+            maxRatio = lens.maxZoomRatio,
+            activeArrayDefaulted = SnapshotField.ACTIVE_ARRAY in lens.defaulted,
+        )
+        // A stop index the new ladder no longer has falls back to 1x, the same
+        // discipline lensIndex/sizeIndex already follow on restore.
+        if (zoomIndex !in zoomStops.indices) zoomIndex = 0
         activeArraySize = Rect(lens.activeArray.left, lens.activeArray.top,
                                lens.activeArray.right, lens.activeArray.bottom)
         activeOisModes = lens.oisModes
@@ -585,11 +635,20 @@ class CameraController(private val context: Context) {
         }
 
         val spec = rawSpec
+        // Snapshot the stop here: this is the moment zoom locks for the take.
+        // setZoomIndex() refuses once recording is true, but reading the field
+        // once keeps the crop written to the header and the ratio on the
+        // request from ever disagreeing.
+        val zoom = zoomStop
         val raw = NativeBridge.nativeStartRecording(
             path, spec.width, spec.height,
-            // Task 5 replaces this with the selected zoom stop's rectangle.
-            /* cropX = */ 0, /* cropY = */ 0,
-            /* cropW = */ spec.width, /* cropH = */ spec.height,
+            // Snapshotted above: this is the moment zoom locks for the take.
+            // A null stop (no ladder built yet) records the FULL frame rather
+            // than a placeholder rectangle -- 1x is the only safe reading of
+            // "no zoom selected", and it keeps a 0x0 crop unrepresentable.
+            /* cropX = */ zoom?.cropX ?: 0, /* cropY = */ zoom?.cropY ?: 0,
+            /* cropW = */ zoom?.cropW ?: spec.width,
+            /* cropH = */ zoom?.cropH ?: spec.height,
             spec.cfa, spec.whiteLevel,
             spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
@@ -773,6 +832,7 @@ class CameraController(private val context: Context) {
                 val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                     addTarget(preview)
                     configureAutoMetering(this, region)
+                    applyZoom(this)
                 }.build()
 
                 val deadline = SystemClock.elapsedRealtime() + 1500L
@@ -796,6 +856,7 @@ class CameraController(private val context: Context) {
                     addTarget(preview)
                     configureAutoMetering(this, region)
                     set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+                    applyZoom(this)
                 }.build()
                 s.capture(trigger, null, meterHandler())
 
@@ -956,6 +1017,7 @@ class CameraController(private val context: Context) {
                     set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                     set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
                     set(CaptureRequest.CONTROL_AWB_MODE, mode)
+                    applyZoom(this)
                 }.build()
                 val done = CountDownLatch(1)
                 val last = AtomicReference<TotalCaptureResult>()
@@ -1493,6 +1555,7 @@ class CameraController(private val context: Context) {
             addTarget(previewSurface ?: return)
             zebraSurface?.let { addTarget(it) }
             if (manualSet) applyManual(this, withFrameDuration = false)
+            applyZoom(this)
         }.build()
         s.setRepeatingRequest(req, null, cameraHandler)
     }
@@ -1505,6 +1568,7 @@ class CameraController(private val context: Context) {
             addTarget(raw)
             zebraSurface?.let { addTarget(it) }
             applyManual(this, withFrameDuration = true)
+            applyZoom(this)
         }.build()
         s.setRepeatingRequest(req, captureCallback, cameraHandler)
     }
@@ -1683,6 +1747,29 @@ class CameraController(private val context: Context) {
         val rawTint = ((1f - tintFactorMeasured) * 100f).roundToInt()
         val bestT = TINT_CANDIDATES.minByOrNull { abs(it - rawTint) } ?: 0
         return bestK to bestT
+    }
+
+    /**
+     * The preview half of zoom. Set on EVERY request the session issues, not
+     * just the repeating ones: a metering or AWB-sampling request that omitted
+     * it would meter a differently-framed scene from the one being previewed.
+     *
+     * Always sends an explicit ratio, including 1.0f at the base stop -- omitting
+     * the key would let a stale ratio survive a session rebuild.
+     *
+     * Sends the stop's ACTUAL ratio, never its nominal label: alignment rounds
+     * cropW down, so 2.8x is really 2.8055x, and sending 2.8 would leave the
+     * preview a few pixels out of agreement with the file.
+     *
+     * Falls back to 1.0f when no ladder has been built yet, which is the honest
+     * value for "no zoom selected" and matches what the capture path writes in
+     * the same state.
+     *
+     * No SCALER_CROP_REGION fallback exists or is needed: CONTROL_ZOOM_RATIO is
+     * API 30 and minSdk is 33.
+     */
+    private fun applyZoom(b: CaptureRequest.Builder) {
+        b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomStop?.ratio ?: 1.0f)
     }
 
     private fun applyManual(b: CaptureRequest.Builder, withFrameDuration: Boolean) {
