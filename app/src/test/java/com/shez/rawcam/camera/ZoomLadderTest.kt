@@ -7,14 +7,17 @@ import org.junit.Test
 class ZoomLadderTest {
 
     /** Shared across the alignment sweep and the strictly-increasing sweep so
-     *  both exercise the same sizes -- including 8x4, where nominal 1.4 and
-     *  nominal 2.0 both round to cropW=4 (same actual ratio) if not de-duplicated. */
+     *  both exercise the same sizes -- including 16x12, where nominal 1.4 and
+     *  nominal 2.0 both round to cropW=8 (same actual ratio) if not de-duplicated. */
     private val sweepSizes = listOf(
         4096 to 3072, 4000 to 3000, 3840 to 2160, 2048 to 1536,
         1998 to 1123, 1279 to 719, 977 to 541, 64 to 48, 16 to 12,
     )
 
-    /** The 14 Ultra main camera, the reference case from the spec. */
+    /** The 14 Ultra main camera, the reference case from the spec. This is the
+     *  regression guard for the R5 4x-cap round-up fix: 4096/4=1024 is already a
+     *  multiple of 4, so the clamp never triggers here and this table must stay
+     *  byte-identical to what round-down alone already produced. */
     @Test fun mainCameraLadderMatchesSpecTable() {
         val stops = ZoomLadder.build(4096, 3072, maxRatio = 10f, activeArrayDefaulted = false)
         assertEquals(5, stops.size)
@@ -55,11 +58,14 @@ class ZoomLadderTest {
                 val where = "${w}x$h @ ${s.nominal}x"
                 assertEquals("$where cropX even", 0, s.cropX % 2)
                 assertEquals("$where cropY even", 0, s.cropY % 2)
-                // 1x is the exact, UNROUNDED full frame (cropW == fullW, cropH ==
-                // fullH -- see the "1x is always the whole frame" invariant). Some
-                // of the sizes in this sweep are deliberately not %4/%2-aligned
-                // (1998, 1279, 977) to stress the CROP rounding math below; that is
-                // only guaranteed for the rounded (non-1x) stops, not for 1x itself.
+                // RULING R6: alignment binds CROPPED stops only. 1x is not a crop --
+                // it is the unmodified sensor frame, and "1x is the exact full
+                // frame" outranks the alignment rule. This is safe because
+                // capture.cpp already copes with an unaligned full width today:
+                // its `width % 4 == 0` / `width % 2 == 0` gates fall back to
+                // Packed12 or Raw16, so 1x on a sensor like 1998-wide behaves
+                // byte-for-byte as it already ships -- this is not a bug being
+                // papered over, it is the documented, pre-existing fallback path.
                 if (s.nominal != 1.0f) {
                     assertEquals("$where cropW % 4", 0, s.cropW % 4)
                     assertEquals("$where cropH % 2", 0, s.cropH % 2)
@@ -70,15 +76,20 @@ class ZoomLadderTest {
         }
     }
 
-    /** Ratios are strictly increasing -- swept over every size in [sweepSizes],
-     *  not just the 4096x3072 reference. Small sensors (e.g. 8x4) can round two
-     *  different nominal stops down to the same cropW/actual-ratio; build() must
-     *  de-duplicate those rather than emit a repeated or non-increasing ratio.
-     *  (The "never exceed 4x" half stays scoped to the 4096x3072 reference case,
-     *  as in the original test -- flooring cropW for the top nominal stop can
-     *  overshoot the 4.0 actual ratio on sizes not divisible by 16, e.g. 1998,
-     *  which is a separate, pre-existing property of the rounding math and not
-     *  what this ruling's de-duplication fixes.) */
+    /** Ratios are strictly increasing and never exceed the 4x product cap --
+     *  swept over every size in [sweepSizes], not just the 4096x3072 reference.
+     *
+     *  Two independent rounding failure modes hide behind "just test 4096":
+     *   - Small sensors (e.g. 16x12) can round two different nominal stops down
+     *     to the same cropW/actual-ratio; build() must de-duplicate those rather
+     *     than emit a repeated or non-increasing ratio (RULING R1(a)).
+     *   - Flooring cropW for the top (4x) nominal stop always pushes the ACTUAL
+     *     ratio ABOVE nominal, so on a width not divisible by 16 (e.g. 1998) the
+     *     top stop can silently overshoot the spec's hard 4x cap; build() must
+     *     round back up rather than let it through (RULING R5). This is invisible
+     *     at 4096 purely because 4096/4=1024 is already a multiple of 4 -- which
+     *     is exactly why this test must sweep sizes, not just the reference case.
+     */
     @Test fun ratiosStrictlyIncreaseAndNeverExceedFourX() {
         for ((w, h) in sweepSizes) {
             val stops = ZoomLadder.build(w, h, 10f, false)
@@ -88,8 +99,8 @@ class ZoomLadderTest {
                     stops[i].ratio > stops[i - 1].ratio,
                 )
             }
+            assertTrue("${w}x$h: last stop must not exceed 4x", stops.last().ratio <= 4.0f + 1e-6f)
         }
-        assertTrue(ZoomLadder.build(4096, 3072, 10f, false).last().ratio <= 4.0f + 1e-6f)
     }
 
     /** Clamp rule 1: a device that will not preview past 3.2x must not offer a

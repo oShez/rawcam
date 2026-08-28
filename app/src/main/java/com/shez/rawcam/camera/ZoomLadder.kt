@@ -68,15 +68,30 @@ object ZoomLadder {
                 out += full
                 continue
             }
-            val cropW = floorTo((fullW / nominal).toInt(), 4)
+            var cropW = floorTo((fullW / nominal).toInt(), 4)
             if (cropW < 4) continue
-            val ratio = fullW.toFloat() / cropW.toFloat()
+            var ratio = fullW.toFloat() / cropW.toFloat()
+            // RULING R5: rounding cropW DOWN always pushes the ACTUAL ratio ABOVE
+            // nominal, so the top stop can silently overshoot the spec's hard 4x
+            // product cap -- invisible on a 4096-wide sensor purely because
+            // 4096/4=1024 is already a multiple of 4. Round-down stays the general
+            // rule (it is what produces the spec's committed 4096x3072 table), but
+            // when the actual ratio would break the 4x cap, round cropW UP one
+            // step instead: cropW+4 is always enough, since cropW+4 > fullW/4
+            // implies fullW/(cropW+4) < 4x.
+            if (ratio > 4.0f) {
+                val roundedUp = cropW + 4
+                if (roundedUp > fullW) continue
+                cropW = roundedUp
+                ratio = fullW.toFloat() / cropW.toFloat()
+            }
             if (ratio > maxRatio) continue
             // RULING R1(a): flooring cropW to a multiple of 4 can make two
             // different nominal stops land on the same actual ratio (e.g. on an
             // 8x4 sensor, nominal 1.4 and 2.0 both floor to cropW=4, ratio=2.0).
             // The spec invariant is that ratios strictly increase, so a stop
-            // that repeats the previously accepted stop's ratio is skipped.
+            // that repeats the previously accepted stop's (FINAL, post-R5) ratio
+            // is skipped.
             if (ratio == out.last().ratio) continue
             val cropH = floorTo((fullH / ratio).toInt(), 2)
             if (cropH < 2) continue
