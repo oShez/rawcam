@@ -8,7 +8,13 @@ object NativeBridge {
     // returns a Surface for the Camera2 RAW target, or null. illuminant1/2 are
     // DNG/EXIF LightSource codes (illuminant2 == 0 means the sensor exposed no
     // second calibration point, and colorMatrix2 is then ignored).
-    external fun nativeStartRecording(path: String, width: Int, height: Int,
+    //
+    // fullW/fullH size the AImageReader -- the camera always delivers full
+    // sensor, since CONTROL_ZOOM_RATIO does not crop RAW. cropX/cropY/cropW/
+    // cropH are the sub-rectangle written to the file. At 1x pass 0, 0,
+    // fullW, fullH.
+    external fun nativeStartRecording(path: String, fullW: Int, fullH: Int,
+        cropX: Int, cropY: Int, cropW: Int, cropH: Int,
         cfa: Int, whiteLevel: Int, blackLevel: IntArray /*4*/,
         colorMatrix1: FloatArray /*9*/, illuminant1: Int, illuminant2: Int,
         colorMatrix2: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,

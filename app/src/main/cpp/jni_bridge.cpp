@@ -26,7 +26,8 @@ Java_com_shez_rawcam_NativeBridge_nativeBenchmarkWrite(
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_shez_rawcam_NativeBridge_nativeStartRecording(
-    JNIEnv* env, jobject, jstring jpath, jint width, jint height, jint cfa,
+    JNIEnv* env, jobject, jstring jpath, jint fullW, jint fullH,
+    jint cropX, jint cropY, jint cropW, jint cropH, jint cfa,
     jint whiteLevel, jintArray jblackLevel, jfloatArray jcolorMatrix1,
     jint illuminant1, jint illuminant2, jfloatArray jcolorMatrix2,
     jint fpsNum, jint fpsDen, jstring jdeviceName, jboolean compressRecordings) {
@@ -59,10 +60,10 @@ Java_com_shez_rawcam_NativeBridge_nativeStartRecording(
     for (int i = 0; i < 9; i++) colorMatrix2[i] = tmp[i];
   }
 
-  return rawcam::Capture::instance().start(env, path, width, height, cfa, whiteLevel,
-                                            blackLevel, colorMatrix1, illuminant1,
-                                            illuminant2, colorMatrix2, fpsNum, fpsDen,
-                                            deviceName, compressRecordings == JNI_TRUE);
+  return rawcam::Capture::instance().start(env, path, fullW, fullH, cropX, cropY, cropW,
+                                            cropH, cfa, whiteLevel, blackLevel, colorMatrix1,
+                                            illuminant1, illuminant2, colorMatrix2, fpsNum,
+                                            fpsDen, deviceName, compressRecordings == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT void JNICALL

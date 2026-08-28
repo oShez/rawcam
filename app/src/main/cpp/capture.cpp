@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "rawcam/crop.h"
 #include "rawcam/pack10.h"
 #include "rawcam/rawv_codec.h"
 
@@ -90,7 +91,12 @@ void Capture::processImage(AImage* image) {
     rowStride_ = rowStride;
 
     FileHeader hdr = headerTemplate_;
-    hdr.rowStrideBytes = (uint32_t)rowStride_;
+    // The file always describes the frame it actually contains. A CROP is
+    // written de-strided at cropW*2 bytes per row. At 1x, though, the Raw16
+    // payload is still the camera's buffer VERBATIM -- padding included -- so
+    // the stride must keep reporting the camera's own value, or every 1x clip
+    // on a padded-stride device would decode misaligned. (RULING R2)
+    hdr.rowStrideBytes = cropped_ ? (uint32_t)width_ * 2u : (uint32_t)rowStride_;
     switch ((PackMode)hdr.packMode) {
       case PackMode::Packed10:
         hdr.frameSizeBytes = (uint32_t)packed10Size((size_t)width_ * (size_t)height_);
@@ -101,13 +107,23 @@ void Capture::processImage(AImage* image) {
         packBuf_.resize(hdr.frameSizeBytes);
         break;
       case PackMode::Raw16:
-        hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
+        // RULING R2 -- CONDITIONAL, not an unconditional cropW*2*cropH. A crop
+        // is de-strided to cropW*2 per row, but at 1x the payload written is
+        // the delivered buffer verbatim, so its size must stay the CAMERA's
+        // stride times height. Making this unconditional would silently
+        // corrupt every 1x Raw16 clip on any device that pads its stride.
+        hdr.frameSizeBytes = cropped_ ? (uint32_t)width_ * 2u * (uint32_t)height_
+                                      : (uint32_t)rowStride_ * (uint32_t)height_;
+        if (cropped_) rawCropBuf_.resize(hdr.frameSizeBytes);
         break;
       case PackMode::CompressedPredictive:
         // frameSizeBytes is only an allocation ceiling for this mode (Task 1)
         // -- size it to what Raw16 would have needed, the guaranteed-safe
-        // upper bound for a frame that doesn't compress at all.
-        hdr.frameSizeBytes = (uint32_t)rowStride_ * (uint32_t)height_;
+        // upper bound for a frame that doesn't compress at all. Same R2
+        // conditional, and for the same reason: this mode's uncompressed
+        // fallback writes exactly what Raw16 would, so the two must agree.
+        hdr.frameSizeBytes = cropped_ ? (uint32_t)width_ * 2u * (uint32_t)height_
+                                      : (uint32_t)rowStride_ * (uint32_t)height_;
         compressBuf_.resize(hdr.frameSizeBytes);
         break;
     }
@@ -144,8 +160,11 @@ void Capture::processImage(AImage* image) {
     const size_t packedRowBytes =
         mode == PackMode::Packed10 ? packed10Size((size_t)width_) : packed12Size((size_t)width_);
     for (int32_t row = 0; row < height_; row++) {
-      const uint16_t* srcRow =
-          reinterpret_cast<const uint16_t*>(data + (size_t)row * (size_t)rowStride_);
+      // At 1x cropBase16() returns `data` unchanged, so this is the same
+      // address arithmetic as before the crop existed.
+      const uint16_t* srcRow = reinterpret_cast<const uint16_t*>(
+          rawcam::cropBase16(data, (size_t)rowStride_, (uint32_t)cropX_, (uint32_t)cropY_) +
+          (size_t)row * (size_t)rowStride_);
       uint8_t* dstRow = packBuf_.data() + (size_t)row * packedRowBytes;
       if (mode == PackMode::Packed10) {
         pack10(srcRow, (size_t)width_, dstRow);
@@ -168,7 +187,13 @@ void Capture::processImage(AImage* image) {
       // MUST match exporter.cpp's decode-side bitDepth derivation exactly --
       // a mismatch would corrupt the first two rows/columns of every frame.
       const uint32_t bitDepth = 32 - __builtin_clz(headerTemplate_.whiteLevel);
-      job.slot = frameEncoder_->computeBands(reinterpret_cast<const uint16_t*>(data),
+      // The crop is a base-pointer offset with the CAMERA's stride left alone:
+      // predictAt() guards on band-local x and y, so the encoder never reads
+      // outside the crop rectangle. test_crop pins this as bit-exact against
+      // encoding the de-strided crop as a standalone frame.
+      const uint8_t* encBase =
+          rawcam::cropBase16(data, (size_t)rowStride_, (uint32_t)cropX_, (uint32_t)cropY_);
+      job.slot = frameEncoder_->computeBands(reinterpret_cast<const uint16_t*>(encBase),
                                               rowStrideSamples, bitDepth);
       job.hasSlot = true;
     }
@@ -181,7 +206,17 @@ void Capture::processImage(AImage* image) {
     // recycled. This keeps AImage recycling exactly as fast as today, not
     // entangled with Finish's pace: a stalled Finish stage must never starve
     // the camera's own buffer pool.
-    job.rawCopy.assign(data, data + headerTemplate_.frameSizeBytes);
+    // The fallback copy must be whatever frameSizeBytes describes, since
+    // finishLoop() writes it verbatim: the DE-STRIDED crop when cropped, and
+    // the delivered buffer untouched at 1x (RULING R2 keeps those sizes in
+    // agreement).
+    job.rawCopy.resize(headerTemplate_.frameSizeBytes);
+    if (cropped_) {
+      rawcam::cropPlane16(data, (size_t)rowStride_, (uint32_t)cropX_, (uint32_t)cropY_,
+                          (uint32_t)width_, (uint32_t)height_, job.rawCopy.data());
+    } else {
+      std::memcpy(job.rawCopy.data(), data, headerTemplate_.frameSizeBytes);
+    }
 
     AImage_delete(image);
 
@@ -207,7 +242,14 @@ void Capture::processImage(AImage* image) {
   } else {
     meta.payloadBytes = headerTemplate_.frameSizeBytes;
     meta.compressed = 0;
-    ok = writer_->writeFrame(meta, data, headerTemplate_.frameSizeBytes);
+    // At 1x this writes the delivered buffer verbatim, exactly as before.
+    const uint8_t* payload = data;
+    if (cropped_) {
+      rawcam::cropPlane16(data, (size_t)rowStride_, (uint32_t)cropX_, (uint32_t)cropY_,
+                          (uint32_t)width_, (uint32_t)height_, rawCropBuf_.data());
+      payload = rawCropBuf_.data();
+    }
+    ok = writer_->writeFrame(meta, payload, headerTemplate_.frameSizeBytes);
   }
   if (!ok) {
     // Partial-write failure (e.g. ENOSPC mid-recording): the frame was not
@@ -312,15 +354,19 @@ void Capture::finishLoop() {
 
 // --- Lifecycle --------------------------------------------------------------
 
-jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int32_t height,
+jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int32_t fullH,
+                       int32_t cropX, int32_t cropY, int32_t cropW, int32_t cropH,
                        int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                        const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                        const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
                        const std::string& deviceName, bool compressRecordings) {
   if (reader_ != nullptr) return nullptr;  // already recording
 
-  width_ = width;
-  height_ = height;
+  width_ = cropW;
+  height_ = cropH;
+  cropX_ = cropX;
+  cropY_ = cropY;
+  cropped_ = (cropX != 0 || cropY != 0 || cropW != fullW || cropH != fullH);
   rowStride_ = 0;
   writerInitialized_ = false;
   writeFailed_ = false;
@@ -354,8 +400,8 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   FileHeader hdr{};
   hdr.magic = kMagic;
   hdr.version = kVersion;
-  hdr.width = (uint32_t)width;
-  hdr.height = (uint32_t)height;
+  hdr.width = (uint32_t)cropW;
+  hdr.height = (uint32_t)cropH;
   hdr.rowStrideBytes = 0;  // filled in on first frame
   // Pick the tightest packing that can hold this sensor's actual range without
   // truncation. Packed10/Packed12 mask to 0x3FF/0xFFF respectively (see
@@ -372,7 +418,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
   // compressRecordings overrides the Packed10/Packed12/Raw16 choice entirely:
   // the predictor works per-pixel with no group-size requirement, so it
   // applies regardless of width parity (unlike Packed10/12's w4/w2 gates).
-  const bool w4 = width % 4 == 0, w2 = width % 2 == 0;
+  const bool w4 = cropW % 4 == 0, w2 = cropW % 2 == 0;
   hdr.packMode = (uint32_t)(compressRecordings                ? PackMode::CompressedPredictive
                              : whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
                              : whiteLevel <= 0xFFF && w2       ? PackMode::Packed12
@@ -396,7 +442,7 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t width, int3
     frameEncoder_ = std::make_unique<ParallelFrameEncoder>((uint32_t)width_, (uint32_t)height_);
   }
 
-  media_status_t status = AImageReader_new(width, height, AIMAGE_FORMAT_RAW16, 12, &reader_);
+  media_status_t status = AImageReader_new(fullW, fullH, AIMAGE_FORMAT_RAW16, 12, &reader_);
   if (status != AMEDIA_OK || reader_ == nullptr) {
     reader_ = nullptr;
     return nullptr;

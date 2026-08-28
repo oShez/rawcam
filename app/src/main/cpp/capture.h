@@ -26,11 +26,22 @@ class Capture {
  public:
   static Capture& instance();
 
-  // Creates the AImageReader (RAW16, maxImages=12), starts the writer thread,
-  // and returns a Surface wrapping the reader's window for the Camera2 RAW
-  // target -- or nullptr on failure. RawvWriter creation is deferred to the
-  // first delivered frame so the real row stride goes into the file header.
-  jobject start(JNIEnv* env, const std::string& path, int32_t width, int32_t height,
+  // Creates the AImageReader (RAW16, maxImages=12) at FULL sensor size, starts
+  // the writer thread, and returns a Surface wrapping the reader's window for
+  // the Camera2 RAW target -- or nullptr on failure. RawvWriter creation is
+  // deferred to the first delivered frame so the real row stride is known.
+  //
+  // fullW/fullH size the READER (the camera always delivers full sensor;
+  // CONTROL_ZOOM_RATIO does not crop RAW -- device-verified on the Xiaomi 14
+  // Ultra: a forced 2.0 ratio still delivered 4096x3072). cropX/cropY/cropW/
+  // cropH are the sub-rectangle actually written to the file, and are what the
+  // header reports. At 1x the caller passes cropX=cropY=0, cropW=fullW,
+  // cropH=fullH and every crop branch below is skipped.
+  //
+  // cropX and cropY MUST be even (Bayer phase) and cropW a multiple of 4
+  // (Packed10's group gate) -- ZoomLadder guarantees both.
+  jobject start(JNIEnv* env, const std::string& path, int32_t fullW, int32_t fullH,
+                 int32_t cropX, int32_t cropY, int32_t cropW, int32_t cropH,
                  int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                  const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                  const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
@@ -126,9 +137,17 @@ class Capture {
   bool audioInfoSet_ = false;
   FileHeader headerTemplate_{};
   std::string path_;
-  int32_t width_ = 0;
-  int32_t height_ = 0;
-  int32_t rowStride_ = 0;
+  int32_t width_ = 0;   // CROPPED width -- what the header and encoder use
+  int32_t height_ = 0;  // CROPPED height
+  int32_t rowStride_ = 0;  // the CAMERA's full-frame stride, as delivered
+  int32_t cropX_ = 0;
+  int32_t cropY_ = 0;
+  // True when the crop is the whole frame. Guards every crop branch so the 1x
+  // path stays byte-identical to the pre-zoom code.
+  bool cropped_ = false;
+  // De-strided crop scratch for Raw16 and the compressed uncompressed-fallback.
+  // Empty (and untouched) at 1x.
+  std::vector<uint8_t> rawCropBuf_;
   bool writerInitialized_ = false;
   // Set on first write failure (by the Finish thread, for CompressedPredictive
   // recordings); read by the writer/Compute thread at the top of every

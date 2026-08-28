@@ -586,7 +586,11 @@ class CameraController(private val context: Context) {
 
         val spec = rawSpec
         val raw = NativeBridge.nativeStartRecording(
-            path, spec.width, spec.height, spec.cfa, spec.whiteLevel,
+            path, spec.width, spec.height,
+            // Task 5 replaces this with the selected zoom stop's rectangle.
+            /* cropX = */ 0, /* cropY = */ 0,
+            /* cropW = */ spec.width, /* cropH = */ spec.height,
+            spec.cfa, spec.whiteLevel,
             spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
             spec.deviceName, compressRecordings,
