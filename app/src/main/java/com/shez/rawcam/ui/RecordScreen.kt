@@ -939,6 +939,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     iso = s.iso, shutterDenom = stops.getOrElse(s.shutterIndex) { stops.last() },
                     focusDiopters = s.focusDiopters, kelvin = s.kelvin, tint = s.tint, fps = s.fps,
                     lensIndex = s.lensIndex, sizeIndex = s.sizeIndex,
+                    zoomStop = controller.zoomIndex,
                     anchorR = anchor?.first?.red ?: 0f, anchorG = anchor?.first?.greenEven ?: 0f,
                     anchorB = anchor?.first?.blue ?: 0f, anchorKelvin = anchor?.second ?: 5600,
                 )

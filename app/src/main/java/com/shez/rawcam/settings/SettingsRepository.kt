@@ -87,6 +87,10 @@ data class CaptureState(
     val iso: Int, val shutterDenom: Int, val focusDiopters: Float,
     val kelvin: Int, val tint: Int, val fps: Int,
     val lensIndex: Int, val sizeIndex: Int,
+    /** Index into the lens+size's zoom ladder. Validated against the CURRENT
+     *  ladder on restore -- a stop that clamping has removed falls back to 0
+     *  (1x), the same discipline lensIndex/sizeIndex already follow. */
+    val zoomStop: Int,
     val anchorR: Float, val anchorG: Float, val anchorB: Float,
     val anchorKelvin: Int,
 )
@@ -176,6 +180,7 @@ object SettingsRepository {
     private val KEY_CS_FPS = intPreferencesKey("cs_fps")
     private val KEY_CS_LENS_INDEX = intPreferencesKey("cs_lensIndex")
     private val KEY_CS_SIZE_INDEX = intPreferencesKey("cs_sizeIndex")
+    private val KEY_CS_ZOOM_STOP = intPreferencesKey("cs_zoomStop")
     private val KEY_CS_ANCHOR_R = floatPreferencesKey("cs_anchorR")
     private val KEY_CS_ANCHOR_G = floatPreferencesKey("cs_anchorG")
     private val KEY_CS_ANCHOR_B = floatPreferencesKey("cs_anchorB")
@@ -305,6 +310,7 @@ object SettingsRepository {
                         fps = prefs[KEY_CS_FPS] ?: fallback.defaultFps,
                         lensIndex = prefs[KEY_CS_LENS_INDEX] ?: fallback.defaultLensIndex,
                         sizeIndex = prefs[KEY_CS_SIZE_INDEX] ?: fallback.defaultSizeIndex,
+                        zoomStop = prefs[KEY_CS_ZOOM_STOP] ?: 0,
                         anchorR = prefs[KEY_CS_ANCHOR_R] ?: 0f,
                         anchorG = prefs[KEY_CS_ANCHOR_G] ?: 0f,
                         anchorB = prefs[KEY_CS_ANCHOR_B] ?: 0f,
@@ -323,6 +329,7 @@ object SettingsRepository {
             prefs[KEY_CS_FPS] = s.fps
             prefs[KEY_CS_LENS_INDEX] = s.lensIndex
             prefs[KEY_CS_SIZE_INDEX] = s.sizeIndex
+            prefs[KEY_CS_ZOOM_STOP] = s.zoomStop
             prefs[KEY_CS_ANCHOR_R] = s.anchorR
             prefs[KEY_CS_ANCHOR_G] = s.anchorG
             prefs[KEY_CS_ANCHOR_B] = s.anchorB
