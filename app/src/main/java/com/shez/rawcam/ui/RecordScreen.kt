@@ -28,6 +28,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -131,6 +132,7 @@ import com.shez.rawcam.camera.LensProfile
 import com.shez.rawcam.camera.ShutterStops
 import com.shez.rawcam.camera.UnsupportedReason
 import com.shez.rawcam.camera.ZebraMask
+import com.shez.rawcam.camera.ZoomStop
 import com.shez.rawcam.export.ExportService
 import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.preview.PreviewService
@@ -197,6 +199,11 @@ data class RecordUiState(
     val captureRates: Map<String, Float> = emptyMap(),
     val lensIndex: Int = 0,
     val sizeIndex: Int = 0,
+    /** The ladder for the active lens+size, republished whenever the mode
+     *  changes. Single-entry (1x only) on a device that advertises no zoom or
+     *  whose active array was a substituted guess. */
+    val zoomStops: List<ZoomStop> = emptyList(),
+    val zoomIndex: Int = 0,
     val kelvin: Int = 5600,
     val tint: Int = 0,
     val controlTier: ControlTier = ControlTier.FULL,
@@ -442,6 +449,12 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             val sizeIndex = (saved?.sizeIndex ?: s0.defaultSizeIndex)
                 .let { if (it in controller.lenses[lensIndex].sizes.indices) it else 0 }
             if (lensIndex != controller.defaultLensIndex || sizeIndex != 0) controller.selectMode(lensIndex, sizeIndex)
+            // AFTER the mode is settled: the ladder is built by
+            // applySelectedLens (from initialize() on the default path, or from
+            // selectMode above), so it does not exist before this point.
+            // setZoomIndex rejects an out-of-range index, so a stop that
+            // clamping has removed silently stays at 1x.
+            saved?.zoomStop?.let { controller.setZoomIndex(it) }
             val lens = controller.lenses.getOrNull(lensIndex)
             val fps = (saved?.fps ?: s0.defaultFps)
                 .let { f -> fpsOptions(controller.rawSpec).let { o -> if (f in o) f else o.first() } }
@@ -844,6 +857,16 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setResolution(index: Int) = setMode(_uiState.value.lensIndex, index)
 
+    /** Selects a zoom stop. Inert while recording or mid-transition -- the
+     *  crop is baked into the file and .rawv cannot change frame size mid-take. */
+    fun setZoom(index: Int) {
+        val s = _uiState.value
+        if (s.recording || s.busy) return
+        if (!controller.setZoomIndex(index)) return
+        _uiState.update { it.copy(zoomIndex = index) }
+        persistCaptureState()
+    }
+
     private fun setMode(lensIndex: Int, sizeIndex: Int) {
         val s = _uiState.value
         if (s.recording || s.busy) return
@@ -897,6 +920,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             previewReady = false,
             controlTier = lens?.controlTier ?: ControlTier.FULL,
             exposureRangeNs = lens?.exposureRangeNs,
+            // The ladder must ride along with rawSpec: applySelectedLens has
+            // already rebuilt it for the new lens+size, and without this the
+            // chip would keep offering the PREVIOUS lens's stops.
+            zoomStops = controller.zoomStops,
+            zoomIndex = controller.zoomIndex,
         )
     }
 
@@ -972,6 +1000,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 val frameBytes = frameRecordBytes(spec)
                 val rateKey = captureRateKey(
                     s.lenses.getOrNull(s.lensIndex), spec, s.settings.compressRecordings,
+                    s.zoomStops.getOrNull(s.zoomIndex),
                 )
                 val available = StatFs(controller.clipsDir.absolutePath).availableBytes
                 val required = frameBytes * s.fps * s.settings.freeSpaceReserveSeconds.toLong()
@@ -1272,9 +1301,23 @@ private fun frameRecordBytes(spec: CameraController.RawSpec): Long {
  * fps is deliberately absent: what gets measured is bytes per FRAME, so a ratio
  * learned at 24fps is equally true at 30 and the readout never has to relearn it.
  */
-private fun captureRateKey(lens: LensProfile?, spec: CameraController.RawSpec?, compress: Boolean): String =
+private fun captureRateKey(
+    lens: LensProfile?,
+    spec: CameraController.RawSpec?,
+    compress: Boolean,
+    zoom: ZoomStop?,
+): String =
     if (lens == null || spec == null) ""
-    else "${lens.cameraId}|${spec.width}x${spec.height}|${spec.whiteLevel}|${if (compress) "c" else "r"}"
+    else {
+        // Zoom joins the key because it changes the RECORDED geometry: a
+        // bytes-per-frame ratio learned at 1x and read back at 4x would
+        // overstate the time left by roughly the crop factor. A null stop or
+        // the 1x stop yields the SAME key text previous versions persisted, so
+        // every already-learned 1x rate survives the upgrade.
+        val w = zoom?.cropW ?: spec.width
+        val h = zoom?.cropH ?: spec.height
+        "${lens.cameraId}|${w}x$h|${spec.whiteLevel}|${if (compress) "c" else "r"}"
+    }
 
 /** Frames a take must have written before its bytes-per-frame ratio means anything:
  *  the writer buffers, so early frames' bytes reach the file late and drag the ratio
@@ -1315,7 +1358,8 @@ private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec)
     val audioPerSecond =
         if (state.settings.recordAudio) 3L * AudioRecorder.SAMPLE_RATE * state.audioChannels else 0L
     val ratio = state.captureRates[
-        captureRateKey(state.lenses.getOrNull(state.lensIndex), spec, state.settings.compressRecordings)
+        captureRateKey(state.lenses.getOrNull(state.lensIndex), spec, state.settings.compressRecordings,
+                       state.zoomStops.getOrNull(state.zoomIndex))
     ]
     val frameBytes = (frameRecordBytes(spec) * (ratio ?: 1f).toDouble()).toLong()
     val perSecond = frameBytes * state.fps + audioPerSecond
@@ -1377,7 +1421,7 @@ private fun gridPoint(x: Float, y: Float): Offset = Offset(x, y)
 internal val KELVIN_STOPS = (2000..10000 step 100).toList()
 internal val TINT_STOPS = (-50..50 step 2).toList()
 
-private enum class Param { LENS, RES, ISO, SHUTTER, FOCUS, WB, AUDIO }
+private enum class Param { LENS, RES, ZOOM, ISO, SHUTTER, FOCUS, WB, AUDIO }
 
 @Composable
 fun RecordScreen(
@@ -1581,6 +1625,30 @@ fun RecordScreen(
                             expanded = null
                         } else if (state.previewReady && !state.recording) {
                             viewModel.meterAt(offset.x / this.size.width.toFloat(), offset.y / this.size.height.toFloat())
+                        }
+                    }
+                }
+                // A SEPARATE pointerInput so tap-to-meter above is untouched.
+                .pointerInput(state.previewReady, state.recording, state.zoomStops.size) {
+                    // Pinch snaps to the fixed ladder rather than zooming
+                    // continuously: every stop is a rectangle the crop can
+                    // actually realize, and a continuous ratio would mean a crop
+                    // that changed under the user's fingers.
+                    if (state.recording || state.zoomStops.size < 2) return@pointerInput
+                    var accum = 1f
+                    detectTransformGestures { _, _, gestureZoom, _ ->
+                        accum *= gestureZoom
+                        // Roughly a quarter-stop of travel before it snaps, so a
+                        // small stray pinch while framing doesn't change the take.
+                        if (accum > 1.25f) {
+                            viewModel.setZoom(
+                                (viewModel.uiState.value.zoomIndex + 1)
+                                    .coerceAtMost(state.zoomStops.lastIndex))
+                            accum = 1f
+                        } else if (accum < 0.8f) {
+                            viewModel.setZoom(
+                                (viewModel.uiState.value.zoomIndex - 1).coerceAtLeast(0))
+                            accum = 1f
                         }
                     }
                 }
@@ -1800,6 +1868,16 @@ fun RecordScreen(
                             ParamRow("RES", selectedSize.label, expanded == Param.RES, modeEnabled) {
                                 expanded = if (expanded == Param.RES) null else Param.RES
                             }
+                            // Hidden entirely when the device offers no zoom -- a row
+                            // that cannot do anything is worse than no row. Sits with
+                            // LENS/RES inside the !recording gate because zoom is
+                            // likewise locked for the whole take.
+                            if (state.zoomStops.size > 1) {
+                                val z = state.zoomStops.getOrNull(state.zoomIndex)
+                                ParamRow("ZOOM", z?.label ?: "1x", expanded == Param.ZOOM, modeEnabled) {
+                                    expanded = if (expanded == Param.ZOOM) null else Param.ZOOM
+                                }
+                            }
                         }
                         ParamRow("ISO", "${state.iso}", expanded == Param.ISO) {
                             expanded = if (expanded == Param.ISO) null else Param.ISO
@@ -1965,6 +2043,22 @@ fun RecordScreen(
                                         selectedIndex = state.sizeIndex,
                                         enabled = modeEnabled,
                                         onSelect = { viewModel.setResolution(it) },
+                                    )
+                                }
+                                Param.ZOOM -> {
+                                    // The recorded resolution rides along with the
+                                    // heading: the uniform 4x cap trades pixels for
+                                    // reach, and this keeps that cost visible while
+                                    // framing rather than discovered in post.
+                                    val z = state.zoomStops.getOrNull(state.zoomIndex)
+                                    ParamLabel(
+                                        if (z == null) "ZOOM" else "ZOOM  ${z.cropW}x${z.cropH}"
+                                    )
+                                    OptionPills(
+                                        labels = state.zoomStops.map { it.label },
+                                        selectedIndex = state.zoomIndex,
+                                        enabled = modeEnabled,
+                                        onSelect = { viewModel.setZoom(it) },
                                     )
                                 }
                                 Param.ISO -> {
