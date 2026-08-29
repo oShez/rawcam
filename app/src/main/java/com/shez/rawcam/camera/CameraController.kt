@@ -952,19 +952,52 @@ class CameraController(private val context: Context) {
     }
 
     private fun meteringRectFor(nx: Float, ny: Float, arr: Rect): MeteringRectangle {
-        // Preview is locked landscape and fills the active array; map normalized
-        // (nx, ny) directly into active-array pixels. meterRegionFraction is the
-        // metered box's fraction of width/height (Settings.meterRegion); half of
-        // that is the half-width/half-height around the tap point.
-        val cx = (arr.left + nx.coerceIn(0f, 1f) * arr.width()).toInt()
-        val cy = (arr.top + ny.coerceIn(0f, 1f) * arr.height()).toInt()
+        // Preview is locked landscape and fills the active array, so a normalized
+        // (nx, ny) maps into active-array pixels -- but it must be mapped through
+        // the ACTIVE ZOOM CROP first.
+        //
+        // This is MEASURED device behaviour, not documented behaviour. The
+        // CONTROL_ZOOM_RATIO documentation says 3A regions move with the
+        // post-zoom field of view, which would make a plain full-array mapping
+        // correct; this HAL (Xiaomi 14 Ultra) does not do that. Mapping across
+        // the whole array sent an edge tap clean outside the visible frame -- at
+        // 2x, nx=1.0 resolved to x=4096 while the crop spans 1024..3072 -- so AF
+        // ignored it. Centre taps were unaffected because both mappings agree
+        // exactly at the centre. Confirmed by control: edge focus is fine at 1x,
+        // where cropX=0/cropW=fullW make the two mappings identical.
+        //
+        // The crop is applied as NORMALIZED FRACTIONS of the RAW spec rather than
+        // by adding cropX/cropW to `arr` directly: those are RAW-spec pixels and
+        // `arr` is the active array, and the two are not guaranteed to be the
+        // same size for every lens/size. Fractions keep all arithmetic in
+        // active-array space and reduce to the previous expressions exactly when
+        // the stop is 1x or absent.
+        val z = zoomStop
+        val specW = rawSpec.width.coerceAtLeast(1).toFloat()
+        val specH = rawSpec.height.coerceAtLeast(1).toFloat()
+        val fx = (z?.cropX ?: 0) / specW
+        val fy = (z?.cropY ?: 0) / specH
+        val fw = (z?.cropW ?: rawSpec.width) / specW
+        val fh = (z?.cropH ?: rawSpec.height) / specH
+
+        val cx = (arr.left + (fx + nx.coerceIn(0f, 1f) * fw) * arr.width()).toInt()
+        val cy = (arr.top + (fy + ny.coerceIn(0f, 1f) * fh) * arr.height()).toInt()
+        // meterRegionFraction is the metered box's fraction of the VISIBLE frame,
+        // so it scales with the crop too. Sized off the full array it would cover
+        // ~20% of the frame at 2x instead of the intended 10%.
         val halfFrac = meterRegionFraction / 2f
-        val halfW = (arr.width() * halfFrac).toInt().coerceAtLeast(1)
-        val halfH = (arr.height() * halfFrac).toInt().coerceAtLeast(1)
-        val left = (cx - halfW).coerceIn(arr.left, arr.right - 1)
-        val top = (cy - halfH).coerceIn(arr.top, arr.bottom - 1)
-        val right = (cx + halfW).coerceIn(left + 1, arr.right)
-        val bottom = (cy + halfH).coerceIn(top + 1, arr.bottom)
+        val halfW = (arr.width() * fw * halfFrac).toInt().coerceAtLeast(1)
+        val halfH = (arr.height() * fh * halfFrac).toInt().coerceAtLeast(1)
+        // Clamped to the CROP's projection, not the whole array: a region outside
+        // the visible frame is precisely the failure this is fixing.
+        val minX = (arr.left + fx * arr.width()).toInt()
+        val maxX = (minX + fw * arr.width()).toInt().coerceAtMost(arr.right)
+        val minY = (arr.top + fy * arr.height()).toInt()
+        val maxY = (minY + fh * arr.height()).toInt().coerceAtMost(arr.bottom)
+        val left = (cx - halfW).coerceIn(minX, maxX - 1)
+        val top = (cy - halfH).coerceIn(minY, maxY - 1)
+        val right = (cx + halfW).coerceIn(left + 1, maxX)
+        val bottom = (cy + halfH).coerceIn(top + 1, maxY)
         return MeteringRectangle(left, top, right - left, bottom - top, MeteringRectangle.METERING_WEIGHT_MAX)
     }
 
