@@ -2814,10 +2814,24 @@ private fun ParamRow(
             Box(Modifier.weight(1f)) {
                 Text(label, color = RawCamColors.Muted, style = RawCamType.Label, maxLines = 1)
             }
+            // Long values step DOWN instead of eating the label. The weight above
+            // makes the label the only thing that can lose space, which is right
+            // for a wide value like "1/48" but wrong for a resolution: "4096x2304"
+            // at the full 17sp needs about 92dp of a ~113dp rail and squeezed
+            // "RES" clean off the row, leaving one of eight rows unlabelled.
+            //
+            // Mono, so width is just length * advance and a length threshold is
+            // exact rather than a guess. Only resolutions are long enough to
+            // trigger it; every existing value ("10000K", "1/48", "23mm") is six
+            // characters or fewer and renders unchanged at 17sp.
             Text(
                 value,
                 color = mark ?: RawCamColors.OnSurface,
-                style = RawCamType.Value,
+                style = when {
+                    value.length >= 9 -> RawCamType.Value.copy(fontSize = 12.sp)
+                    value.length >= 7 -> RawCamType.Value.copy(fontSize = 14.sp)
+                    else -> RawCamType.Value
+                },
                 maxLines = 1,
             )
             // Points down when open, right when closed: the same glyph states whether
