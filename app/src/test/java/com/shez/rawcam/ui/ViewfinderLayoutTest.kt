@@ -71,6 +71,37 @@ class ViewfinderLayoutTest {
         assertEquals(1080, h)
     }
 
+    /**
+     * The bug the user actually saw. The side bar's width is derived from the
+     * picture width, and below 104dp the rail gives up and falls back to a
+     * horizontally scrolling chip strip laid over the frame. Capping the picture
+     * is not enough on its own -- the bar arithmetic has to use the same factor,
+     * or 16:9 measures a bar half its real width and degrades anyway.
+     */
+    @Test fun theRailStillFitsAtSixteenNine() {
+        // Mirrors the composable: bar = (screen - picture) / 2, in px here.
+        fun barWidth(previewAspect: Float): Float =
+            (screenW - screenH * previewWidthFactor(previewAspect)) / 2f
+
+        val fourThreeBar = barWidth(4f / 3f)
+        val sixteenNineBar = barWidth(16f / 9f)
+        assertEquals("16:9 must leave the same bar as 4:3", fourThreeBar, sixteenNineBar, 0.5f)
+        // 480px on this device. The old formula gave 240 here, which is what
+        // pushed railWidth under the 104dp threshold and triggered the fallback.
+        assertEquals(480f, sixteenNineBar, 0.5f)
+    }
+
+    /** The two sites must not drift apart again: the factor the bar measures with
+     *  has to be the width the viewfinder actually takes. */
+    @Test fun widthFactorAgreesWithTheViewfinderSizing() {
+        var a = 1f
+        while (a <= 4f) {
+            val fromSizing = previewHeightFraction(a) * a
+            assertEquals("factor disagrees at aspect $a", fromSizing, previewWidthFactor(a), 1e-6f)
+            a += 0.01f
+        }
+    }
+
     @Test fun theRailsStayClearOfThePicture() {
         // Measured bounds from uiautomator on the device: left rail x163..459,
         // right action buttons x2089..2341. The picture is centred, so it must

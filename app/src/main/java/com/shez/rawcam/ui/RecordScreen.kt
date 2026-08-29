@@ -1365,6 +1365,19 @@ private const val RAIL_SAFE_ASPECT = 4f / 3f
 internal fun previewHeightFraction(previewAspect: Float): Float =
     (RAIL_SAFE_ASPECT / previewAspect).coerceAtMost(1f)
 
+/**
+ * Picture width as a multiple of the available HEIGHT, i.e. what the viewfinder
+ * actually ends up occupying once [previewHeightFraction] has been applied.
+ *
+ * This exists so the side-bar arithmetic and the viewfinder cannot drift apart.
+ * They are two computations of one quantity, and when they disagreed the rail
+ * measured a 16:9 bar as half its real width, decided it did not fit, and
+ * dropped to its chip-strip fallback -- while the picture had in fact been
+ * capped to the 4:3 width and the bar was just as wide as at 4:3.
+ */
+internal fun previewWidthFactor(previewAspect: Float): Float =
+    previewHeightFraction(previewAspect) * previewAspect
+
 /** Frames a take must have written before its bytes-per-frame ratio means anything:
  *  the writer buffers, so early frames' bytes reach the file late and drag the ratio
  *  down. 48 = two seconds at 24fps. */
@@ -1857,10 +1870,18 @@ fun RecordScreen(
             // maxHeight smaller, which under-estimated the preview width, which
             // over-estimated the bar -- and the rail's values spilled onto the picture.
             //
-            // Clamped because the same app runs on other sensors:
-            // a 16:9 mode leaves a far narrower bar, and a rail wider than the bar would
-            // start covering the very image this move exists to uncover.
-            val previewWidth = maxHeight * (spec.width.toFloat() / spec.height.toFloat())
+            // Clamped because the same app runs on other sensors: a rail wider than the
+            // bar would start covering the very image this move exists to uncover.
+            //
+            // The width MUST come from previewWidthFactor, the same factor the
+            // viewfinder is sized with. These are two computations of one quantity and
+            // they used to disagree: this one derived width from height at the raw
+            // sensor aspect, so a 16:9 mode measured a bar half its real width, decided
+            // the rail did not fit, and dropped to the chip-strip fallback below --
+            // the reported "layout gets messed up when I switch to 16:9". Capping the
+            // picture alone does not fix that; this site has to agree.
+            val barPreviewAspect = spec.width.toFloat() / spec.height.toFloat()
+            val previewWidth = maxHeight * previewWidthFactor(barPreviewAspect)
             // The bar is measured in un-inset screen coordinates, but the rail is laid
             // out inside the inset Box below, so it starts already pushed right by the
             // display cutout. Subtract that or the rail's right edge lands past the bar
