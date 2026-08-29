@@ -178,9 +178,21 @@ fun SettingsScreen(
                 selected = settings.defaultLensIndex,
                 onSelect = { v -> apply { it.copy(defaultLensIndex = v) } },
             )
+            // The setting stores an INDEX, not a resolution, because it has to mean
+            // something on every lens and each lens offers different sizes. But
+            // "Full / 2nd / 3rd" told you the rank and not what you would actually
+            // get, so each rank now shows the dimensions it resolves to on the lens
+            // currently in use, and the subtitle names that lens so the numbers are
+            // not mistaken for a global truth. Ranks that lens does not have keep
+            // their ordinal name -- there is no resolution to show for them.
+            val activeLens = recordUiState.lenses.getOrNull(recordUiState.lensIndex)
+            val activeSizes = activeLens?.sizes.orEmpty()
             EnumRow(
-                title = "Default resolution", subtitle = "Sizes are ranked largest-first per lens",
-                options = listOf(0 to "Full", 1 to "2nd", 2 to "3rd", 3 to "Smallest"),
+                title = "Default resolution",
+                subtitle = if (activeLens == null) "Sizes are ranked largest-first per lens"
+                else "Ranked largest-first per lens; dimensions shown for ${activeLens.label}",
+                options = listOf(0 to "Full", 1 to "2nd", 2 to "3rd", 3 to "Smallest")
+                    .map { (index, ordinal) -> index to (activeSizes.getOrNull(index)?.label ?: ordinal) },
                 selected = settings.defaultSizeIndex,
                 onSelect = { v -> apply { it.copy(defaultSizeIndex = v) } },
             )
