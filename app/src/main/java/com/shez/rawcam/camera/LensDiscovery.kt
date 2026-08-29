@@ -264,7 +264,7 @@ object LensDiscovery {
                     it.width, it.height,
                     maxFps = if (it.minFrameDurationNs > 0)
                         (1e9 / it.minFrameDurationNs).toInt().coerceIn(1, 240) else 30,
-                    label = sizeLabel(it.width, it.height, maxArea),
+                    label = sizeLabel(it.width, it.height),
                 )
             },
             cfa = cfa, whiteLevel = white, blackLevel = black.toIntArray(),
@@ -278,15 +278,17 @@ object LensDiscovery {
         )
     }
 
-    /** "4:3" / "16:9" for full-area sizes, "LOW" for binned. Moved verbatim from
-     * CameraController.sizeLabel so behaviour on existing devices is unchanged. */
-    private fun sizeLabel(w: Int, h: Int, maxArea: Long): String {
-        if (w.toLong() * h < maxArea / 2) return "LOW"
-        val aspect = w.toFloat() / h
-        return when {
-            Math.abs(aspect - 4f / 3f) < 0.05f -> "4:3"
-            Math.abs(aspect - 16f / 9f) < 0.1f -> "16:9"
-            else -> "${h}p"
-        }
-    }
+    /**
+     * The size's actual pixel dimensions, e.g. "4096x3072".
+     *
+     * This used to be an aspect nickname ("4:3", "16:9", "LOW", "1080p"), which
+     * told the user the SHAPE of the frame but not what they were actually
+     * getting -- and left two sizes of the same shape indistinguishable. RAW
+     * resolution is the thing being chosen, so it is the thing shown.
+     *
+     * maxArea is no longer a parameter: it existed only to single out a binned
+     * size as "LOW", and 1920x1080 already reads as smaller than 4096x3072
+     * without needing to be told.
+     */
+    private fun sizeLabel(w: Int, h: Int): String = "${w}x$h"
 }
