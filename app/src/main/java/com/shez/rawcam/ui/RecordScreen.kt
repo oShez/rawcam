@@ -1348,6 +1348,23 @@ private fun captureRateKey(
  */
 private const val RAIL_SAFE_ASPECT = 4f / 3f
 
+/**
+ * Fraction of the available height the viewfinder may use, so that a preview
+ * wider than [RAIL_SAFE_ASPECT] is fitted into the footprint 4:3 occupies
+ * instead of growing sideways under the rails.
+ *
+ * The invariant that matters is not this number but its consequence: for every
+ * aspect at or above 4:3 the resulting picture WIDTH is identical, which is what
+ * keeps the rails, chips and corner ticks where the design puts them. Extracted
+ * from the composable purely so that invariant is testable without a device --
+ * see ViewfinderLayoutTest.
+ *
+ * Narrower than 4:3 returns 1.0 and stays on the height-bound path, where the
+ * picture already fits between the rails.
+ */
+internal fun previewHeightFraction(previewAspect: Float): Float =
+    (RAIL_SAFE_ASPECT / previewAspect).coerceAtMost(1f)
+
 /** Frames a take must have written before its bytes-per-frame ratio means anything:
  *  the writer buffers, so early frames' bytes reach the file late and drag the ratio
  *  down. 48 = two seconds at 24fps. */
@@ -1657,7 +1674,7 @@ fun RecordScreen(
         // below instead of a broken layout. coerceAtMost keeps an aspect NARROWER
         // than 4:3 on the old height-bound path, where it already fits.
         val previewAspect = spec.width.toFloat() / spec.height.toFloat()
-        val previewHeightFraction = (RAIL_SAFE_ASPECT / previewAspect).coerceAtMost(1f)
+        val previewHeightFraction = previewHeightFraction(previewAspect)
         Box(
             Modifier
                 .align(Alignment.Center)
