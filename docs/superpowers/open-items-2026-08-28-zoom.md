@@ -42,8 +42,16 @@ run on the merged `main` rather than only on the branch.
 - **Colour is correct.** Exported 2x DNGs open clean in Resolve — no green or
   magenta cast, so the even-origin Bayer rule holds on real footage. This
   failure mode raises no error anywhere in the pipeline.
-- **Preview zooms** (confirmed by eye; the viewfinder is a SurfaceView and its
-  content does not appear in `screencap`, so no automated check is possible).
+- **Preview zooms** (confirmed by eye).
+
+  **Correction (2026-08-29):** an earlier version of this file claimed the
+  viewfinder's content does not appear in `screencap` because it is a
+  SurfaceView, and that no automated check was therefore possible. That was
+  **wrong**. `screencap` does capture the camera image; the black viewfinder in
+  the earlier screenshots was a dark room with focus set to 21cm, not a capture
+  limitation. Preview framing *can* be checked from a screenshot, and the
+  viewfinder rect can additionally be read straight out of a `uiautomator dump`
+  as the SurfaceView's bounds.
 - Five user-driven takes all recorded 2048x1536.
 
 ## Design decisions worth keeping
