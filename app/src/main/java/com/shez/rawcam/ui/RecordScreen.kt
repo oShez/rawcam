@@ -481,6 +481,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     kelvin = kelvin, tint = tint, focusDiopters = focus,
                     controlTier = lens?.controlTier ?: ControlTier.FULL,
                     exposureRangeNs = lens?.exposureRangeNs,
+                    // The launch path publishes the mode DIRECTLY rather than going
+                    // through coerceToMode, so the ladder has to be published here
+                    // too. Without this zoomStops stays empty until the user happens
+                    // to change lens or resolution, and the ZOOM row -- which hides
+                    // itself when the ladder has one entry -- never appears at all.
+                    // Read after the setZoomIndex restore above, so zoomIndex is the
+                    // restored stop rather than 0.
+                    zoomStops = controller.zoomStops,
+                    zoomIndex = controller.zoomIndex,
                 )
             }
         }
