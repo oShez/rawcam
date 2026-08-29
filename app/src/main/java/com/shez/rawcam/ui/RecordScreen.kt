@@ -1336,6 +1336,18 @@ private fun captureRateKey(
         "${lens.cameraId}|${w}x$h|${spec.whiteLevel}|${if (compress) "c" else "r"}"
     }
 
+/**
+ * The aspect the UI was laid out against. Everything that lives beside the
+ * picture -- the params rail, the action buttons, the fps toggle -- sits in the
+ * side gutters a 4:3 preview leaves on a 16:9-ish screen, and those positions
+ * ARE the design.
+ *
+ * A wider preview must therefore be fitted INTO that same footprint rather than
+ * being allowed to claim the extra width, or it slides underneath the rails.
+ * See the viewfinder Box for the arithmetic.
+ */
+private const val RAIL_SAFE_ASPECT = 4f / 3f
+
 /** Frames a take must have written before its bytes-per-frame ratio means anything:
  *  the writer buffers, so early frames' bytes reach the file late and drag the ratio
  *  down. 48 = two seconds at 24fps. */
@@ -1629,11 +1641,28 @@ fun RecordScreen(
         // rect rather than the full-bleed outer Box. Taps landing in the side
         // gutters (which host the control rails) fall outside this Box and never
         // reach detectTapGestures -- no metering is triggered, which is intended.
+        //
+        // The picture is FITTED INTO the footprint 4:3 occupies rather than being
+        // allowed to fill the height at any aspect. Sizing it
+        // fillMaxHeight().aspectRatio(previewAspect) derives WIDTH from height, so
+        // on a 2400x1080 screen a 4:3 stream is 1440 wide and leaves 480px gutters
+        // for the rails -- but a 16:9 stream becomes 1920 wide and slides straight
+        // under them. The rails are siblings pinned to CenterStart/CenterEnd, so
+        // they stop being letterbox furniture and start covering the shot.
+        //
+        // Capping the HEIGHT by RAIL_SAFE_ASPECT/previewAspect keeps the width at
+        // the 4:3 value for anything wider, so every rail, chip and corner tick
+        // stays exactly where 4:3 puts it. 4:3 itself is unaffected (fraction is
+        // 1.0), and the cost at 16:9 is a smaller image with black bands above and
+        // below instead of a broken layout. coerceAtMost keeps an aspect NARROWER
+        // than 4:3 on the old height-bound path, where it already fits.
+        val previewAspect = spec.width.toFloat() / spec.height.toFloat()
+        val previewHeightFraction = (RAIL_SAFE_ASPECT / previewAspect).coerceAtMost(1f)
         Box(
             Modifier
                 .align(Alignment.Center)
-                .fillMaxHeight()
-                .aspectRatio(spec.width.toFloat() / spec.height.toFloat())
+                .fillMaxHeight(previewHeightFraction)
+                .aspectRatio(previewAspect)
                 .pointerInput(state.previewReady, state.recording) {
                     detectTapGestures { offset ->
                         // A tap while a slider panel is open is a dismissal, not a
