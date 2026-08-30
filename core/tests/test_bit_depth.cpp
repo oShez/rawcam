@@ -49,15 +49,21 @@ TEST_CASE("shiftForDepth clamps to native and treats 0 as Native") {
 TEST_CASE("applyBitDepth scales the header consistently and keeps the derived depth right") {
   FileHeader h{};
   h.whiteLevel = 16383;
-  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1024;
+  // 1023, not 1024: 1024>>2==256 same as (1024+2)>>2==256, so this fixture
+  // would stay green even if applyBitDepth's blackLevel reduction used
+  // reducedWhiteLevel (truncate) instead of reduceLevel (round). 1023 only
+  // reaches 256 by rounding up ((1023+2)>>2==256); truncation gives 255 --
+  // don't "tidy" this back to 1024, it would make the check decorative again.
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1023;
 
   uint32_t shift = applyBitDepth(h, 12);
   CHECK(shift == 2);
   CHECK(h.whiteLevel == 4095);                                 // truncated, NOT 4096
-  CHECK(32u - (uint32_t)__builtin_clz(h.whiteLevel) == 12u);   // what capture.cpp:189 derives
-  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 256);   // rounded
+  // what capture.cpp's `bitDepth = 32 - clz(whiteLevel)` derivation relies on:
+  CHECK(32u - (uint32_t)__builtin_clz(h.whiteLevel) == 12u);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 256);   // rounded, not truncated (255)
   CHECK(h.blackLevel[0] < h.whiteLevel);
-  // capture.cpp:423 selects the pack mode from whiteLevel: 4095 <= 0xFFF => Packed12.
+  // capture.cpp's PackMode selection reads whiteLevel: 4095 <= 0xFFF => Packed12.
   CHECK(h.whiteLevel <= 0xFFFu);
   CHECK(h.whiteLevel > 0x3FFu);
 }
@@ -75,11 +81,14 @@ TEST_CASE("applyBitDepth leaves the header untouched for Native") {
 TEST_CASE("applyBitDepth clamps a request the sensor cannot reach") {
   FileHeader h{};
   h.whiteLevel = 1023;                       // 10-bit ultra-wide
-  for (int i = 0; i < 4; i++) h.blackLevel[i] = 64;
+  // 63, not 64: 64>>2==16 same as (64+2)>>2==16, so this fixture would stay
+  // green under truncation too. 63 only reaches 16 by rounding up
+  // ((63+2)>>2==16); truncation gives 15 -- keep it 63, not 64.
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 63;
 
   CHECK(applyBitDepth(h, 12) == 0);          // cannot synthesise precision
   CHECK(h.whiteLevel == 1023);
   CHECK(applyBitDepth(h, 8) == 2);
   CHECK(h.whiteLevel == 255);
-  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 16);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 16);  // rounded, not truncated (15)
 }
