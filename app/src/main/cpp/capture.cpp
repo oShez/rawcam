@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "rawcam/bit_depth.h"
 #include "rawcam/crop.h"
 #include "rawcam/pack10.h"
 #include "rawcam/rawv_codec.h"
@@ -167,9 +168,9 @@ void Capture::processImage(AImage* image) {
           (size_t)row * (size_t)rowStride_);
       uint8_t* dstRow = packBuf_.data() + (size_t)row * packedRowBytes;
       if (mode == PackMode::Packed10) {
-        pack10(srcRow, (size_t)width_, dstRow);
+        pack10(srcRow, (size_t)width_, dstRow, sampleShift_, newWhite_);
       } else {
-        pack12(srcRow, (size_t)width_, dstRow);
+        pack12(srcRow, (size_t)width_, dstRow, sampleShift_, newWhite_);
       }
     }
     meta.payloadBytes = headerTemplate_.frameSizeBytes;
@@ -193,8 +194,11 @@ void Capture::processImage(AImage* image) {
       // encoding the de-strided crop as a standalone frame.
       const uint8_t* encBase =
           rawcam::cropBase16(data, (size_t)rowStride_, (uint32_t)cropX_, (uint32_t)cropY_);
+      // sampleShift_/newWhite_ come from the same reduced headerTemplate_ that
+      // bitDepth above is derived from -- see start().
       job.slot = frameEncoder_->computeBands(reinterpret_cast<const uint16_t*>(encBase),
-                                              rowStrideSamples, bitDepth);
+                                              rowStrideSamples, bitDepth,
+                                              sampleShift_, newWhite_);
       job.hasSlot = true;
     }
 
@@ -359,7 +363,8 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
                        int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                        const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                        const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
-                       const std::string& deviceName, bool compressRecordings) {
+                       const std::string& deviceName, bool compressRecordings,
+                       int32_t requestedBitDepth) {
   if (reader_ != nullptr) return nullptr;  // already recording
 
   width_ = cropW;
@@ -403,12 +408,31 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
   hdr.width = (uint32_t)cropW;
   hdr.height = (uint32_t)cropH;
   hdr.rowStrideBytes = 0;  // filled in on first frame
-  // Pick the tightest packing that can hold this sensor's actual range without
-  // truncation. Packed10/Packed12 mask to 0x3FF/0xFFF respectively (see
+  hdr.cfa = (uint32_t)cfa;
+  hdr.whiteLevel = (uint32_t)whiteLevel;
+  for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];
+
+  // Apply the requested record bit depth BEFORE anything derives from the
+  // header. Order matters: both the PackMode choice immediately below and
+  // processImage()'s `bitDepth = 32 - clz(headerTemplate_.whiteLevel)` on the
+  // compressed encode path must see the REDUCED level, not the sensor's native
+  // one -- otherwise the codec runs wider than the samples it is handed and the
+  // uncompressed path throws away the packing the reduction just earned.
+  // sampleShift_/newWhite_ are the single source for every call site that
+  // reduces samples on read; newWhite_ is read back off the reduced header
+  // rather than recomputed, so shift, ceiling and bitDepth cannot disagree.
+  // Native (0) or a request this sensor cannot reach leaves hdr untouched and
+  // both members 0, which is an exact no-op through the whole pipeline.
+  sampleShift_ = rawcam::applyBitDepth(hdr, (uint32_t)requestedBitDepth);
+  newWhite_ = hdr.whiteLevel;
+
+  // Pick the tightest packing that can hold this recording's actual range
+  // without truncation. Packed10/Packed12 mask to 0x3FF/0xFFF respectively (see
   // pack10.cpp) -- silently corrupting samples above their range -- so the
-  // choice must be driven by the real white level, not assumed from whatever
-  // device this shipped on first (Packed10 alone was fine on the Pixel 7 Pro's
-  // 10-bit sensor but is NOT safe on hardware with a wider white level).
+  // choice must be driven by the real (possibly bit-depth-reduced) white level,
+  // not assumed from whatever device this shipped on first (Packed10 alone was
+  // fine on the Pixel 7 Pro's 10-bit sensor but is NOT safe on hardware with a
+  // wider white level).
   // Packing is additionally gated on the width dividing evenly into the pack
   // group (4 px/5B for Packed10, 2 px/3B for Packed12): pack10/pack12 step in
   // whole groups per ROW with no remainder handling, and RawvReader::headerSane
@@ -419,13 +443,10 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
   // the predictor works per-pixel with no group-size requirement, so it
   // applies regardless of width parity (unlike Packed10/12's w4/w2 gates).
   const bool w4 = cropW % 4 == 0, w2 = cropW % 2 == 0;
-  hdr.packMode = (uint32_t)(compressRecordings                ? PackMode::CompressedPredictive
-                             : whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
-                             : whiteLevel <= 0xFFF && w2       ? PackMode::Packed12
-                                                                : PackMode::Raw16);
-  hdr.cfa = (uint32_t)cfa;
-  hdr.whiteLevel = (uint32_t)whiteLevel;
-  for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];
+  hdr.packMode = (uint32_t)(compressRecordings                    ? PackMode::CompressedPredictive
+                             : hdr.whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
+                             : hdr.whiteLevel <= 0xFFF && w2       ? PackMode::Packed12
+                                                                   : PackMode::Raw16);
   for (int i = 0; i < 9; i++) hdr.colorMatrix1[i] = colorMatrix1[i];
   hdr.asShotNeutral[0] = hdr.asShotNeutral[1] = hdr.asShotNeutral[2] = 0.0f;
   hdr.illuminant1 = (uint32_t)illuminant1;

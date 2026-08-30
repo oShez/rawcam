@@ -43,3 +43,43 @@ TEST_CASE("shiftForDepth clamps to native and treats 0 as Native") {
   CHECK(shiftForDepth(1023, 12) == 0);   // 10-bit lens cannot reach 12: clamp
   CHECK(shiftForDepth(1023, 8) == 2);
 }
+
+#include "rawcam/rawv.h"
+
+TEST_CASE("applyBitDepth scales the header consistently and keeps the derived depth right") {
+  FileHeader h{};
+  h.whiteLevel = 16383;
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1024;
+
+  uint32_t shift = applyBitDepth(h, 12);
+  CHECK(shift == 2);
+  CHECK(h.whiteLevel == 4095);                                 // truncated, NOT 4096
+  CHECK(32u - (uint32_t)__builtin_clz(h.whiteLevel) == 12u);   // what capture.cpp:189 derives
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 256);   // rounded
+  CHECK(h.blackLevel[0] < h.whiteLevel);
+  // capture.cpp:423 selects the pack mode from whiteLevel: 4095 <= 0xFFF => Packed12.
+  CHECK(h.whiteLevel <= 0xFFFu);
+  CHECK(h.whiteLevel > 0x3FFu);
+}
+
+TEST_CASE("applyBitDepth leaves the header untouched for Native") {
+  FileHeader h{};
+  h.whiteLevel = 16383;
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1024;
+
+  CHECK(applyBitDepth(h, 0) == 0);
+  CHECK(h.whiteLevel == 16383);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 1024);
+}
+
+TEST_CASE("applyBitDepth clamps a request the sensor cannot reach") {
+  FileHeader h{};
+  h.whiteLevel = 1023;                       // 10-bit ultra-wide
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 64;
+
+  CHECK(applyBitDepth(h, 12) == 0);          // cannot synthesise precision
+  CHECK(h.whiteLevel == 1023);
+  CHECK(applyBitDepth(h, 8) == 2);
+  CHECK(h.whiteLevel == 255);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 16);
+}

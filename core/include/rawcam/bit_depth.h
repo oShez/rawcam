@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 
+#include "rawcam/rawv.h"
+
 namespace rawcam {
 
 // See docs/superpowers/specs/2026-08-30-selectable-record-bit-depth-design.md.
@@ -30,6 +32,17 @@ inline uint32_t shiftForDepth(uint32_t whiteLevel, uint32_t requestedDepth) {
   uint32_t nativeDepth = 32u - (uint32_t)__builtin_clz(whiteLevel);
   if (requestedDepth >= nativeDepth) return 0;
   return nativeDepth - requestedDepth;
+}
+
+// Scales a header in place for `requestedDepth` and returns the sample shift the
+// encoder must apply. whiteLevel truncates; blackLevel rounds. Returns 0 (and
+// changes nothing) for Native or for a request the sensor cannot reach.
+inline uint32_t applyBitDepth(FileHeader& h, uint32_t requestedDepth) {
+  uint32_t shift = shiftForDepth(h.whiteLevel, requestedDepth);
+  if (shift == 0) return 0;
+  h.whiteLevel = reducedWhiteLevel(h.whiteLevel, shift);
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = reduceLevel(h.blackLevel[i], shift);
+  return shift;
 }
 
 }  // namespace rawcam

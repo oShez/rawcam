@@ -40,12 +40,18 @@ class Capture {
   //
   // cropX and cropY MUST be even (Bayer phase) and cropW a multiple of 4
   // (Packed10's group gate) -- ZoomLadder guarantees both.
+  //
+  // requestedBitDepth is the user-selected record depth (0 = Native, else 14/
+  // 12/10/8). It reduces the header's whiteLevel/blackLevel and yields the
+  // per-sample shift the encode/pack paths apply on read; a request at or
+  // above what this sensor delivers is clamped to Native (no reduction).
   jobject start(JNIEnv* env, const std::string& path, int32_t fullW, int32_t fullH,
                  int32_t cropX, int32_t cropY, int32_t cropW, int32_t cropH,
                  int32_t cfa, int32_t whiteLevel, const int32_t blackLevel[4],
                  const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                  const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
-                 const std::string& deviceName, bool compressRecordings);
+                 const std::string& deviceName, bool compressRecordings,
+                 int32_t requestedBitDepth);
 
   // Records per-frame metadata keyed by exact sensor timestamp, for the writer
   // thread to match against arriving AImages. Callable from any thread.
@@ -136,6 +142,15 @@ class Capture {
   AudioInfo audioInfo_{};
   bool audioInfoSet_ = false;
   FileHeader headerTemplate_{};
+  // Record bit depth for this session, both derived in start() from the SAME
+  // reduced headerTemplate_: sampleShift_ is what every encode/pack call site
+  // applies per sample on read, newWhite_ is headerTemplate_.whiteLevel after
+  // the reduction (the clamp ceiling). Both 0 for Native -- and a 0 shift is an
+  // exact no-op everywhere, so a Native take is byte-identical to a build
+  // without this feature. Never recompute either from the sensor's own
+  // whiteLevel: shift, newWhite and the encoder's bitDepth must all agree.
+  uint32_t sampleShift_ = 0;
+  uint32_t newWhite_ = 0;
   std::string path_;
   int32_t width_ = 0;   // CROPPED width -- what the header and encoder use
   int32_t height_ = 0;  // CROPPED height

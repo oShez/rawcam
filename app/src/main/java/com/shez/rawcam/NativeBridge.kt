@@ -13,12 +13,18 @@ object NativeBridge {
     // sensor, since CONTROL_ZOOM_RATIO does not crop RAW. cropX/cropY/cropW/
     // cropH are the sub-rectangle written to the file. At 1x pass 0, 0,
     // fullW, fullH.
+    //
+    // requestedBitDepth is the record bit depth the user asked for: 0 = Native
+    // (record whatever the sensor delivers), otherwise 14/12/10/8. A request at
+    // or above this lens's native depth is clamped to Native by the native
+    // side; precision the sensor never produced cannot be synthesised.
     external fun nativeStartRecording(path: String, fullW: Int, fullH: Int,
         cropX: Int, cropY: Int, cropW: Int, cropH: Int,
         cfa: Int, whiteLevel: Int, blackLevel: IntArray /*4*/,
         colorMatrix1: FloatArray /*9*/, illuminant1: Int, illuminant2: Int,
         colorMatrix2: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,
-        deviceName: String, compressRecordings: Boolean): android.view.Surface?
+        deviceName: String, compressRecordings: Boolean,
+        requestedBitDepth: Int): android.view.Surface?
     external fun nativePushFrameMeta(timestampNs: Long, iso: Int, exposureNs: Long,
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)
     // Records audio parameters and sync provenance into the .rawv header. MUST be
