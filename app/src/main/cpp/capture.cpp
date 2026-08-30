@@ -340,6 +340,28 @@ void Capture::finishLoop() {
       // way, fall back to the raw copy made before this frame's AImage was
       // recycled.
       compressedFallbacks_.fetch_add(1, std::memory_order_relaxed);
+      // The compressed encoder reduces samples ON READ, so this verbatim raw
+      // copy is the one path that would otherwise write full-depth samples
+      // under a reduced header -- frames that export several stops too bright
+      // and clipped, silently, since exporter.cpp derives its bit depth from
+      // that header. Reduce here, on the Finish thread and only for the rare
+      // frame that actually falls back, rather than reducing every rawCopy on
+      // the Compute hot path (which would cost Native takes too) or adding a
+      // second whole-plane pass there (the memory traffic this design exists
+      // to avoid).
+      //
+      // sampleShift_/newWhite_ are safe to read here: start() writes them
+      // before it creates the Finish thread, and nothing writes them again
+      // until the next start(), which only runs after stop() has joined that
+      // thread. frameSizeBytes is exactly what rawCopy holds -- the de-strided
+      // crop when cropped, the delivered plane at 1x -- so frameSizeBytes / 2
+      // is the right sample count in both cases.
+      if (sampleShift_ != 0) {
+        uint16_t* s = reinterpret_cast<uint16_t*>(job.rawCopy.data());
+        const size_t sampleCount = headerTemplate_.frameSizeBytes / 2;
+        for (size_t i = 0; i < sampleCount; i++)
+          s[i] = rawcam::reduceSample(s[i], sampleShift_, newWhite_);
+      }
       meta.payloadBytes = headerTemplate_.frameSizeBytes;
       meta.compressed = 0;
       ok = writer_->writeFrame(meta, job.rawCopy.data(), headerTemplate_.frameSizeBytes);
@@ -442,6 +464,17 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
   // compressRecordings overrides the Packed10/Packed12/Raw16 choice entirely:
   // the predictor works per-pixel with no group-size requirement, so it
   // applies regardless of width parity (unlike Packed10/12's w4/w2 gates).
+  //
+  // Raw16 is the ONE branch below that writes samples verbatim, with no
+  // reduction applied anywhere -- so a non-zero sampleShift_ landing here would
+  // record full-depth samples under a reduced whiteLevel. That is unreachable
+  // today and deliberately not coded around: the offered depths are 14/12/10/8,
+  // a 14-bit request on a 14-bit sensor yields shift 0, so any reduced
+  // whiteLevel is at most 4095 and therefore always <= 0xFFF -- which selects
+  // Packed12 for every even width, and every capture width this hardware
+  // produces is even. If a future sensor ever delivers an ODD width (or more
+  // than 14 bits), this reasoning breaks and Raw16 needs its own reduction
+  // pass before that combination can ship.
   const bool w4 = cropW % 4 == 0, w2 = cropW % 2 == 0;
   hdr.packMode = (uint32_t)(compressRecordings                    ? PackMode::CompressedPredictive
                              : hdr.whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
