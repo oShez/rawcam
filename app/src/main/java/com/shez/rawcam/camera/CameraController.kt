@@ -602,6 +602,7 @@ class CameraController(private val context: Context) {
         path: String, fps: Int, iso: Int, exposureNs: Long, focusDiopters: Float,
         kelvin: Int, tint: Int, compressRecordings: Boolean = false,
         recordAudio: Boolean = false, audioInputKey: String = "", audioGainDb: Float = 0f,
+        requestedBitDepth: Int = 0,
     ): Boolean {
         if (recording) return false
         val preview = previewSurface ?: return false
@@ -653,9 +654,7 @@ class CameraController(private val context: Context) {
             spec.blackLevel, spec.colorMatrix1, spec.illuminant1, spec.illuminant2,
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
             spec.deviceName, compressRecordings,
-            // Native until Task 6 threads the real setting through -- 0 is an
-            // exact no-op, so the recorded bytes are unchanged for now.
-            /* requestedBitDepth = */ 0,
+            /* requestedBitDepth = */ requestedBitDepth,
         ) ?: run {
             if (audioArmed) {
                 lastAudioResult = try {

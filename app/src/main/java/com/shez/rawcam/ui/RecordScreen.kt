@@ -1014,10 +1014,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 // cannot be true until controller.initialize() has completed -- see
                 // nearestIso's comment for the full chain. controller.rawSpec is valid.
                 val spec = controller.rawSpec
-                val frameBytes = frameRecordBytes(spec, s.zoomStops.getOrNull(s.zoomIndex))
+                val bitDepth = effectiveBitDepth(spec.whiteLevel, s.settings.recordBitDepth)
+                val frameBytes = frameRecordBytes(spec, s.zoomStops.getOrNull(s.zoomIndex), bitDepth)
                 val rateKey = captureRateKey(
                     s.lenses.getOrNull(s.lensIndex), spec, s.settings.compressRecordings,
-                    s.zoomStops.getOrNull(s.zoomIndex),
+                    s.zoomStops.getOrNull(s.zoomIndex), bitDepth,
                 )
                 val available = StatFs(controller.clipsDir.absolutePath).availableBytes
                 val required = frameBytes * s.fps * s.settings.freeSpaceReserveSeconds.toLong()
@@ -1036,6 +1037,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                     recordAudio = s.settings.recordAudio,
                     audioInputKey = s.settings.audioInputKey,
                     audioGainDb = s.settings.audioGainDb,
+                    requestedBitDepth = s.settings.recordBitDepth,
                 )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
@@ -1315,15 +1317,31 @@ private fun formatTimer(totalSeconds: Int): String {
 }
 
 /**
+ * The depth actually recorded: Native (0) and any request at or above what the
+ * sensor delivers both resolve to the sensor's own depth. Precision that never
+ * left the sensor cannot be synthesised.
+ */
+internal fun effectiveBitDepth(whiteLevel: Int, requested: Int): Int {
+    if (whiteLevel <= 0) return 0
+    val native = 32 - Integer.numberOfLeadingZeros(whiteLevel)
+    return if (requested == 0 || requested >= native) native else requested
+}
+
+/**
  * Bytes per recorded frame record (packed payload + 64-byte FrameMeta), mirroring
  * capture.cpp's pack-mode choice exactly: Packed10 (1.25 B/px) only for a <=10-bit
- * white level on a width divisible by 4, Packed12 (1.5 B/px) for <=12-bit on an
+ * EFFECTIVE depth on a width divisible by 4, Packed12 (1.5 B/px) for <=12-bit on an
  * even width, else Raw16 (2 B/px -- the true row stride isn't known until the
  * first frame arrives, so this is a floor; stride padding can only add to it).
  * Was hardcoded to the Packed10 formula, which under-reserved free space ~20% on
  * a 12-bit sensor and ~60% on anything recording Raw16.
+ *
+ * Takes the EFFECTIVE depth (see [effectiveBitDepth]), not the sensor's native
+ * depth: a 14-bit sensor recording at a requested 10 packs as Packed10, and
+ * sizing this from spec.whiteLevel alone would keep reserving space (and
+ * predicting time-left) for the wider, unrequested packing.
  */
-private fun frameRecordBytes(spec: CameraController.RawSpec, zoom: ZoomStop?): Long {
+private fun frameRecordBytes(spec: CameraController.RawSpec, zoom: ZoomStop?, bitDepth: Int): Long {
     // Zoom is a real crop, so a frame at 4x holds about a SIXTEENTH of the bytes
     // a full-sensor frame does. Sizing this from spec alone would overstate every
     // zoomed frame by the square of the crop factor, which refuses recordings for
@@ -1334,8 +1352,8 @@ private fun frameRecordBytes(spec: CameraController.RawSpec, zoom: ZoomStop?): L
     val payload = when {
         // Gated on the CROPPED width, mirroring capture.cpp's w4/w2 pack gates,
         // which are themselves now computed from cropW.
-        spec.whiteLevel <= 0x3FF && w % 4 == 0 -> (pixels / 4) * 5
-        spec.whiteLevel <= 0xFFF && w % 2 == 0 -> (pixels / 2) * 3
+        bitDepth <= 10 && w % 4 == 0 -> (pixels / 4) * 5
+        bitDepth <= 12 && w % 2 == 0 -> (pixels / 2) * 3
         else -> pixels * 2
     }
     return payload + 64
@@ -1344,17 +1362,23 @@ private fun frameRecordBytes(spec: CameraController.RawSpec, zoom: ZoomStop?): L
 /**
  * Identity of the setup a capture-rate measurement belongs to: the lens (its sensor
  * and its noise floor decide how well frames compress -- an ultrawide and a tele on
- * the same phone do not compress alike), the geometry and bit depth, and whether
- * compression is on at all.
+ * the same phone do not compress alike), the geometry, the effective RECORDED bit
+ * depth, and whether compression is on at all.
+ *
+ * The depth here is the effective depth (see [effectiveBitDepth]), not merely
+ * spec.whiteLevel's sensor-native reading -- a 14-bit sensor recording at a
+ * requested 12 compresses differently from the same sensor at Native, and a rate
+ * learned at one must not be read back for the other.
  *
  * fps is deliberately absent: what gets measured is bytes per FRAME, so a ratio
  * learned at 24fps is equally true at 30 and the readout never has to relearn it.
  */
-private fun captureRateKey(
+internal fun captureRateKey(
     lens: LensProfile?,
     spec: CameraController.RawSpec?,
     compress: Boolean,
     zoom: ZoomStop?,
+    bitDepth: Int,
 ): String =
     if (lens == null || spec == null) ""
     else {
@@ -1363,9 +1387,15 @@ private fun captureRateKey(
         // overstate the time left by roughly the crop factor. A null stop or
         // the 1x stop yields the SAME key text previous versions persisted, so
         // every already-learned 1x rate survives the upgrade.
+        //
+        // Depth joins the key for the same reason (see kdoc above). This DOES
+        // change the key text for every existing user, unlike the zoom axis --
+        // accepted: the readout relearns within seconds of the next take, and a
+        // key whose shape depends on its own values (e.g. omitting depth only
+        // when it equals native) would be a subtler, worse bug later.
         val w = zoom?.cropW ?: spec.width
         val h = zoom?.cropH ?: spec.height
-        "${lens.cameraId}|${w}x$h|${spec.whiteLevel}|${if (compress) "c" else "r"}"
+        "${lens.cameraId}|${w}x$h|${spec.whiteLevel}|${if (compress) "c" else "r"}|$bitDepth"
     }
 
 /**
@@ -1451,11 +1481,12 @@ private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec)
     // trivial against RAW, but free at this point.
     val audioPerSecond =
         if (state.settings.recordAudio) 3L * AudioRecorder.SAMPLE_RATE * state.audioChannels else 0L
+    val bitDepth = effectiveBitDepth(spec.whiteLevel, state.settings.recordBitDepth)
     val ratio = state.captureRates[
         captureRateKey(state.lenses.getOrNull(state.lensIndex), spec, state.settings.compressRecordings,
-                       state.zoomStops.getOrNull(state.zoomIndex))
+                       state.zoomStops.getOrNull(state.zoomIndex), bitDepth)
     ]
-    val frameBytes = (frameRecordBytes(spec, state.zoomStops.getOrNull(state.zoomIndex))
+    val frameBytes = (frameRecordBytes(spec, state.zoomStops.getOrNull(state.zoomIndex), bitDepth)
         * (ratio ?: 1f).toDouble()).toLong()
     val perSecond = frameBytes * state.fps + audioPerSecond
     if (perSecond <= 0) return "—"
