@@ -1,4 +1,5 @@
 #include "rawcam/rawv_codec.h"
+#include "rawcam/bit_depth.h"
 #include <algorithm>
 #include <condition_variable>
 #include <cstdlib>
@@ -306,17 +307,28 @@ inline int32_t medPredict(int32_t left, int32_t up, int32_t upleft) {
 // `plane` is either the original frame (encode) or the buffer being filled
 // in raster order (decode) -- valid either way since left/up/upleft are
 // always earlier in raster scan order than (x, y).
+//
+// Reduce selects the record bit depth at COMPILE time. A runtime `shift == 0`
+// check here would run up to three times per pixel in the hottest loop in the
+// codec, and Native -- which would pay it for nothing -- is the default; so
+// every caller dispatches once per frame (encode) or hard-codes <false>
+// (decode) and the `at()` lambda folds away to exactly today's load.
+template <bool Reduce>
 inline int32_t predictAt(const uint16_t* plane, uint32_t x, uint32_t y,
-                          uint32_t rowStrideSamples, uint32_t bitDepth) {
+                          uint32_t rowStrideSamples, uint32_t bitDepth,
+                          uint32_t shift, uint32_t newWhite) {
   bool hasLeft = x >= 2;
   bool hasUp = y >= 2;
+  // The baseline is in REDUCED units already: bitDepth is the reduced depth.
   if (!hasLeft && !hasUp) return 1 << (bitDepth - 1);
-  if (!hasLeft) return plane[(y - 2) * rowStrideSamples + x];
-  if (!hasUp) return plane[y * rowStrideSamples + (x - 2)];
-  int32_t left = plane[y * rowStrideSamples + (x - 2)];
-  int32_t up = plane[(y - 2) * rowStrideSamples + x];
-  int32_t upleft = plane[(y - 2) * rowStrideSamples + (x - 2)];
-  return medPredict(left, up, upleft);
+  auto at = [&](uint32_t yy, uint32_t xx) -> int32_t {
+    uint16_t s = plane[yy * rowStrideSamples + xx];
+    if constexpr (Reduce) return reduceSample(s, shift, newWhite);
+    else return s;
+  };
+  if (!hasLeft) return at(y - 2, x);
+  if (!hasUp) return at(y, x - 2);
+  return medPredict(at(y, x - 2), at(y - 2, x), at(y - 2, x - 2));
 }
 
 // Smallest k such that (count << k) >= sumAbs -- k=0 for a perfectly-
@@ -327,6 +339,42 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
   return k;
 }
 
+// Encode pass 1: one Rice parameter for the whole frame, from the sum of
+// absolute residuals. Recomputing predictAt() in pass 2 is cheap integer
+// arithmetic -- far cheaper than holding a full-frame residual buffer
+// (width*height*4 bytes) alive just to avoid a second pass.
+// Samples a strided grid (1/16th of pixels) instead of scanning every one
+// -- this pass does no bit I/O, so its only cost is the scan itself, and
+// real sensor noise doesn't vary pixel-to-pixel in a way uniform sampling
+// would miss. (0,0) is always included (x=0,y=0 satisfies any stride), so
+// count is always >= 1 for any non-empty frame -- no divide-by-zero risk
+// even though riceParamFor doesn't divide, just compares.
+// Shared by encodeFrame() and ParallelFrameEncoder::computeBands(), which
+// must pick the SAME k for the same frame or their outputs diverge.
+template <bool Reduce>
+uint32_t selectRiceParam(const uint16_t* raw16, uint32_t width, uint32_t height,
+                         uint32_t rowStrideSamples, uint32_t bitDepth,
+                         uint32_t shift, uint32_t newWhite) {
+  constexpr uint32_t kSampleStride = 4;
+  uint64_t sumAbs = 0;
+  uint64_t count = 0;
+  for (uint32_t y = 0; y < height; y += kSampleStride) {
+    for (uint32_t x = 0; x < width; x += kSampleStride) {
+      uint16_t s = raw16[y * rowStrideSamples + x];
+      // Reduced under the same `if constexpr` as its predictor, so k reflects
+      // the reduced data the packer will actually see.
+      int32_t actual;
+      if constexpr (Reduce) actual = reduceSample(s, shift, newWhite);
+      else actual = s;
+      int32_t predicted =
+          predictAt<Reduce>(raw16, x, y, rowStrideSamples, bitDepth, shift, newWhite);
+      sumAbs += static_cast<uint64_t>(std::abs(actual - predicted));
+      count++;
+    }
+  }
+  return riceParamFor(sumAbs, count);
+}
+
 #if RAWV_HAVE_NEON
 // Loads 4 consecutive uint16 samples and zero-extends to int32x4. Valid on both
 // arm_neon.h and ARM_NEON_2_x86_SSE (integer-only, bit-exact on both).
@@ -334,6 +382,17 @@ static inline int32x4_t loadU16x4AsS32(const uint16_t* p) {
   return vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p)));
 }
 #endif
+
+// Reducing counterpart of the public computeInteriorResidualsRow(); defined at
+// the bottom of this file next to that forwarder, declared here so the band
+// workers above can instantiate it. Same contract, plus the record-bit-depth
+// reduction applied on read when Reduce is true (shift/newWhite are then
+// guaranteed nonzero-shift by the once-per-band dispatch).
+template <bool Reduce>
+void computeInteriorResidualsRowImpl(const uint16_t* plane, uint32_t y,
+                                     uint32_t rowStrideSamples, uint32_t xStart,
+                                     uint32_t xEnd, uint32_t* zOut,
+                                     uint32_t shift, uint32_t newWhite);
 
 #ifdef __ANDROID__
 // Reads /sys/.../cpuN/cpufreq/cpuinfo_max_freq for each core [0, hw). Returns
@@ -475,6 +534,17 @@ void ParallelFrameEncoder::workerLoop(uint32_t bandIndex) {
 
 void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandStart,
                                                uint32_t bandEnd, uint32_t slot) {
+  // ONE branch per band, not one per sample -- see computeAndPackBandImpl's
+  // declaration. jobShift_ was latched under mu_ by computeBands().
+  if (jobShift_ == 0)
+    computeAndPackBandImpl<false>(bandIndex, bandStart, bandEnd, slot);
+  else
+    computeAndPackBandImpl<true>(bandIndex, bandStart, bandEnd, slot);
+}
+
+template <bool Reduce>
+void ParallelFrameEncoder::computeAndPackBandImpl(uint32_t bandIndex, uint32_t bandStart,
+                                                   uint32_t bandEnd, uint32_t slot) {
   BitWriter bw(bandBufs_[slot][bandIndex].data(),
                static_cast<uint32_t>(bandBufs_[slot][bandIndex].size()));
   bool ok = true;
@@ -484,6 +554,13 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
   // per-append capacity branch). The +1 margin at the call site covers the <8
   // bits the accumulator may carry over from the prior row.
   const uint64_t worstRowBytes = worstCaseRiceRowBytes(width_, jobBitDepth_, jobK_);
+  const uint32_t shift = jobShift_, newWhite = jobNewWhite_;
+  // Reducing the actual sample under the same `if constexpr` as its predictor
+  // is what makes k selection and the residuals describe the SAME data.
+  auto actualAt = [&](const uint16_t* row, uint32_t x) -> int32_t {
+    if constexpr (Reduce) return reduceSample(row[x], shift, newWhite);
+    else return row[x];
+  };
   for (uint32_t y = bandStart; y < bandEnd && ok; y++) {
     const uint16_t* row = jobRaw16_ + static_cast<size_t>(y) * jobRowStrideSamples_;
     // Fill z[0..width_) for this row.
@@ -491,14 +568,17 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
     if (y < 2) {
       // No same-color row above -> whole row uses the scalar edge predictor.
       for (uint32_t x = 0; x < width_; x++)
-        z[x] = zigzagEncode(static_cast<int32_t>(row[x]) -
-                            predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_));
+        z[x] = zigzagEncode(actualAt(row, x) -
+                            predictAt<Reduce>(jobRaw16_, x, y, jobRowStrideSamples_,
+                                              jobBitDepth_, shift, newWhite));
     } else {
       for (uint32_t x = 0; x < edgeCols; x++)
-        z[x] = zigzagEncode(static_cast<int32_t>(row[x]) -
-                            predictAt(jobRaw16_, x, y, jobRowStrideSamples_, jobBitDepth_));
+        z[x] = zigzagEncode(actualAt(row, x) -
+                            predictAt<Reduce>(jobRaw16_, x, y, jobRowStrideSamples_,
+                                              jobBitDepth_, shift, newWhite));
       // Interior x >= 2, y >= 2: vectorized (scalar fallback inside if no NEON).
-      computeInteriorResidualsRow(jobRaw16_, y, jobRowStrideSamples_, 2, width_, z);
+      computeInteriorResidualsRowImpl<Reduce>(jobRaw16_, y, jobRowStrideSamples_, 2, width_, z,
+                                              shift, newWhite);
     }
     // Pack the row -- bit-exact either way. Fast path when the row provably fits
     // (no per-append capacity branch); checked writeRice near the buffer end (or
@@ -521,7 +601,8 @@ void ParallelFrameEncoder::computeAndPackBand(uint32_t bandIndex, uint32_t bandS
 }
 
 uint32_t ParallelFrameEncoder::computeBands(const uint16_t* raw16, uint32_t rowStrideSamples,
-                                             uint32_t bitDepth) {
+                                             uint32_t bitDepth, uint32_t shift,
+                                             uint32_t newWhite) {
   // Claim a free slot -- blocks here if both are still holding a previous
   // computeBands() call's unmerged bands (the pipeline's backpressure).
   uint32_t slot;
@@ -536,18 +617,11 @@ uint32_t ParallelFrameEncoder::computeBands(const uint16_t* raw16, uint32_t rowS
   // Pass 1: same strided-sample k-selection as before -- unchanged, already
   // cheap (avg 2.79ms on-device per round 4 stage 2's re-profiling,
   // docs/superpowers/open-items-2026-08-04-compressed-rawv-capture.md).
-  constexpr uint32_t kSampleStride = 4;
-  uint64_t sumAbs = 0;
-  uint64_t count = 0;
-  for (uint32_t y = 0; y < height_; y += kSampleStride) {
-    for (uint32_t x = 0; x < width_; x += kSampleStride) {
-      int32_t actual = raw16[y * rowStrideSamples + x];
-      int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth);
-      sumAbs += static_cast<uint64_t>(std::abs(actual - predicted));
-      count++;
-    }
-  }
-  uint32_t k = riceParamFor(sumAbs, count);
+  // Dispatched once per frame, like the band workers below.
+  uint32_t k = (shift == 0)
+                   ? selectRiceParam<false>(raw16, width_, height_, rowStrideSamples, bitDepth, 0, 0)
+                   : selectRiceParam<true>(raw16, width_, height_, rowStrideSamples, bitDepth,
+                                           shift, newWhite);
 
   // Dispatch: each band's worker computes predict+residual+Rice-pack
   // directly into this slot's local buffers -- fused, no shared residual
@@ -557,6 +631,8 @@ uint32_t ParallelFrameEncoder::computeBands(const uint16_t* raw16, uint32_t rowS
     jobRaw16_ = raw16;
     jobRowStrideSamples_ = rowStrideSamples;
     jobBitDepth_ = bitDepth;
+    jobShift_ = shift;
+    jobNewWhite_ = newWhite;
     jobK_ = k;
     jobSlot_ = slot;
     jobOverflowed_ = false;
@@ -611,39 +687,22 @@ uint64_t worstCaseRiceRowBytes(uint32_t width, uint32_t bitDepth, uint32_t k) {
 }
 
 uint32_t ParallelFrameEncoder::encode(const uint16_t* raw16, uint32_t rowStrideSamples,
-                                       uint32_t bitDepth, uint8_t* out, uint32_t outCapacity) {
+                                       uint32_t bitDepth, uint8_t* out, uint32_t outCapacity,
+                                       uint32_t shift, uint32_t newWhite) {
   if (outCapacity < 1 || width_ == 0 || height_ == 0) return 0;
-  uint32_t slot = computeBands(raw16, rowStrideSamples, bitDepth);
+  uint32_t slot = computeBands(raw16, rowStrideSamples, bitDepth, shift, newWhite);
   return mergeSlot(slot, out, outCapacity);
 }
 
-uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
-                      uint32_t rowStrideSamples, uint32_t bitDepth,
-                      uint8_t* out, uint32_t outCapacity) {
-  if (outCapacity < 1 || width == 0 || height == 0) return 0;
+namespace {
 
-  // Pass 1: sum of absolute residuals, to pick one Rice parameter for the
-  // whole frame. Recomputing predictAt() in pass 2 is cheap integer
-  // arithmetic -- far cheaper than holding a full-frame residual buffer
-  // (width*height*4 bytes) alive just to avoid a second pass.
-  // Sample a strided grid (1/16th of pixels) instead of scanning every one
-  // -- this pass does no bit I/O, so its only cost is the scan itself, and
-  // real sensor noise doesn't vary pixel-to-pixel in a way uniform sampling
-  // would miss. (0,0) is always included (x=0,y=0 satisfies any stride), so
-  // count is always >= 1 for any non-empty frame -- no divide-by-zero risk
-  // even though riceParamFor doesn't divide, just compares.
-  constexpr uint32_t kSampleStride = 4;
-  uint64_t sumAbs = 0;
-  uint64_t count = 0;
-  for (uint32_t y = 0; y < height; y += kSampleStride) {
-    for (uint32_t x = 0; x < width; x += kSampleStride) {
-      int32_t actual = raw16[y * rowStrideSamples + x];
-      int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth);
-      sumAbs += static_cast<uint64_t>(std::abs(actual - predicted));
-      count++;
-    }
-  }
-  uint32_t k = riceParamFor(sumAbs, count);
+template <bool Reduce>
+uint32_t encodeFrameImpl(const uint16_t* raw16, uint32_t width, uint32_t height,
+                          uint32_t rowStrideSamples, uint32_t bitDepth,
+                          uint8_t* out, uint32_t outCapacity,
+                          uint32_t shift, uint32_t newWhite) {
+  uint32_t k = selectRiceParam<Reduce>(raw16, width, height, rowStrideSamples, bitDepth,
+                                       shift, newWhite);
 
   std::memset(out, 0, outCapacity);
   out[0] = static_cast<uint8_t>(k);
@@ -651,13 +710,33 @@ uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
 
   for (uint32_t y = 0; y < height; y++) {
     for (uint32_t x = 0; x < width; x++) {
-      int32_t actual = raw16[y * rowStrideSamples + x];
-      int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth);
+      uint16_t s = raw16[y * rowStrideSamples + x];
+      int32_t actual;
+      if constexpr (Reduce) actual = reduceSample(s, shift, newWhite);
+      else actual = s;
+      int32_t predicted =
+          predictAt<Reduce>(raw16, x, y, rowStrideSamples, bitDepth, shift, newWhite);
       uint32_t z = zigzagEncode(actual - predicted);
       if (!bw.writeRice(z, k)) return 0;  // wouldn't fit -- caller falls back
     }
   }
   return 1 + bw.finishedBytes();
+}
+
+}  // namespace
+
+uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
+                      uint32_t rowStrideSamples, uint32_t bitDepth,
+                      uint8_t* out, uint32_t outCapacity,
+                      uint32_t shift, uint32_t newWhite) {
+  if (outCapacity < 1 || width == 0 || height == 0) return 0;
+  // One branch per FRAME. Native (shift 0) is the default and lands in the
+  // Reduce=false instantiation, which is byte- and instruction-identical to
+  // the encoder that existed before the record-bit-depth feature.
+  return (shift == 0) ? encodeFrameImpl<false>(raw16, width, height, rowStrideSamples,
+                                               bitDepth, out, outCapacity, 0, 0)
+                      : encodeFrameImpl<true>(raw16, width, height, rowStrideSamples,
+                                              bitDepth, out, outCapacity, shift, newWhite);
 }
 
 bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
@@ -672,25 +751,66 @@ bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
       uint32_t z = 0;
       if (!br.readRice(k, &z)) return false;
       int32_t residual = zigzagDecode(z);
-      int32_t predicted = predictAt(out, x, y, rowStrideSamples, bitDepth);
+      // <false>, always: `out` already holds reduced samples (the encoder
+      // reduced on read), so reducing them again here would corrupt the
+      // reconstruction.
+      int32_t predicted = predictAt<false>(out, x, y, rowStrideSamples, bitDepth, 0, 0);
       out[y * rowStrideSamples + x] = static_cast<uint16_t>(predicted + residual);
     }
   }
   return true;
 }
 
-void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
-                                 uint32_t rowStrideSamples, uint32_t xStart,
-                                 uint32_t xEnd, uint32_t* zOut) {
+namespace {
+
+template <bool Reduce>
+void computeInteriorResidualsRowImpl(const uint16_t* plane, uint32_t y,
+                                     uint32_t rowStrideSamples, uint32_t xStart,
+                                     uint32_t xEnd, uint32_t* zOut,
+                                     uint32_t shift, uint32_t newWhite) {
   const uint16_t* cur = plane + static_cast<size_t>(y) * rowStrideSamples;
   const uint16_t* up = plane + static_cast<size_t>(y - 2) * rowStrideSamples;
   uint32_t x = xStart;
 #if RAWV_HAVE_NEON
+  // The reduction is vectorized too, rather than dropping to scalar when
+  // Reduce is true: the whole point of a lower record bit depth is thermal
+  // headroom, and a reduced clip that costs MORE encode CPU per frame than
+  // Native spends part of the win it just bought. Every `if constexpr (Reduce)`
+  // below is compile-time, so Reduce=false emits the exact instruction
+  // sequence it did before this parameter existed.
+  //
+  // reduce4() is bit-exact with reduceSample(): samples are zero-extended
+  // uint16 (so `+ bias` cannot overflow int32 and the arithmetic vshl right
+  // shift equals reduceSample's logical one), and vminq_s32 is its clamp.
+  // shift >= 1 whenever Reduce is true, so `1 << (shift - 1)` is well-defined.
+  int32x4_t bias = vdupq_n_s32(0), negShift = vdupq_n_s32(0), maxVal = vdupq_n_s32(0);
+  if constexpr (Reduce) {
+    bias = vdupq_n_s32(static_cast<int32_t>(1u << (shift - 1)));
+    negShift = vdupq_n_s32(-static_cast<int32_t>(shift));
+    maxVal = vdupq_n_s32(static_cast<int32_t>(newWhite));
+  }
+#if defined(RAWV_USE_NEON2SSE)
+  // The x86 shim marks the register-operand vshlq_s32 deprecated ("slow,
+  // serial"). That is a property of the SHIM, not of the target: on arm64 it
+  // is a single SSHL, and `shift` is a runtime value (the user's chosen record
+  // depth), so the immediate-form vshrq_n_s32 is not usable. The host build
+  // exists to prove bit-exactness, not to be fast -- silence the shim's advice
+  // rather than deoptimize the Android path it is not describing.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  auto reduce4 = [&](int32x4_t v) -> int32x4_t {
+    if constexpr (Reduce) return vminq_s32(vshlq_s32(vaddq_s32(v, bias), negShift), maxVal);
+    else return v;
+  };
+#if defined(RAWV_USE_NEON2SSE)
+#pragma GCC diagnostic pop
+#endif
   for (; x + 4 <= xEnd; x += 4) {
-    int32x4_t a = loadU16x4AsS32(cur + x);
-    int32x4_t l = loadU16x4AsS32(cur + x - 2);
-    int32x4_t u = loadU16x4AsS32(up + x);
-    int32x4_t ul = loadU16x4AsS32(up + x - 2);
+    int32x4_t a = reduce4(loadU16x4AsS32(cur + x));
+    int32x4_t l = reduce4(loadU16x4AsS32(cur + x - 2));
+    int32x4_t u = reduce4(loadU16x4AsS32(up + x));
+    int32x4_t ul = reduce4(loadU16x4AsS32(up + x - 2));
     int32x4_t linear = vsubq_s32(vaddq_s32(l, u), ul);
     int32x4_t pred = vmaxq_s32(vminq_s32(l, u), vminq_s32(linear, vmaxq_s32(l, u)));
     int32x4_t r = vsubq_s32(a, pred);
@@ -698,10 +818,22 @@ void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
     vst1q_u32(zOut + x, vreinterpretq_u32_s32(z));
   }
 #endif
+  auto red = [&](uint16_t s) -> int32_t {
+    if constexpr (Reduce) return reduceSample(s, shift, newWhite);
+    else return s;
+  };
   for (; x < xEnd; x++) {
-    zOut[x] = zigzagEncode(static_cast<int32_t>(cur[x]) -
-                           medPredict(cur[x - 2], up[x], up[x - 2]));
+    zOut[x] = zigzagEncode(red(cur[x]) -
+                           medPredict(red(cur[x - 2]), red(up[x]), red(up[x - 2])));
   }
+}
+
+}  // namespace
+
+void computeInteriorResidualsRow(const uint16_t* plane, uint32_t y,
+                                 uint32_t rowStrideSamples, uint32_t xStart,
+                                 uint32_t xEnd, uint32_t* zOut) {
+  computeInteriorResidualsRowImpl<false>(plane, y, rowStrideSamples, xStart, xEnd, zOut, 0, 0);
 }
 
 }  // namespace rawcam

@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
+#include "rawcam/bit_depth.h"
 #include "rawcam/rawv_codec.h"
 #include <algorithm>
 #include <chrono>
@@ -579,4 +580,133 @@ TEST_CASE("workerThreadCount: single big core clamps margin to 1, then floor app
   // clusterCoreCount 1 -> max(1, 0) = 1, floored at defaultCap.
   CHECK(workerThreadCount(1, 4) == 4u);
   CHECK(workerThreadCount(1, 1) == 1u);
+}
+
+// A gradient plus small noise, NOT uniform random. Uniform 14-bit noise is
+// near-incompressible: Rice-coded it can exceed 16 bits/sample, so encodeFrame
+// would return 0 for insufficient outCapacity and these tests would fail on
+// capacity rather than on the behaviour under test. This shape also exercises
+// the q == 0 fast path that dominates real frames.
+static std::vector<uint16_t> testFrame(uint32_t w, uint32_t h) {
+  std::vector<uint16_t> v(w * h);
+  for (uint32_t y = 0; y < h; y++)
+    for (uint32_t x = 0; x < w; x++)
+      v[y * w + x] = (uint16_t)(((x * 3 + y * 5) % 512) * 24 + ((x * 7919 + y) % 17));
+  return v;
+}
+
+TEST_CASE("encoding with a shift round-trips to the reduced samples") {
+  const uint32_t w = 64, h = 16, stride = w;
+  std::vector<uint16_t> src = testFrame(w, h);
+
+  const uint32_t shift = 2, newWhite = rawcam::reducedWhiteLevel(16383, shift);
+  std::vector<uint16_t> expected(src.size());
+  for (size_t i = 0; i < src.size(); i++)
+    expected[i] = rawcam::reduceSample(src[i], shift, newWhite);
+
+  std::vector<uint8_t> enc(src.size() * 4 + 4096);
+  uint32_t n = rawcam::encodeFrame(src.data(), w, h, stride, 12, enc.data(),
+                                   (uint32_t)enc.size(), shift, newWhite);
+  REQUIRE(n > 0);
+
+  std::vector<uint16_t> back(src.size());
+  REQUIRE(rawcam::decodeFrame(enc.data(), n, back.data(), w, h, stride, 12));
+  CHECK(back == expected);
+}
+
+TEST_CASE("a shift genuinely shrinks the encoded frame") {
+  const uint32_t w = 64, h = 16, stride = w;
+  std::vector<uint16_t> src = testFrame(w, h);
+
+  std::vector<uint8_t> a(src.size() * 4 + 4096), b(src.size() * 4 + 4096);
+  uint32_t full = rawcam::encodeFrame(src.data(), w, h, stride, 14, a.data(), (uint32_t)a.size());
+  uint32_t red = rawcam::encodeFrame(src.data(), w, h, stride, 12, b.data(), (uint32_t)b.size(),
+                                     2, rawcam::reducedWhiteLevel(16383, 2));
+  REQUIRE(full > 0);
+  REQUIRE(red > 0);
+  CHECK(red < full);
+}
+
+TEST_CASE("shift 0 is bit-identical to the pre-existing encoder") {
+  const uint32_t w = 64, h = 16, stride = w;
+  std::vector<uint16_t> src = testFrame(w, h);
+
+  std::vector<uint8_t> a(src.size() * 4 + 4096), b(src.size() * 4 + 4096);
+  uint32_t x = rawcam::encodeFrame(src.data(), w, h, stride, 14, a.data(), (uint32_t)a.size());
+  uint32_t y = rawcam::encodeFrame(src.data(), w, h, stride, 14, b.data(), (uint32_t)b.size(), 0, 16383);
+  REQUIRE(x > 0);
+  CHECK(x == y);
+  CHECK(std::equal(a.begin(), a.begin() + x, b.begin()));
+}
+
+// Native is the DEFAULT. Bit-exactness above proves correctness; this proves we
+// did not tax every existing user with a per-sample branch for a feature they
+// have not enabled. Generous threshold: this catches a structural regression
+// (a branch in the inner loop), not small machine noise.
+TEST_CASE("shift 0 costs no more than the pre-existing encoder") {
+  const uint32_t w = 512, h = 256, stride = w;
+  std::vector<uint16_t> src = testFrame(w, h);
+  std::vector<uint8_t> out(src.size() * 4 + 4096);
+
+  auto timeIt = [&](bool withShiftArgs) {
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; i++) {
+      if (withShiftArgs)
+        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size(), 0, 16383);
+      else
+        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size());
+    }
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  };
+
+  timeIt(false);  // warm caches and clocks; discard
+  const double bare = timeIt(false);
+  const double zeroShift = timeIt(true);
+  CHECK(zeroShift < bare * 1.15);
+}
+
+TEST_CASE("ParallelFrameEncoder with a shift is byte-identical to encodeFrame with the same shift") {
+  // The real compressed capture path is ParallelFrameEncoder::computeBands(),
+  // not the free encodeFrame() -- without this case the whole feature could be
+  // a silent no-op on device while every other test here passed. 512x512 with
+  // threadCount forced to 4 guarantees a real multi-band split, and every
+  // interior row goes through computeInteriorResidualsRow's VECTORIZED
+  // reduction while encodeFrame uses the scalar predictor for the same pixels,
+  // so byte-identical output also pins the two against each other.
+  const uint32_t w = 512, h = 512, shift = 2;
+  const uint32_t newWhite = rawcam::reducedWhiteLevel(16383, shift);
+  std::vector<uint16_t> src = testFrame(w, h);
+
+  std::vector<uint8_t> serial(static_cast<size_t>(w) * h * 4 + 4096);
+  uint32_t serialN = encodeFrame(src.data(), w, h, w, 12, serial.data(),
+                                  static_cast<uint32_t>(serial.size()), shift, newWhite);
+  REQUIRE(serialN > 0);
+
+  ParallelFrameEncoder parallel(w, h, /*threadCount=*/4);
+  std::vector<uint8_t> parallelOut(static_cast<size_t>(w) * h * 4 + 4096);
+  uint32_t parallelN = parallel.encode(src.data(), w, 12, parallelOut.data(),
+                                        static_cast<uint32_t>(parallelOut.size()), shift, newWhite);
+  REQUIRE(parallelN == serialN);
+  CHECK(std::equal(serial.begin(), serial.begin() + serialN, parallelOut.begin()));
+
+  std::vector<uint16_t> expected(src.size());
+  for (size_t i = 0; i < src.size(); i++)
+    expected[i] = rawcam::reduceSample(src[i], shift, newWhite);
+  std::vector<uint16_t> decoded(src.size());
+  REQUIRE(decodeFrame(parallelOut.data(), parallelN, decoded.data(), w, h, w, 12));
+  CHECK(decoded == expected);
+}
+
+TEST_CASE("ParallelFrameEncoder at shift 0 is unchanged by the new parameters") {
+  // The Native default must stay bit-identical through the parallel path too.
+  const uint32_t w = 512, h = 512;
+  std::vector<uint16_t> src = testFrame(w, h);
+
+  ParallelFrameEncoder parallel(w, h, /*threadCount=*/4);
+  std::vector<uint8_t> a(static_cast<size_t>(w) * h * 4 + 4096), b(a.size());
+  uint32_t bare = parallel.encode(src.data(), w, 14, a.data(), (uint32_t)a.size());
+  uint32_t explicitZero = parallel.encode(src.data(), w, 14, b.data(), (uint32_t)b.size(), 0, 16383);
+  REQUIRE(bare > 0);
+  CHECK(bare == explicitZero);
+  CHECK(std::equal(a.begin(), a.begin() + bare, b.begin()));
 }

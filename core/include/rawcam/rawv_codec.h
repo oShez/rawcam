@@ -21,13 +21,30 @@ namespace rawcam {
 // (caller-owned, must be at least `outCapacity` bytes). Returns 0 if the
 // encoded output would not fit in `outCapacity` -- caller should fall back
 // to storing the frame uncompressed. Never allocates, never throws.
+//
+// `shift`/`newWhite` select the record bit depth: every sample is reduced ON
+// READ by rawcam::reduceSample(sample, shift, newWhite) as the encoder walks
+// the frame -- never as a separate pass, which would add a full frame's worth
+// of memory traffic to a workload already established as memory-bandwidth-
+// bound. `shift == 0` (the default, "Native") is a true no-op: the encoder
+// dispatches once on entry to a Reduce=false instantiation that compiles to
+// exactly the instructions it emitted before this parameter existed. Get
+// `shift` from rawcam::shiftForDepth() and `newWhite` from
+// rawcam::reducedWhiteLevel() (see rawcam/bit_depth.h); `bitDepth` must
+// already be the REDUCED depth, since it sets the first-two-rows/columns
+// baseline that decodeFrame will reproduce.
 uint32_t encodeFrame(const uint16_t* raw16, uint32_t width, uint32_t height,
                       uint32_t rowStrideSamples, uint32_t bitDepth,
-                      uint8_t* out, uint32_t outCapacity);
+                      uint8_t* out, uint32_t outCapacity,
+                      uint32_t shift = 0, uint32_t newWhite = 0);
 
 // Inverse of encodeFrame. `out` must have room for height * rowStrideSamples
 // samples. Returns false if `compressed` is malformed/truncated -- caller
 // should treat this as a corrupt-frame read error.
+//
+// Takes NO shift: the stored samples are ALREADY reduced, and `bitDepth` is
+// already the reduced depth, so reducing again here would corrupt the
+// reconstruction. Decoding a reduced frame yields the reduced samples.
 bool decodeFrame(const uint8_t* compressed, uint32_t compressedSize,
                   uint16_t* out, uint32_t width, uint32_t height,
                   uint32_t rowStrideSamples, uint32_t bitDepth);
@@ -96,8 +113,11 @@ class ParallelFrameEncoder {
   // as computeBands() immediately followed by mergeSlot() on the same
   // thread -- kept for callers that don't need pipelining (all existing host
   // tests use this).
+  // `shift`/`newWhite` mean exactly what they mean on encodeFrame(): the
+  // record bit depth, applied on read inside the band workers. 0 is Native.
   uint32_t encode(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth,
-                   uint8_t* out, uint32_t outCapacity);
+                   uint8_t* out, uint32_t outCapacity,
+                   uint32_t shift = 0, uint32_t newWhite = 0);
 
   // Async split of encode() for pipelining: computeBands() does k-selection +
   // per-band predict+residual+Rice-pack (the CPU-heavy step) and returns a
@@ -118,7 +138,12 @@ class ParallelFrameEncoder {
   // Only ever call computeBands() from one thread and mergeSlot() from one
   // (possibly different) thread -- neither is safe to call concurrently with
   // itself.
-  uint32_t computeBands(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth);
+  //
+  // `shift`/`newWhite` are the record bit depth (see encodeFrame()); like
+  // `bitDepth` they belong to the frame, so they are latched into the job
+  // fields for this generation and every band worker reduces on read.
+  uint32_t computeBands(const uint16_t* raw16, uint32_t rowStrideSamples, uint32_t bitDepth,
+                        uint32_t shift = 0, uint32_t newWhite = 0);
 
   // Merges the given slot's bands (from a prior computeBands() call) into
   // `out`, same return contract as encode(). ALWAYS releases the slot before
@@ -134,8 +159,16 @@ class ParallelFrameEncoder {
 
   void workerLoop(uint32_t bandIndex);
   // Computes predict+residual+Rice-pack for this band directly into this
-  // slot's local buffer -- fused, no shared residual buffer.
+  // slot's local buffer -- fused, no shared residual buffer. Picks the
+  // Reduce=false / Reduce=true instantiation ONCE per band, from jobShift_.
   void computeAndPackBand(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd, uint32_t slot);
+  // The band body itself. Templated on the reduction rather than branching on
+  // jobShift_ per sample: Native (Reduce=false) is the default and must stay
+  // cost-identical to the pre-bit-depth encoder, so the decision is made once
+  // above and the compiler erases it from the inner loop entirely.
+  template <bool Reduce>
+  void computeAndPackBandImpl(uint32_t bandIndex, uint32_t bandStart, uint32_t bandEnd,
+                              uint32_t slot);
   // Pins every worker thread to the shared big+mid core mask in workerCores_.
   // No-op when workerCores_ is empty. Best-effort: a failed affinity syscall is
   // logged and ignored (the thread keeps running unpinned). Android-only body.
@@ -187,6 +220,11 @@ class ParallelFrameEncoder {
   const uint16_t* jobRaw16_ = nullptr;
   uint32_t jobRowStrideSamples_ = 0;
   uint32_t jobBitDepth_ = 0;
+  // Record-bit-depth reduction for this job, latched under mu_ alongside
+  // jobBitDepth_ and published to the workers by the same generation_ bump --
+  // so they are covered by exactly the memory-model argument above.
+  uint32_t jobShift_ = 0;
+  uint32_t jobNewWhite_ = 0;
   uint32_t jobK_ = 0;
   uint32_t jobSlot_ = 0;
   bool jobOverflowed_ = false;  // true if any band's local buffer couldn't hold its content
