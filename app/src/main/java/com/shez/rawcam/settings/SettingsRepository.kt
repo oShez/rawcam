@@ -17,6 +17,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
+/** Offered record depths; 0 = Native (follow the sensor). No 16: no sensor here
+ *  delivers it -- Raw16 is a container format, not a precision. */
+val RECORD_BIT_DEPTHS = listOf(0, 14, 12, 10, 8)
+
 /** When to show the metering overlay on app startup. */
 enum class StartupMeter { ALWAYS, IF_NO_SAVED, NEVER }
 
@@ -52,6 +56,7 @@ data class Settings(
     val rememberLastState: Boolean = true,
     val freeSpaceReserveSeconds: Int = 35,   // 5..120 step 5
     val maxClipLengthSeconds: Int = 0,       // 0=off, 30, 60, 300, 600
+    val recordBitDepth: Int = 0,             // 0=Native, 14, 12, 10, 8
     val thermalAutoStop: Boolean = false,
     val mainsFreq: MainsFreq = MainsFreq.OFF,
     val oisMode: OisMode = OisMode.AUTO,
@@ -144,6 +149,7 @@ object SettingsRepository {
     private val KEY_REMEMBER_LAST_STATE = booleanPreferencesKey("rememberLastState")
     private val KEY_FREE_SPACE_RESERVE_SECONDS = intPreferencesKey("freeSpaceReserveSeconds")
     private val KEY_MAX_CLIP_LENGTH_SECONDS = intPreferencesKey("maxClipLengthSeconds")
+    private val KEY_RECORD_BIT_DEPTH = intPreferencesKey("recordBitDepth")
     private val KEY_THERMAL_AUTO_STOP = booleanPreferencesKey("thermalAutoStop")
     private val KEY_MAINS_FREQ = stringPreferencesKey("mainsFreq")
     private val KEY_OIS_MODE = stringPreferencesKey("oisMode")
@@ -204,6 +210,7 @@ object SettingsRepository {
             rememberLastState = this[KEY_REMEMBER_LAST_STATE] ?: fallback.rememberLastState,
             freeSpaceReserveSeconds = this[KEY_FREE_SPACE_RESERVE_SECONDS] ?: fallback.freeSpaceReserveSeconds,
             maxClipLengthSeconds = this[KEY_MAX_CLIP_LENGTH_SECONDS] ?: fallback.maxClipLengthSeconds,
+            recordBitDepth = this[KEY_RECORD_BIT_DEPTH] ?: fallback.recordBitDepth,
             thermalAutoStop = this[KEY_THERMAL_AUTO_STOP] ?: fallback.thermalAutoStop,
             mainsFreq = decodeEnum(this[KEY_MAINS_FREQ], fallback.mainsFreq),
             oisMode = decodeEnum(this[KEY_OIS_MODE], fallback.oisMode),
@@ -237,25 +244,14 @@ object SettingsRepository {
 
     /**
      * Applies [transform] to the current [Settings] and writes every field back.
-     * [Settings.clipPrefix] is re-sanitized via [sanitizePrefix] and
-     * [Settings.freeSpaceReserveSeconds] is coerced into `5..120` on write, so callers
-     * (and stray direct field mutations from a `copy()`) can never persist an invalid
-     * prefix or an out-of-range reserve.
+     * All corruption-only guards from [Settings.coerced] are applied on write,
+     * so callers (and stray direct field mutations from a `copy()`) can never
+     * persist an invalid prefix or an out-of-range setting.
      */
     suspend fun update(transform: (Settings) -> Settings) {
         dataStore.edit { prefs ->
             val updated = transform(prefs.toSettings())
-            val next = updated.copy(
-                clipPrefix = sanitizePrefix(updated.clipPrefix),
-                freeSpaceReserveSeconds = updated.freeSpaceReserveSeconds.coerceIn(5, 120),
-                // Corruption-only guards: the UI always writes one of a fixed set of
-                // stops for these two, but a corrupted DataStore value is otherwise
-                // read back unclamped and could feed an absurd reticle-hold delay or
-                // clip-length limit straight into the recording path.
-                maxClipLengthSeconds = updated.maxClipLengthSeconds.coerceIn(0, 3600),
-                reticleHoldMs = updated.reticleHoldMs.coerceIn(100, 5000),
-                audioGainDb = updated.audioGainDb.coerceIn(-20f, 30f),
-            )
+            val next = updated.coerced()
             prefs[KEY_STARTUP_METER] = next.startupMeter.name
             prefs[KEY_DEFAULT_KELVIN] = next.defaultKelvin
             prefs[KEY_DEFAULT_TINT] = next.defaultTint
@@ -267,6 +263,7 @@ object SettingsRepository {
             prefs[KEY_REMEMBER_LAST_STATE] = next.rememberLastState
             prefs[KEY_FREE_SPACE_RESERVE_SECONDS] = next.freeSpaceReserveSeconds
             prefs[KEY_MAX_CLIP_LENGTH_SECONDS] = next.maxClipLengthSeconds
+            prefs[KEY_RECORD_BIT_DEPTH] = next.recordBitDepth
             prefs[KEY_THERMAL_AUTO_STOP] = next.thermalAutoStop
             prefs[KEY_MAINS_FREQ] = next.mainsFreq.name
             prefs[KEY_OIS_MODE] = next.oisMode.name
@@ -385,3 +382,23 @@ object SettingsRepository {
             .take(16)
             .ifEmpty { "clip" }
 }
+
+/** Applies coercion rules to a Settings record, returning a new record with
+ *  guarded fields clamped to valid ranges. [clipPrefix] is re-sanitized via
+ *  [SettingsRepository.sanitizePrefix], and corruption-only guards clamp [freeSpaceReserveSeconds],
+ *  [maxClipLengthSeconds], [reticleHoldMs], [audioGainDb], and [recordBitDepth]
+ *  to their valid ranges. The UI always writes one of a fixed set of values for
+ *  these fields, but a corrupted DataStore value is otherwise read back unclamped
+ *  and could feed an absurd delay or limit straight into the recording path. */
+internal fun Settings.coerced(): Settings = this.copy(
+    clipPrefix = SettingsRepository.sanitizePrefix(this.clipPrefix),
+    freeSpaceReserveSeconds = this.freeSpaceReserveSeconds.coerceIn(5, 120),
+    // Corruption-only guards: the UI always writes one of a fixed set of
+    // stops for these, but a corrupted DataStore value is otherwise read back
+    // unclamped and could feed an absurd reticle-hold delay or clip-length
+    // limit straight into the recording path.
+    maxClipLengthSeconds = this.maxClipLengthSeconds.coerceIn(0, 3600),
+    reticleHoldMs = this.reticleHoldMs.coerceIn(100, 5000),
+    audioGainDb = this.audioGainDb.coerceIn(-20f, 30f),
+    recordBitDepth = if (this.recordBitDepth in RECORD_BIT_DEPTHS) this.recordBitDepth else 0,
+)
