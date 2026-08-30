@@ -39,6 +39,37 @@ Against a *thermal* limit, the thing that pays is reducing **bytes per pixel**,
 which pays twice: less `writeRice` work (~84% of encode CPU) *and* less sustained
 write bandwidth and power, which is what provokes the throttle.
 
+### How large a win to expect (revised after review)
+
+Smaller than a first pass suggests, and it is worth being precise about why.
+
+**Encode CPU scales sublinearly with bit depth, not proportionally.** The Rice
+fast path is `if (q == 0) return writeBits(value, k + 1)` -- **one append per
+pixel, regardless of depth**. Truncating lowers `k`, so each append is *narrower*,
+but the per-pixel work (load, predict, zigzag, branch) is unchanged; only the
+accumulator-flush frequency falls. So the ~84% of encode CPU sitting in
+`writeRice` does not scale with bit count, and an early "~1.4x encode" estimate
+was wrong.
+
+**Read bandwidth is entirely unchanged.** Approach A shifts on *read*, so the
+source frame is still 16 bits per sample in memory. On a workload established as
+memory-bandwidth-bound, truncation only touches the smaller half of the traffic
+(~25 MB in per frame versus ~14 MB out).
+
+**What the win actually is: write bandwidth, and therefore power and heat.** The
+file shrinks roughly in proportion to the bits removed, which cuts sustained
+flash write throughput and the power that goes with it. Against a *thermal*
+ceiling -- which is what the drop curve above shows -- that is still the right
+lever, and it is the one lever left that reduces bytes rather than racing the
+clock. But it is an indirect, second-order path to the frame-drop fix, not a
+direct speedup of the encoder.
+
+**Consequence for planning:** the honest prior is a modest improvement of unknown
+size, plausibly well under 1.4x. If the A/B shows little, the 16:9 capture crop
+is the better next lever, because removing 25% of the *pixels* cuts read
+bandwidth, write bandwidth and per-pixel CPU together, and so sidesteps both
+limitations above.
+
 **Caveat, stated up front:** the frame-drop win is a hypothesis. The reasoning is
 sound but the round-4 NEON work is a standing reminder that predicted wins can
 evaporate on hardware. The device A/B (below) settles it. The default does not
@@ -112,6 +143,20 @@ visibly disabled** (option (c) of three considered; the alternatives were a menu
 that changes per lens, and silent clamping, both rejected -- the first for a
 moving menu, the second because "12-bit" would sometimes mean 10).
 
+**8-bit buys nothing on the uncompressed path.** `PackMode` is
+`Raw16 / Packed10 / Packed12 / CompressedPredictive`, and `rawv_reader.cpp:20`
+switches on exactly those -- there is no `Packed8`. Since `capture.cpp:423` picks
+the mode from `whiteLevel <= 0x3FF`, an 8-bit selection routes to **Packed10**:
+8-bit samples in 10-bit containers, 20% wasted, and no file-size win at all over
+simply choosing 10-bit. 8-bit remains a genuine win on the *compressed* path,
+where Rice coding adapts to the smaller residuals.
+
+Adding a `Packed8` mode was considered and rejected: it is a real format addition
+(a new enum value that older readers hit as `default`), which would forfeit the
+"no format change" property below for the least useful depth on the list. The
+limitation is documented instead, and should be surfaced in the picker's helper
+text rather than left for a user to discover from file sizes.
+
 **"Native" and an explicit equal depth are not the same setting**, even where they
 currently produce identical output. On the 14-bit main camera both Native and 14
 record `shift = 0` today; the difference is what happens on another lens or
@@ -136,11 +181,26 @@ A RAW capture app should not quietly begin discarding sensor data on upgrade;
 fidelity is why the format was chosen. Flipping the default later is a one-line
 change, and should be backed by the device A/B rather than by this reasoning.
 
-### Rounding
+### Rounding: samples and levels are scaled DIFFERENTLY
 
-Round, do not truncate, and clamp: `(x + (1 << (n-1))) >> n`, capped at the new
-white level. A bare `>>` biases every sample down by half an LSB, shifting the
-black point.
+This is the subtlest part of the design and the easiest to get plausibly wrong.
+
+- **Samples** are rounded and then clamped: `min((x + (1 << (n-1))) >> n, newWhite)`.
+  A bare `>>` biases every sample down by half an LSB, shifting the black point.
+- **`whiteLevel` is truncated**: `newWhite = whiteLevel >> n`. It must NOT be
+  rounded.
+- **`blackLevel[4]` is rounded**, like the samples, so the black point keeps its
+  relationship to them.
+
+The reason `whiteLevel` differs is `capture.cpp:189`, which derives depth as
+`32 - __builtin_clz(whiteLevel)`. Going 14 -> 12 bits, *rounding* 16383 gives
+4096, which needs **13** bits -- the codec would then run at bitDepth 13 against
+12-bit samples. Truncating gives 4095, which is 12 bits, correct.
+
+The clamp on samples exists precisely because of this asymmetry: rounding a
+sample at full scale yields 4096 while the new white level is 4095, so the top
+code value must be pinned. The cost is a single slightly non-linear code at the
+very top of the range, which is the right trade against a wrong bit depth.
 
 **No dithering.** It would hide banding in gradients but adds entropy, which
 works directly against the purpose of the feature.
@@ -178,12 +238,30 @@ works directly against the purpose of the feature.
 `whiteLevel` + `blackLevel`, which `rawv_reader` and `dng_writer` already consume.
 Existing clips are unaffected and DNG export needs no edit.
 
+## Two consequences that follow automatically
+
+**Clip previews need no change -- verified, not assumed.** `preview.cpp` develops
+straight from the RAW plane and normalises against black and white
+(`normalise(sample, black, range)`), so a wrong source for those would give
+reduced-depth clips a colour cast. It is not a wrong source: `preview.cpp:200-201`
+passes `h.blackLevel, h.whiteLevel` from the clip header. Once capture writes
+scaled levels, previews and proxies follow with no edit. Worth having checked
+given the `asShotNeutral`-is-dead bug found in this same area.
+
+**Persisted `captureRates` go stale, harmlessly.** Adding bit depth to
+`captureRateKey` orphans every stored key. They are unused map entries, trimmed by
+`MAX_CAPTURE_RATES = 32`, so nothing breaks -- but the first take at each new
+depth shows the `~` prefix on the time-left readout again while it re-measures.
+That is correct behaviour, not a regression, and should not be filed as one.
+
 ## The correctness trap
 
-`blackLevel[4]` is in sensor units and **must** be scaled by the same shift with
-the same rounding as the samples. Miss it and every frame carries a wrong black
-point and every exported DNG is subtly broken -- visually plausible, quietly
-wrong, and not something a smoke test would catch. This gets dedicated tests.
+`blackLevel[4]` is in sensor units and **must** be scaled by the same shift, with
+the same rounding as the samples (and unlike `whiteLevel`, which is truncated --
+see the Rounding section). Miss it and every frame carries a wrong black point and
+every exported DNG is subtly broken -- visually plausible, quietly wrong, and not
+something a smoke test would catch. It also silently corrupts clip previews, which
+normalise against black. This gets dedicated tests.
 
 ## Testing
 
@@ -202,13 +280,33 @@ wrong, and not something a smoke test would catch. This gets dedicated tests.
 - Settings persistence and coercion.
 - `frameRecordBytes` and `captureRateKey` at each depth.
 
-**Device**
+**Device -- the A/B protocol is part of the spec, not an afterthought**
 
-- A **cool, unplugged** 14-bit vs 12-bit A/B on the main camera, measuring
-  landing rate. Both the 2026-08-17 round-5 measurement and the 2026-08-30
-  measurement above were taken on a warm, USB-plugged device and are therefore
-  upper bounds on drops, not baselines. A clean baseline is needed to know
-  whether the gap is 1.05x or 1.4x.
+The diagnosis is thermal. That makes a naive "record 14-bit, then record 12-bit"
+comparison worthless: the second take runs on a hotter phone, so it measures
+cooldown as much as bit depth. This is exactly how the round-4 NEON result was
+lost, and it is the single most likely way to waste this work.
+
+Required protocol:
+
+- **Interleave A/B/A/B** (14, 12, 14, 12) rather than running all of one then all
+  of the other, so any thermal trend is shared by both arms.
+- **Equal cooldown between every take**, from a cool start, **unplugged** -- USB
+  power alone changes the thermal budget.
+- **Compare drop rate at matched elapsed times** within the take (e.g. drops in
+  seconds 0-10, 10-20, 20-30 separately), not as a single whole-take average. The
+  2026-08-30 data shows drops are zero early and steady later, so a whole-take
+  number is dominated by how long the take was.
+- Record SoC/battery temperature at the start of each take and discard any pair
+  whose starting temperatures differ materially.
+- Landing rate is read from the on-screen `frames`/`dropped` counters; screen
+  capture at ~1 Hz over adb is sufficient and was used to produce the table above.
+
+Both the 2026-08-17 round-5 measurement and the 2026-08-30 measurement above were
+taken on a warm, USB-plugged device and are upper bounds on drops, not baselines.
+
+Also on-device:
+
 - Verify `packMode@20 == 3` and the reduced `whiteLevel@28` on the resulting clip
   before trusting any number.
 - Confirm an exported DNG from a reduced-depth clip has correct black and white
