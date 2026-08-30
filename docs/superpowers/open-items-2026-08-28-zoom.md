@@ -5,6 +5,13 @@ Spec: `docs/superpowers/specs/2026-08-27-zoom-design.md`.
 
 Merged to `main` as a 14-commit fast-forward (`f2411b3..980675d`) and pushed.
 
+**Status 2026-08-30.** Everything below is on `main` at `eb43a64`, in sync with
+`origin/main`, working tree clean, no branches outstanding. The follow-on 16:9
+layout fix and numeric resolution labels shipped on top (`191e9b4..eb43a64`).
+Both the release (`com.shez.rawcam`) and debug (`com.shez.rawcam.debug`) APKs on
+the Xiaomi carry this work. Open items 1 and 2 are the only things still
+outstanding, and both need the phone in hand rather than more code.
+
 ## What's done
 
 | Commit | Task | What it does |
