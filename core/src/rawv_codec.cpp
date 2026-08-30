@@ -339,10 +339,14 @@ uint32_t riceParamFor(uint64_t sumAbs, uint64_t count) {
   return k;
 }
 
-// Encode pass 1: one Rice parameter for the whole frame, from the sum of
-// absolute residuals. Recomputing predictAt() in pass 2 is cheap integer
-// arithmetic -- far cheaper than holding a full-frame residual buffer
-// (width*height*4 bytes) alive just to avoid a second pass.
+// Pass 1: one Rice parameter for the whole frame, from the sum of absolute
+// residuals. Both callers recompute predictAt() rather than holding a
+// full-frame residual buffer (width*height*4 bytes) alive just to avoid
+// redoing the prediction: encodeFrameImpl() recomputes it in its own
+// (serial) pass 2, and ParallelFrameEncoder::computeBands()'s band workers
+// each recompute it independently while packing their band, in place of a
+// second serial pass. Either way it's cheap integer arithmetic, far
+// cheaper than the buffer.
 // Samples a strided grid (1/16th of pixels) instead of scanning every one
 // -- this pass does no bit I/O, so its only cost is the scan itself, and
 // real sensor noise doesn't vary pixel-to-pixel in a way uniform sampling

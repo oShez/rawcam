@@ -57,6 +57,7 @@ import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
 import com.shez.rawcam.settings.MeterScope
 import com.shez.rawcam.settings.OisMode
+import com.shez.rawcam.settings.RECORD_BIT_DEPTHS
 import com.shez.rawcam.settings.Settings
 import com.shez.rawcam.settings.SettingsRepository
 import com.shez.rawcam.settings.ShutterDisplay
@@ -225,7 +226,11 @@ fun SettingsScreen(
                 title = "Record bit depth",
                 subtitle = "Lower depth shrinks files and eases sustained writes. " +
                     "8-bit only saves space with compression on.",
-                options = listOf(0 to "Native", 14 to "14", 12 to "12", 10 to "10", 8 to "8"),
+                // Derived from RECORD_BIT_DEPTHS -- SettingsRepository's coercion whitelist --
+                // rather than a second hardcoded list, so the two cannot drift: an entry
+                // added to one and not the other would offer a value coerced() silently
+                // resets to Native.
+                options = RECORD_BIT_DEPTHS.map { it to if (it == 0) "Native" else it.toString() },
                 selected = settings.recordBitDepth,
                 onSelect = { v -> apply { it.copy(recordBitDepth = v) } },
                 // Native is never disabled; an explicit depth above what this lens delivers is.
