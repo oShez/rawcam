@@ -15,7 +15,7 @@
 - **`whiteLevel` is TRUNCATED (`>> n`); samples are ROUNDED then CLAMPED; `blackLevel[4]` is ROUNDED.** These are three different rules on the same shift. Rounding `whiteLevel` 16383 by 2 gives 4096, which needs 13 bits, so `32 - clz(whiteLevel)` would run the codec one bit wider than the samples.
 - Sample reduction is exactly: `min((x + (1 << (n-1))) >> n, newWhite)` where `newWhite = whiteLevel >> n`.
 - Level reduction is exactly: `(level + (1 << (n-1))) >> n` for each of the four `blackLevel` entries.
-- `n == 0` (Native) must be a true no-op on every path — bit-identical output to today.
+- `n == 0` (Native) must be a true no-op on every path — **bit-identical AND cost-identical** to today. Native is the default, so a per-sample `if (shift == 0)` branch in the encoder's inner loop would tax every existing user for a feature they have not enabled, on the very path this work exists to speed up. The reduction is therefore selected by `template <bool Reduce>` and dispatched **once** per frame in `encodeFrame`, so `Reduce=false` compiles to exactly today's instructions. Bit-exactness alone is not sufficient evidence: Task 2 gates on a timing comparison as well.
 - **No dithering.** It adds entropy and works against the purpose.
 - **No new `PackMode` enum value.** There is no `Packed8`; 8-bit routes to `Packed10` and wins nothing on the uncompressed path. This is documented, not fixed.
 - Depth is stored as **requested**; clamping to the lens's native depth happens only at capture. Lens switching never rewrites the stored value.
@@ -182,17 +182,29 @@ git commit -m "feat(core): bit-depth reduction primitives"
 Append to `core/tests/test_rawv_codec.cpp`:
 
 ```cpp
+// A gradient plus small noise, NOT uniform random. Uniform 14-bit noise is
+// near-incompressible: Rice-coded it can exceed 16 bits/sample, so encodeFrame
+// would return 0 for insufficient outCapacity and these tests would fail on
+// capacity rather than on the behaviour under test. This shape also exercises
+// the q == 0 fast path that dominates real frames.
+static std::vector<uint16_t> testFrame(uint32_t w, uint32_t h) {
+  std::vector<uint16_t> v(w * h);
+  for (uint32_t y = 0; y < h; y++)
+    for (uint32_t x = 0; x < w; x++)
+      v[y * w + x] = (uint16_t)(((x * 3 + y * 5) % 512) * 24 + ((x * 7919 + y) % 17));
+  return v;
+}
+
 TEST_CASE("encoding with a shift round-trips to the reduced samples") {
   const uint32_t w = 64, h = 16, stride = w;
-  std::vector<uint16_t> src(stride * h);
-  for (uint32_t i = 0; i < src.size(); i++) src[i] = (uint16_t)((i * 7919) % 16384);
+  std::vector<uint16_t> src = testFrame(w, h);
 
   const uint32_t shift = 2, newWhite = rawcam::reducedWhiteLevel(16383, shift);
   std::vector<uint16_t> expected(src.size());
   for (size_t i = 0; i < src.size(); i++)
     expected[i] = rawcam::reduceSample(src[i], shift, newWhite);
 
-  std::vector<uint8_t> enc(src.size() * 2 + 4096);
+  std::vector<uint8_t> enc(src.size() * 4 + 4096);
   uint32_t n = rawcam::encodeFrame(src.data(), w, h, stride, 12, enc.data(),
                                    (uint32_t)enc.size(), shift, newWhite);
   REQUIRE(n > 0);
@@ -204,10 +216,9 @@ TEST_CASE("encoding with a shift round-trips to the reduced samples") {
 
 TEST_CASE("a shift genuinely shrinks the encoded frame") {
   const uint32_t w = 64, h = 16, stride = w;
-  std::vector<uint16_t> src(stride * h);
-  for (uint32_t i = 0; i < src.size(); i++) src[i] = (uint16_t)((i * 7919) % 16384);
+  std::vector<uint16_t> src = testFrame(w, h);
 
-  std::vector<uint8_t> a(src.size() * 2 + 4096), b(src.size() * 2 + 4096);
+  std::vector<uint8_t> a(src.size() * 4 + 4096), b(src.size() * 4 + 4096);
   uint32_t full = rawcam::encodeFrame(src.data(), w, h, stride, 14, a.data(), (uint32_t)a.size());
   uint32_t red = rawcam::encodeFrame(src.data(), w, h, stride, 12, b.data(), (uint32_t)b.size(),
                                      2, rawcam::reducedWhiteLevel(16383, 2));
@@ -218,17 +229,44 @@ TEST_CASE("a shift genuinely shrinks the encoded frame") {
 
 TEST_CASE("shift 0 is bit-identical to the pre-existing encoder") {
   const uint32_t w = 64, h = 16, stride = w;
-  std::vector<uint16_t> src(stride * h);
-  for (uint32_t i = 0; i < src.size(); i++) src[i] = (uint16_t)((i * 7919) % 16384);
+  std::vector<uint16_t> src = testFrame(w, h);
 
-  std::vector<uint8_t> a(src.size() * 2 + 4096), b(src.size() * 2 + 4096);
+  std::vector<uint8_t> a(src.size() * 4 + 4096), b(src.size() * 4 + 4096);
   uint32_t x = rawcam::encodeFrame(src.data(), w, h, stride, 14, a.data(), (uint32_t)a.size());
   uint32_t y = rawcam::encodeFrame(src.data(), w, h, stride, 14, b.data(), (uint32_t)b.size(), 0, 16383);
   REQUIRE(x > 0);
   CHECK(x == y);
   CHECK(std::equal(a.begin(), a.begin() + x, b.begin()));
 }
+
+// Native is the DEFAULT. Bit-exactness above proves correctness; this proves we
+// did not tax every existing user with a per-sample branch for a feature they
+// have not enabled. Generous threshold: this catches a structural regression
+// (a branch in the inner loop), not small machine noise.
+TEST_CASE("shift 0 costs no more than the pre-existing encoder") {
+  const uint32_t w = 512, h = 256, stride = w;
+  std::vector<uint16_t> src = testFrame(w, h);
+  std::vector<uint8_t> out(src.size() * 4 + 4096);
+
+  auto timeIt = [&](bool withShiftArgs) {
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; i++) {
+      if (withShiftArgs)
+        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size(), 0, 16383);
+      else
+        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size());
+    }
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  };
+
+  timeIt(false);  // warm caches and clocks; discard
+  const double bare = timeIt(false);
+  const double zeroShift = timeIt(true);
+  CHECK(zeroShift < bare * 1.15);
+}
 ```
+
+`test_rawv_codec.cpp` already includes `<chrono>`; keep that include.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -242,9 +280,16 @@ Expected: FAIL — `encodeFrame` takes 7 arguments, not 9.
 
 In `core/src/rawv_codec.cpp`:
 
-1. Give `predictAt` two extra parameters and apply reduction to every neighbour read:
+**Template on the reduction, do not branch per sample.** A runtime `shift == 0`
+check inside `predictAt` runs up to three times per pixel in the hottest loop in
+the codec, and Native — which pays it for nothing — is the default. Make the
+decision once, at frame level, and let the compiler erase it:
+
+1. Give `predictAt` a compile-time reduction parameter. With `Reduce=false` the
+   `at()` lambda folds away to exactly today's load:
 
 ```cpp
+template <bool Reduce>
 inline int32_t predictAt(const uint16_t* plane, uint32_t x, uint32_t y,
                          uint32_t rowStrideSamples, uint32_t bitDepth,
                          uint32_t shift, uint32_t newWhite) {
@@ -252,7 +297,9 @@ inline int32_t predictAt(const uint16_t* plane, uint32_t x, uint32_t y,
   bool hasUp = y >= 2;
   if (!hasLeft && !hasUp) return 1 << (bitDepth - 1);
   auto at = [&](uint32_t yy, uint32_t xx) -> int32_t {
-    return reduceSample(plane[yy * rowStrideSamples + xx], shift, newWhite);
+    uint16_t s = plane[yy * rowStrideSamples + xx];
+    if constexpr (Reduce) return reduceSample(s, shift, newWhite);
+    else return s;
   };
   if (!hasLeft) return at(y - 2, x);
   if (!hasUp) return at(y, x - 2);
@@ -260,20 +307,44 @@ inline int32_t predictAt(const uint16_t* plane, uint32_t x, uint32_t y,
 }
 ```
 
-2. `decodeFrame`'s call sites pass `shift = 0, newWhite = 0` — its buffer already holds reduced values, so reducing again would corrupt reconstruction.
+2. `decodeFrame` calls `predictAt<false>(..., 0, 0)`. Its buffer already holds
+   reduced values; reducing again would corrupt reconstruction.
 
-3. In `computeBands` pass 1, reduce the actual sample too, so the sampled residual (and therefore `k`) reflects the reduced data:
+3. Give the encode-side helpers the same `template <bool Reduce>` treatment —
+   `computeBands` pass 1, the band workers' fused predict+residual+pack loop, and
+   `computeInteriorResidualsRow`. In each, the actual sample is reduced under the
+   same `if constexpr`, so `k` selection reflects the reduced data:
 
 ```cpp
-int32_t actual = reduceSample(raw16[y * rowStrideSamples + x], shift, newWhite);
-int32_t predicted = predictAt(raw16, x, y, rowStrideSamples, bitDepth, shift, newWhite);
+uint16_t s = raw16[y * rowStrideSamples + x];
+int32_t actual = Reduce ? reduceSample(s, shift, newWhite) : (int32_t)s;
+int32_t predicted = predictAt<Reduce>(raw16, x, y, rowStrideSamples, bitDepth, shift, newWhite);
 ```
 
-4. Store `shift`/`newWhite` on the encoder alongside `jobBitDepth_` (`jobShift_`, `jobNewWhite_`) and apply the same `reduceSample` to `actual` in the band workers' fused predict+residual loop and in `computeInteriorResidualsRow`.
+4. `encodeFrame` dispatches **once**, on entry:
 
-5. Add `#include "rawcam/bit_depth.h"`.
+```cpp
+return (shift == 0) ? encodeFrameImpl<false>(raw16, width, height, rowStrideSamples,
+                                             bitDepth, out, outCapacity, 0, 0)
+                    : encodeFrameImpl<true>(raw16, width, height, rowStrideSamples,
+                                            bitDepth, out, outCapacity, shift, newWhite);
+```
 
-> Every read of `raw16` in the **encode** path must go through `reduceSample`. A missed site does not fail loudly — it silently corrupts output. Grep `raw16[` in the file and confirm each hit is either reduced or on the decode path.
+5. Store `shift`/`newWhite` on the encoder alongside `jobBitDepth_`
+   (`jobShift_`, `jobNewWhite_`) so the band workers can reach them.
+
+6. Add `#include "rawcam/bit_depth.h"` and `#include <chrono>` is already present
+   in the test file.
+
+> **`computeInteriorResidualsRow` is public API** (`rawv_codec.h:50`) and is
+> consumed by `core/tests/test_rawv_simd_spike.cpp`. Templating it changes that
+> call site — give it a non-template forwarding overload with the old signature
+> (delegating to `<false>`) so the spike test compiles unchanged.
+
+> Every read of `raw16` in the **encode** path must go through the `Reduce`
+> branch. A missed site does not fail loudly — it silently corrupts output. Grep
+> `raw16[` in the file and confirm each hit is either reduced or on the decode
+> path.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -373,27 +444,54 @@ git commit -m "feat(core): reduce samples on the packed uncompressed paths"
 - Consumes: `rawcam::shiftForDepth`, `reducedWhiteLevel`, `reduceLevel` (Task 1); the new `encodeFrame` (Task 2); the new `pack10`/`pack12` (Task 3).
 - Produces: `Capture::start(...)` gains a trailing `int32_t requestedBitDepth`; `NativeBridge.nativeStartRecording(...)` gains a trailing `requestedBitDepth: Int`.
 
+`capture.cpp` has no host harness, so the risky arithmetic — black-level scaling
+and pack-mode selection — is **extracted into core as a pure function** and tested
+there. That gives this task a genuine failing test instead of an on-device check
+three tasks later.
+
 - [ ] **Step 1: Write the failing test**
 
-There is no host harness for `capture.cpp`. Pin the header arithmetic in core instead — append to `core/tests/test_bit_depth.cpp`:
+Append to `core/tests/test_bit_depth.cpp`:
 
 ```cpp
-TEST_CASE("header levels and derived depth stay mutually consistent") {
-  const uint32_t white = 16383;
-  const uint32_t black[4] = {1024, 1024, 1024, 1024};
-  const uint32_t shift = shiftForDepth(white, 12);
+#include "rawcam/rawv.h"
+
+TEST_CASE("applyBitDepth scales the header consistently and keeps the derived depth right") {
+  FileHeader h{};
+  h.whiteLevel = 16383;
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1024;
+
+  uint32_t shift = applyBitDepth(h, 12);
   CHECK(shift == 2);
-
-  const uint32_t nw = reducedWhiteLevel(white, shift);
-  CHECK(nw == 4095);
-  CHECK(32u - (uint32_t)__builtin_clz(nw) == 12u);   // what capture.cpp:189 derives
-
-  for (int i = 0; i < 4; i++) CHECK(reduceLevel(black[i], shift) == 256);
-  CHECK(reduceLevel(black[0], shift) < nw);          // black must stay below white
-
+  CHECK(h.whiteLevel == 4095);                                 // truncated, NOT 4096
+  CHECK(32u - (uint32_t)__builtin_clz(h.whiteLevel) == 12u);   // what capture.cpp:189 derives
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 256);   // rounded
+  CHECK(h.blackLevel[0] < h.whiteLevel);
   // capture.cpp:423 selects the pack mode from whiteLevel: 4095 <= 0xFFF => Packed12.
-  CHECK(nw <= 0xFFFu);
-  CHECK(nw > 0x3FFu);
+  CHECK(h.whiteLevel <= 0xFFFu);
+  CHECK(h.whiteLevel > 0x3FFu);
+}
+
+TEST_CASE("applyBitDepth leaves the header untouched for Native") {
+  FileHeader h{};
+  h.whiteLevel = 16383;
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 1024;
+
+  CHECK(applyBitDepth(h, 0) == 0);
+  CHECK(h.whiteLevel == 16383);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 1024);
+}
+
+TEST_CASE("applyBitDepth clamps a request the sensor cannot reach") {
+  FileHeader h{};
+  h.whiteLevel = 1023;                       // 10-bit ultra-wide
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = 64;
+
+  CHECK(applyBitDepth(h, 12) == 0);          // cannot synthesise precision
+  CHECK(h.whiteLevel == 1023);
+  CHECK(applyBitDepth(h, 8) == 2);
+  CHECK(h.whiteLevel == 255);
+  for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 16);
 }
 ```
 
@@ -402,43 +500,75 @@ TEST_CASE("header levels and derived depth stay mutually consistent") {
 ```powershell
 cd C:\Users\User\rawcam\core; cmake --build build; ctest --test-dir build --output-on-failure
 ```
-Expected: PASS immediately (it exercises Task 1 code). That is expected here — this case documents the header contract that Task 4's C++ must honour. Verify the *wiring* in Step 4 instead.
+Expected: FAIL — `applyBitDepth` is not declared.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement `applyBitDepth` in core**
 
-1. `NativeBridge.kt:16` — add `requestedBitDepth: Int` as the final parameter of `nativeStartRecording`.
-2. `jni_bridge.cpp:28` — accept the extra `jint` and forward it.
-3. `capture.h` / `capture.cpp:357` — add `int32_t requestedBitDepth` as the final parameter of `Capture::start`.
-4. In `Capture::start`, before writing the header:
+Add to `core/include/rawcam/bit_depth.h` (it already has `<cstdint>`; add `#include "rawcam/rawv.h"`):
 
 ```cpp
-sampleShift_ = rawcam::shiftForDepth((uint32_t)whiteLevel, (uint32_t)requestedBitDepth);
-uint32_t effWhite = rawcam::reducedWhiteLevel((uint32_t)whiteLevel, sampleShift_);
-newWhite_ = effWhite;
+// Scales a header in place for `requestedDepth` and returns the sample shift the
+// encoder must apply. whiteLevel truncates; blackLevel rounds. Returns 0 (and
+// changes nothing) for Native or for a request the sensor cannot reach.
+inline uint32_t applyBitDepth(FileHeader& h, uint32_t requestedDepth) {
+  uint32_t shift = shiftForDepth(h.whiteLevel, requestedDepth);
+  if (shift == 0) return 0;
+  h.whiteLevel = reducedWhiteLevel(h.whiteLevel, shift);
+  for (int i = 0; i < 4; i++) h.blackLevel[i] = reduceLevel(h.blackLevel[i], shift);
+  return shift;
+}
 ```
 
-5. Replace the header writes at `capture.cpp:427-428`:
+- [ ] **Step 4: Run test to verify it passes**
+
+```powershell
+cd C:\Users\User\rawcam\core; cmake --build build; ctest --test-dir build --output-on-failure
+```
+Expected: PASS, all core suites.
+
+- [ ] **Step 5: Wire it through JNI and capture**
+
+1. `capture.h` — **declare the two new members** (they are referenced below and
+   exist nowhere yet):
 
 ```cpp
-hdr.whiteLevel = effWhite;
-for (int i = 0; i < 4; i++)
-  hdr.blackLevel[i] = rawcam::reduceLevel((uint32_t)blackLevel[i], sampleShift_);
+uint32_t sampleShift_ = 0;
+uint32_t newWhite_ = 0;
 ```
 
-Leave the `PackMode` selection at `:423` reading `hdr.whiteLevel` — it now sees the reduced value and picks the right mode automatically. **It must be computed from `effWhite`, not the original `whiteLevel`.**
+2. `capture.h` / `capture.cpp:357` — add `int32_t requestedBitDepth` as the final
+   parameter of `Capture::start`.
+3. `jni_bridge.cpp:28` — accept the extra `jint` and forward it.
+4. `NativeBridge.kt:16` — add `requestedBitDepth: Int` as the final parameter of
+   `nativeStartRecording`.
+5. **`CameraController.kt:648-656` passes a fixed positional argument list ending
+   `spec.deviceName, compressRecordings`. Adding a parameter breaks it, so update
+   it in THIS task** — append `/* requestedBitDepth = */ 0` after
+   `compressRecordings`. Task 6 replaces the literal with the real setting. Without
+   this step the build fails on arity before anything else can be checked.
+6. In `Capture::start`, after the header template is populated with the sensor's
+   own `whiteLevel`/`blackLevel` and **before** the `PackMode` selection at `:423`:
 
-6. Pass `sampleShift_` / `newWhite_` into `encodeFrame` and into `pack10`/`pack12` at their call sites. The `bitDepth` at `:189` continues to derive from `headerTemplate_.whiteLevel`, which is now the reduced value — no change needed there.
+```cpp
+sampleShift_ = rawcam::applyBitDepth(hdr, (uint32_t)requestedBitDepth);
+newWhite_ = hdr.whiteLevel;
+```
 
-7. Add `#include "rawcam/bit_depth.h"`.
+   The `PackMode` selection at `:423` and the `bitDepth` derivation at `:189` both
+   read `whiteLevel` and now see the reduced value automatically. **They must run
+   after `applyBitDepth`, not before.**
+7. Pass `sampleShift_` / `newWhite_` into `encodeFrame` and into `pack10`/`pack12`
+   at their call sites.
+8. Add `#include "rawcam/bit_depth.h"`.
 
-- [ ] **Step 4: Verify the wiring compiles and the app builds**
+- [ ] **Step 6: Verify the wiring compiles and the app builds**
 
 ```powershell
 cd C:\Users\User\rawcam; .\gradlew.bat :app:assembleDebug
 ```
 Expected: BUILD SUCCESSFUL. A missed call site surfaces here as an arity error.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add app/src/main/java/com/shez/rawcam/NativeBridge.kt app/src/main/cpp/jni_bridge.cpp app/src/main/cpp/capture.h app/src/main/cpp/capture.cpp core/tests/test_bit_depth.cpp
@@ -585,7 +715,17 @@ class RecordBitDepthClampTest {
 }
 ```
 
-Build `RAW_SPEC_FOR_TEST` as a `CameraController.RawSpec` literal in the test file mirroring the main camera: `width = 4096, height = 3072, cfa = 0, whiteLevel = 16383`, with the remaining fields at whatever the data class requires.
+`RawSpec` has 13 fields (`CameraController.kt:64-74`). Declare the literal at the top of the test file, mirroring the main camera:
+
+```kotlin
+private val RAW_SPEC_FOR_TEST = CameraController.RawSpec(
+    width = 4096, height = 3072, cfa = 0, whiteLevel = 16383,
+    blackLevel = intArrayOf(1024, 1024, 1024, 1024),
+    colorMatrix1 = FloatArray(9), isoRange = 50..6400, maxFps = 30,
+    minFocusDiopters = 0f, deviceName = "24030PN60G",
+    illuminant1 = 21, illuminant2 = 0, colorMatrix2 = FloatArray(9),
+)
+```
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -706,7 +846,17 @@ EnumRow(
 )
 ```
 
-`activeLensNativeDepth` comes from the active lens's `whiteLevel` via `effectiveBitDepth(whiteLevel, 0)`. If `SettingsScreen` does not already receive the active lens, pass its `whiteLevel` in as a parameter from the caller rather than reaching into a view model from the composable.
+`SettingsScreen` already collects the record state at `SettingsScreen.kt:85`
+(`val recordUiState by viewModel.uiState.collectAsState()`), so the active lens is
+in scope and no plumbing is needed. Declare, next to the other derived values:
+
+```kotlin
+// 0 when no lens is known yet (enumeration still running): every explicit depth
+// is then disabled and only Native is selectable, which is the safe default.
+val activeLensNativeDepth = effectiveBitDepth(
+    recordUiState.lenses.getOrNull(recordUiState.lensIndex)?.whiteLevel ?: 0, 0,
+)
+```
 
 - [ ] **Step 3: Build and install**
 
@@ -753,7 +903,15 @@ $clip = & $adb shell "ls -t /sdcard/Android/data/com.shez.rawcam.debug/files/cli
 & $adb pull -a /data/local/tmp/h.bin .
 ```
 
-Parse with Python and confirm: `packMode@20 == 3`, `whiteLevel@28 == 4095`, `blackLevel@32 == 256` (or the sensor's black scaled by the same rule). **`whiteLevel` must be 4095, not 4096** — 4096 means `whiteLevel` was rounded and the codec ran at 13 bits.
+Parse with Python and confirm `packMode@20 == 3` and `whiteLevel@28 == 4095`.
+**`whiteLevel` must be 4095, not 4096** — 4096 means it was rounded rather than
+truncated, and the codec ran at 13 bits against 12-bit samples.
+
+For black level, **do not assert a hardcoded number** — this sensor's native
+`blackLevel` has not been measured. Read it from a **Native** clip's header first
+(`blackLevel@32`, four `uint32_t`), then assert the 12-bit clip's value equals
+`(native + 2) >> 2` for each of the four entries. That checks the rule rather than
+a guess about the sensor.
 
 - [ ] **Step 2: Confirm the file actually shrank**
 
@@ -790,4 +948,23 @@ git commit -m "docs: record the bit-depth A/B result"
 
 **Type consistency.** `shiftForDepth(whiteLevel, requestedDepth)` (C++, Task 1) and `effectiveBitDepth(whiteLevel, requested)` (Kotlin, Task 6) are deliberately different functions — the first yields a shift, the second a depth — and both derive native depth as `32 - clz(whiteLevel)`. `reduceSample(sample, shift, newWhite)` keeps that argument order in Tasks 1, 2, 3. `encodeFrame`'s two new parameters are `(shift, newWhite)` in that order, matching `pack10`/`pack12`.
 
-**Known gap, deliberate.** Task 4 has no host test for `capture.cpp` itself — there is no harness for it, and building one is out of proportion here. Its arithmetic is pinned in core (Task 4 Step 1) and its wiring is verified on-device (Task 8 Step 1), which is why that device check names the exact expected header bytes rather than saying "looks right".
+**Known gap, deliberate.** `capture.cpp` still has no host harness, but the risky
+part no longer depends on one: the header arithmetic lives in core as
+`applyBitDepth` with a genuine failing test (Task 4 Steps 1-4). What remains
+untested off-device is only the *wiring* — which parameter reaches which call —
+and that fails loudly at compile time (Task 4 Step 6) or shows up immediately in
+the header bytes on-device (Task 8 Step 1).
+
+**Revision note (2026-08-30, after review).** Eight issues fixed: Task 4's build
+step could not have succeeded (`CameraController.kt:648-656` passes a fixed
+positional list, so the JNI signature change breaks it — now updated in Task 4
+rather than Task 6); the encoder is templated on `Reduce` so Native, the default,
+stays cost-identical and not merely bit-identical, with a timing gate to prove it;
+`sampleShift_`/`newWhite_` are now explicitly declared; Task 4 gained a real
+failing test via `applyBitDepth`; both placeholders are now concrete (`RawSpec`
+has 13 fields; `SettingsScreen.kt:85` already has the lens in scope); Task 2's
+test data is a gradient plus noise rather than near-incompressible uniform noise
+that could have made `encodeFrame` fail on capacity instead of behaviour; Task 8
+reads the sensor's real black level instead of assuming 1024; and
+`computeInteriorResidualsRow` keeps a non-template overload so
+`test_rawv_simd_spike.cpp` compiles unchanged.
