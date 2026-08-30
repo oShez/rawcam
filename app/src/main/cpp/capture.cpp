@@ -1,5 +1,6 @@
 #include "capture.h"
 
+#include <android/log.h>
 #include <android/native_window_jni.h>
 #include <cstdio>
 #include <cstring>
@@ -467,19 +468,46 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
   //
   // Raw16 is the ONE branch below that writes samples verbatim, with no
   // reduction applied anywhere -- so a non-zero sampleShift_ landing here would
-  // record full-depth samples under a reduced whiteLevel. That is unreachable
-  // today and deliberately not coded around: the offered depths are 14/12/10/8,
-  // a 14-bit request on a 14-bit sensor yields shift 0, so any reduced
-  // whiteLevel is at most 4095 and therefore always <= 0xFFF -- which selects
-  // Packed12 for every even width, and every capture width this hardware
-  // produces is even. If a future sensor ever delivers an ODD width (or more
-  // than 14 bits), this reasoning breaks and Raw16 needs its own reduction
-  // pass before that combination can ship.
+  // record full-depth samples under a reduced whiteLevel. This IS reachable: a
+  // sensor wider than 14 bits (native whiteLevel > 0x3FFF) reduced to the
+  // offered 14-bit request still leaves a reduced whiteLevel above 0xFFF, e.g.
+  // whiteLevel=65535 (16-bit) at requestedDepth=14 reduces to 16383, which is
+  // > 0xFFF and lands here rather than in Packed12. The guard right after this
+  // ternary (see below) catches that case.
   const bool w4 = cropW % 4 == 0, w2 = cropW % 2 == 0;
   hdr.packMode = (uint32_t)(compressRecordings                    ? PackMode::CompressedPredictive
                              : hdr.whiteLevel <= 0x3FF && w4       ? PackMode::Packed10
                              : hdr.whiteLevel <= 0xFFF && w2       ? PackMode::Packed12
                                                                    : PackMode::Raw16);
+
+  // Defensive guard: Raw16 writes the delivered plane verbatim (see the fifth
+  // branch in processImage()), so a non-zero sampleShift_ reaching it would
+  // silently record full-depth samples under a reduced whiteLevel/blackLevel --
+  // e.g. exporter.cpp would derive bit depth 14 and dng_writer.cpp would stamp
+  // white level 16383 for a clip that is actually 16-bit, so every exported
+  // frame comes out two stops too bright and clipped. NOT fixed by reducing
+  // Raw16's payload instead: in processImage() that payload points into an
+  // AImage about to be recycled, so reducing it in place would mutate a
+  // producer buffer; doing it properly needs a scratch copy and a whole-plane
+  // pass on the least efficient path, to serve hardware nobody has. Instead,
+  // fall back to Native for this take: restore the header's original
+  // (unreduced) whiteLevel/blackLevel and clear the shift, so the clip
+  // records correctly at native depth instead of the requested one -- the
+  // same clamp semantics already used when a lens can't reach a requested
+  // depth at all, so this is a missing feature with loudly correct output
+  // rather than a delivered feature with silently wrong output.
+  if (hdr.packMode == (uint32_t)PackMode::Raw16 && sampleShift_ != 0) {
+    __android_log_print(ANDROID_LOG_WARN, "capture",
+                         "Raw16 selected with a non-zero bit-depth shift "
+                         "(reduced whiteLevel=%u); falling back to Native "
+                         "for this take instead of recording it wrong",
+                         hdr.whiteLevel);
+    hdr.whiteLevel = (uint32_t)whiteLevel;
+    for (int i = 0; i < 4; i++) hdr.blackLevel[i] = (uint32_t)blackLevel[i];
+    sampleShift_ = 0;
+    newWhite_ = 0;
+  }
+
   for (int i = 0; i < 9; i++) hdr.colorMatrix1[i] = colorMatrix1[i];
   hdr.asShotNeutral[0] = hdr.asShotNeutral[1] = hdr.asShotNeutral[2] = 0.0f;
   hdr.illuminant1 = (uint32_t)illuminant1;
