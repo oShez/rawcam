@@ -218,6 +218,19 @@ fun SettingsScreen(
                 selected = settings.maxClipLengthSeconds,
                 onSelect = { v -> apply { it.copy(maxClipLengthSeconds = v) } },
             )
+            // 0 when no lens is known yet (enumeration still running): every explicit depth
+            // is then disabled and only Native is selectable, which is the safe default.
+            val activeLensNativeDepth = effectiveBitDepth(activeLens?.whiteLevel ?: 0, 0)
+            EnumRow(
+                title = "Record bit depth",
+                subtitle = "Lower depth shrinks files and eases sustained writes. " +
+                    "8-bit only saves space with compression on.",
+                options = listOf(0 to "Native", 14 to "14", 12 to "12", 10 to "10", 8 to "8"),
+                selected = settings.recordBitDepth,
+                onSelect = { v -> apply { it.copy(recordBitDepth = v) } },
+                // Native is never disabled; an explicit depth above what this lens delivers is.
+                isEnabled = { v -> v == 0 || v <= activeLensNativeDepth },
+            )
             ToggleRow(
                 title = "Thermal auto-stop",
                 subtitle = "Stop recording when the device overheats (otherwise warn only)",
@@ -448,7 +461,8 @@ private fun ToggleRow(title: String, subtitle: String?, checked: Boolean, onChan
 /** Inline segmented selector -- FpsToggle's visual language, generalized to any [T]. */
 @Composable
 private fun <T> EnumRow(
-    title: String, subtitle: String?, options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit,
+    title: String, subtitle: String?, options: List<Pair<T, String>>, selected: T,
+    onSelect: (T) -> Unit, isEnabled: (T) -> Boolean = { true },
 ) {
     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
         Text(title, color = RawCamColors.OnSurface, fontSize = 15.sp)
@@ -465,13 +479,22 @@ private fun <T> EnumRow(
         ) {
             options.forEach { (value, label) ->
                 val on = value == selected
+                val enabled = isEnabled(value)
                 Row(
                     Modifier
-                        .clickable { onSelect(value) }
+                        .then(if (enabled) Modifier.clickable { onSelect(value) } else Modifier)
                         .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                 ) {
-                    Text(label, color = if (on) RawCamColors.OnSurface else RawCamColors.Muted, fontSize = 13.sp)
+                    Text(
+                        label,
+                        color = when {
+                            !enabled -> RawCamColors.Outline
+                            on -> RawCamColors.OnSurface
+                            else -> RawCamColors.Muted
+                        },
+                        fontSize = 13.sp,
+                    )
                 }
             }
         }
