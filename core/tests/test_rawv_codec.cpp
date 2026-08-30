@@ -639,30 +639,94 @@ TEST_CASE("shift 0 is bit-identical to the pre-existing encoder") {
   CHECK(std::equal(a.begin(), a.begin() + x, b.begin()));
 }
 
-// Native is the DEFAULT. Bit-exactness above proves correctness; this proves we
-// did not tax every existing user with a per-sample branch for a feature they
-// have not enabled. Generous threshold: this catches a structural regression
-// (a branch in the inner loop), not small machine noise.
-TEST_CASE("shift 0 costs no more than the pre-existing encoder") {
-  const uint32_t w = 512, h = 256, stride = w;
+// The spec requires a timing gate on top of bit-exactness. Be precise about what
+// each half of the evidence actually proves, because they prove different things.
+//
+//   STRUCTURE, not the stopwatch, is what guarantees Native pays nothing. The
+//   reduction is an `if constexpr (Reduce)` on a template parameter, so
+//   Reduce=false does not contain the reduction to skip -- there is no branch to
+//   time. (An earlier version of this case timed shift=0 against no-shift: both
+//   resolve to the SAME encodeFrameImpl<false>, so it was one binary measured
+//   twice and could not fail. A test that cannot fail is a defect; this is its
+//   replacement.)
+//
+//   MEASUREMENT covers the other direction: that the REDUCED path -- a genuinely
+//   separate instantiation, with a vectorized reduction spliced into the NEON
+//   interior loop -- has not become pathologically expensive relative to Native.
+//   A lower record depth is bought to gain thermal headroom, and an encoder that
+//   cost far more CPU per reduced frame would spend that headroom on itself.
+//
+// Measured through ParallelFrameEncoder because that, not the free encodeFrame,
+// is the encoder the app records with, and it is the only path that runs
+// computeAndPackBandImpl and the vectorized computeInteriorResidualsRowImpl at
+// all. threadCount is fixed so the band split is deterministic.
+//
+// HOST CAVEAT, stated plainly so nobody reads more into a green run than is
+// there. On this host the NEON path is the ARM_NEON_2_SSE shim, which emulates
+// the register-operand vshlq_s32 lane-by-lane; on arm64 it is a single SSHL.
+// That emulation dominates, and it makes the host ratio not merely loose but
+// INVERTED: measured on this machine, the correct vectorized reduction runs
+// ~2.2x Native, while deliberately replacing it with the scalar fallback (the
+// regression this case would most like to catch) measures ~1.1x -- i.e. faster.
+// So the threshold below is set to be non-flaky, not to discriminate: on the
+// host this case catches only a gross blow-up. It becomes a real gate when
+// core/ is built for arm64, where the shim is gone, and the authoritative
+// reduced-vs-Native cost comparison is the on-device A/B, not this stopwatch.
+TEST_CASE("reduced-depth encoding is not pathologically slower than Native") {
+  const uint32_t w = 512, h = 256, shift = 2;
+  const uint32_t newWhite = rawcam::reducedWhiteLevel(16383, shift);
   std::vector<uint16_t> src = testFrame(w, h);
   std::vector<uint8_t> out(src.size() * 4 + 4096);
+  ParallelFrameEncoder enc(w, h, /*threadCount=*/4);
 
-  auto timeIt = [&](bool withShiftArgs) {
+  auto timeIt = [&](bool reduced) {
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < 20; i++) {
-      if (withShiftArgs)
-        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size(), 0, 16383);
+      if (reduced)
+        enc.encode(src.data(), w, 12, out.data(), (uint32_t)out.size(), shift, newWhite);
       else
-        rawcam::encodeFrame(src.data(), w, h, stride, 14, out.data(), (uint32_t)out.size());
+        enc.encode(src.data(), w, 14, out.data(), (uint32_t)out.size());
     }
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   };
+  // Best-of-N, not a single sample: this encoder wakes four worker threads per
+  // frame, so any one timing can absorb an unrelated scheduling stall. The
+  // minimum is the run least disturbed by the rest of the machine, which is the
+  // honest estimate of what the code costs. Without it the two arms swing ~40%
+  // run to run and the ratio is dominated by scheduling, not by the encoder.
+  auto bestOf = [&](bool reduced) {
+    double best = timeIt(reduced);
+    for (int i = 0; i < 4; i++) best = std::min(best, timeIt(reduced));
+    return best;
+  };
 
-  timeIt(false);  // warm caches and clocks; discard
-  const double bare = timeIt(false);
-  const double zeroShift = timeIt(true);
-  CHECK(zeroShift < bare * 1.15);
+  bestOf(false);  // warm caches, clocks and the worker threads; discard
+  bestOf(true);
+  const double nativeSecs = bestOf(false);
+  const double reducedSecs = bestOf(true);
+  CHECK(reducedSecs < nativeSecs * 3.0);
+}
+
+// testFrame tops out at 511*24 + 16 = 12280, which at shift 2 reduces to 3070 --
+// comfortably under newWhite, so it never exercises reduceSample's `r > newWhite`
+// clamp or its vectorized twin (the vminq_s32 in reduce4). Stamp a block of
+// at-and-above-whiteLevel samples in so both clamps are live. A real sensor
+// produces exactly this at saturation, and it is the case the depth contract
+// turns on: reduceSample(16383, 2, 4095) would round to 4096 unclamped, which
+// needs 13 bits and would break both the bitDepth-12 promise and the
+// worstCaseRiceRowBytes bound the fast pack path relies on.
+//
+// The block sits at x in [100,140), y in [100,120): interior (x >= 2, y >= 2),
+// and inside computeInteriorResidualsRow's 4-lane NEON body rather than its
+// scalar tail (which for width 512 is only x = 510,511), so the clamped values
+// reach reduce4 as all four of its operands -- actual, left, up and upleft.
+static void stampSaturatedBlock(std::vector<uint16_t>& v, uint32_t w) {
+  // A spread of values at and above whiteLevel=16383. All of them reduce to
+  // >= 4096 before clamping, so all of them must come back as exactly 4095.
+  const uint16_t sat[] = {16383, 16384, 16500, 20000, 40000, 65535};
+  for (uint32_t y = 100; y < 120; y++)
+    for (uint32_t x = 100; x < 140; x++)
+      v[y * w + x] = sat[(x + y) % 6];
 }
 
 TEST_CASE("ParallelFrameEncoder with a shift is byte-identical to encodeFrame with the same shift") {
@@ -672,10 +736,12 @@ TEST_CASE("ParallelFrameEncoder with a shift is byte-identical to encodeFrame wi
   // threadCount forced to 4 guarantees a real multi-band split, and every
   // interior row goes through computeInteriorResidualsRow's VECTORIZED
   // reduction while encodeFrame uses the scalar predictor for the same pixels,
-  // so byte-identical output also pins the two against each other.
+  // so byte-identical output also pins the two against each other -- including,
+  // thanks to the saturated block, their two independent clamps.
   const uint32_t w = 512, h = 512, shift = 2;
   const uint32_t newWhite = rawcam::reducedWhiteLevel(16383, shift);
   std::vector<uint16_t> src = testFrame(w, h);
+  stampSaturatedBlock(src, w);
 
   std::vector<uint8_t> serial(static_cast<size_t>(w) * h * 4 + 4096);
   uint32_t serialN = encodeFrame(src.data(), w, h, w, 12, serial.data(),
@@ -692,6 +758,9 @@ TEST_CASE("ParallelFrameEncoder with a shift is byte-identical to encodeFrame wi
   std::vector<uint16_t> expected(src.size());
   for (size_t i = 0; i < src.size(); i++)
     expected[i] = rawcam::reduceSample(src[i], shift, newWhite);
+  // Guard the guard: if testFrame or stampSaturatedBlock ever changed such that
+  // nothing saturates, the clamp would quietly stop being covered again.
+  REQUIRE(expected[105 * w + 105] == newWhite);
   std::vector<uint16_t> decoded(src.size());
   REQUIRE(decodeFrame(parallelOut.data(), parallelN, decoded.data(), w, h, w, 12));
   CHECK(decoded == expected);
