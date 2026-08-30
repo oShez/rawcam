@@ -197,6 +197,11 @@ data class RecordUiState(
      *  frame size is scene- and sensor-dependent, so no formula can predict it -- and
      *  about every lens on the device rather than just the one last recorded with. */
     val captureRates: Map<String, Float> = emptyMap(),
+    /** Recordable seconds left, as a COUNTDOWN carried across the take (see
+     *  [stepRemainingSeconds]). Non-null only while recording and only once the
+     *  take's wall-clock byte rate has settled; the readout falls back to the
+     *  modelled prediction otherwise. */
+    val remainingSeconds: Double? = null,
     val lensIndex: Int = 0,
     val sizeIndex: Int = 0,
     /** The ladder for the active lens+size, republished whenever the mode
@@ -276,6 +281,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private var pollJob: Job? = null
     private var recordStartMs = 0L
+    /** When [RecordUiState.remainingSeconds] was last advanced, so the countdown
+     *  subtracts real wall clock rather than assuming a punctual 500ms poll. */
+    private var lastRemainingStepMs = 0L
     // Filename (with .rawv extension, e.g. "clip_20260719_120000.rawv") of the clip
     // most recently started -- written once, on cameraOps, where startRecordingInternal
     // builds the name; read (also on cameraOps) by stopRecordingInternal's successful-
@@ -1031,6 +1039,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 if (ok) {
                     recordStartMs = System.currentTimeMillis()
+                    lastRemainingStepMs = recordStartMs
                     // controller.lastAudioResult is already populated by
                     // startRecording's own failure paths (permission denied, open
                     // failed, ...) by the time it returns -- read it HERE, in the
@@ -1049,6 +1058,10 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         it.copy(
                             recording = true, elapsedSeconds = 0, written = 0, dropped = 0,
                             audioChannels = 1, audioFailed = failed,
+                            // Each take measures its own rate; carrying the last
+                            // take's countdown in would start this one on a stale
+                            // number and, being monotonic, it could never recover.
+                            remainingSeconds = null,
                         )
                     }
                     withContext(Dispatchers.Main) { startPolling(File(path), frameBytes, rateKey) }
@@ -1070,7 +1083,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             while (isActive) {
                 delay(500)
                 val stats = NativeBridge.nativeGetStats()
-                val elapsed = ((System.currentTimeMillis() - recordStartMs) / 1000).toInt()
+                val nowMs = System.currentTimeMillis()
+                val elapsedMs = nowMs - recordStartMs
+                val elapsed = (elapsedMs / 1000).toInt()
                 // What this take actually costs per frame, against what the model
                 // predicted. Measured per FRAME, not per second: that makes it
                 // independent of fps and of dropped frames, and sidesteps the
@@ -1083,11 +1098,22 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                         .takeIf { it.isFinite() && it in RATE_SANE_RANGE }
                 else null
                 if (ratio != null) { pendingRateKey = rateKey; pendingRatio = ratio }
+                // Time left, as a countdown off the take's REAL wall-clock byte rate
+                // -- not bytes-per-written-frame times nominal fps, which overstates
+                // consumption by exactly the drop rate. See measuredBytesPerSecond.
+                val prior = _uiState.value
+                val audioPerSecond = if (prior.settings.recordAudio)
+                    3L * AudioRecorder.SAMPLE_RATE * prior.audioChannels else 0L
+                val stepped = measuredBytesPerSecond(clipBytes, audioPerSecond, elapsedMs)
+                    ?.let { remainingSecondsEstimate(prior.freeSpaceBytes, it) }
+                    ?.let { stepRemainingSeconds(prior.remainingSeconds, nowMs - lastRemainingStepMs, it) }
+                if (stepped != null) lastRemainingStepMs = nowMs
                 _uiState.update {
                     it.copy(
                         written = frames, dropped = stats[1], elapsedSeconds = elapsed,
                         captureRates = if (ratio != null) it.captureRates + (rateKey to ratio)
                         else it.captureRates,
+                        remainingSeconds = stepped ?: it.remainingSeconds,
                     )
                 }
                 // Max clip length (0 = off). stopRecordingInternal() itself cancels this
@@ -1132,7 +1158,13 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val stats = controller.stopRecording()
                 _uiState.update {
-                    it.copy(recording = false, written = stats[0], dropped = stats[1])
+                    // remainingSeconds is the take's countdown; dropping it here hands
+                    // the idle readout back to the modelled prediction, which is free
+                    // to re-anchor UPWARD against the new free-space reading.
+                    it.copy(
+                        recording = false, written = stats[0], dropped = stats[1],
+                        remainingSeconds = null,
+                    )
                 }
                 if (stats[0] == 0L && stats[1] > 0L) {
                     _events.tryEmit("Recording failed: writer error")
@@ -1246,7 +1278,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         if (!_uiState.value.recording) return
         pollJob?.cancel()
         pollJob = null
-        _uiState.update { it.copy(recording = false, busy = true) }
+        _uiState.update { it.copy(recording = false, busy = true, remainingSeconds = null) }
         cameraOps.launch {
             try {
                 val stats = controller.stopRecording()
@@ -1411,6 +1443,9 @@ private fun formatDuration(totalSeconds: Long): String {
  * it is marked "~" to say so; it firms up a couple of seconds into the next take.
  */
 private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec): String {
+    // A running take knows better than any model: it has measured what the card is
+    // actually taking, and its countdown already carries the elapsed wall clock.
+    state.remainingSeconds?.let { return formatDuration(it.toLong()) }
     // The WAV sidecar is a separate file, so it is outside the measured .rawv rate
     // and has to be added to both branches. 24-bit at 48 kHz = 144 kB/s per channel:
     // trivial against RAW, but free at this point.
@@ -1426,6 +1461,74 @@ private fun remainingLabel(state: RecordUiState, spec: CameraController.RawSpec)
     if (perSecond <= 0) return "—"
     val text = formatDuration(state.freeSpaceBytes / perSecond)
     return if (ratio == null) "~$text" else text
+}
+
+/** A running take must have written for this long before its wall-clock byte rate
+ *  means anything: below it the truncation and start-up transients dominate. */
+private const val LIVE_RATE_SETTLE_MS = 2_000L
+
+/**
+ * What a running take is ACTUALLY costing the card, in bytes per second of wall
+ * clock -- clip bytes on disk over elapsed time, plus the WAV sidecar's steady rate.
+ *
+ * Wall clock, deliberately, rather than bytes-per-written-frame times the nominal
+ * fps. Those differ by exactly the drop rate, and dropping is not rare on the heavy
+ * paths: the 2026-08-30 main-cam take dropped 103 of 705 frames (14.6%), so only
+ * 20.07 fps landed and the card took 290 MB/s while a nominal-24fps model claimed
+ * 343 MB/s -- an 18% understatement of time left (16:15 shown against a true 19:46).
+ *
+ * Null until [LIVE_RATE_SETTLE_MS] has passed with bytes on disk.
+ */
+internal fun measuredBytesPerSecond(
+    clipBytes: Long,
+    audioBytesPerSecond: Long,
+    elapsedMs: Long,
+): Double? {
+    if (elapsedMs < LIVE_RATE_SETTLE_MS || clipBytes <= 0L) return null
+    return clipBytes.toDouble() / (elapsedMs / 1000.0) + audioBytesPerSecond
+}
+
+/**
+ * Free space divided by a byte rate, in seconds. Null when either input is unusable.
+ *
+ * A non-positive free-space reading is "no reading", NOT "no time left":
+ * refreshFreeSpace() publishes 0 when its StatFs throws, and because the countdown
+ * above is monotonic, feeding that through as 0.0 would latch the readout at 0:00
+ * for the remainder of the take with no way back up.
+ */
+internal fun remainingSecondsEstimate(freeBytes: Long, bytesPerSecond: Double): Double? {
+    if (!bytesPerSecond.isFinite() || bytesPerSecond <= 0.0 || freeBytes <= 0L) return null
+    return freeBytes.toDouble() / bytesPerSecond
+}
+
+/** How much faster than real time the readout may fall when the estimate drops.
+ *  Bounds a bad sample's influence to a slew instead of a snap: at 3.0 a wildly
+ *  wrong estimate is absorbed over a couple of seconds rather than in one tick. */
+private const val MAX_EXTRA_DROP_PER_SECOND = 3.0
+
+/**
+ * One tick of the recording-time-left COUNTDOWN.
+ *
+ * The readout used to be a stateless `free / rate` recomputed on every
+ * recomposition, with no memory of the take. Free space falls only a few percent
+ * across a normal take, so that display was dominated by the rate estimate's own
+ * +/-2% noise rather than by time passing -- measured on-device 2026-08-30, a 30s
+ * take moved it 16:05 -> 16:15, i.e. UP by 10s while 30s of card was consumed.
+ *
+ * So: carry the value forward, subtract the wall clock that actually elapsed, and
+ * let a fresh [estimate] only ever pull it DOWN (slew-limited by
+ * [MAX_EXTRA_DROP_PER_SECOND]). Monotonic within a take is a deliberate choice --
+ * panning onto a flatter, better-compressing scene genuinely buys time, but
+ * letting the number climb is exactly the jitter this removes. It re-anchors
+ * upward when idle, where free space is static and the readout is calm anyway.
+ */
+internal fun stepRemainingSeconds(previous: Double?, sinceMs: Long, estimate: Double): Double {
+    if (previous == null) return estimate.coerceAtLeast(0.0)
+    if (sinceMs <= 0L) return previous
+    val elapsed = sinceMs / 1000.0
+    val natural = previous - elapsed
+    val slewFloor = natural - MAX_EXTRA_DROP_PER_SECOND * elapsed
+    return (if (estimate < natural) maxOf(estimate, slewFloor) else natural).coerceAtLeast(0.0)
 }
 
 // Standard 1/3-stop photographic ISO scale (vs the old full-stop-only list) for
