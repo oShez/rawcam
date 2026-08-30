@@ -1,11 +1,14 @@
 #include "rawcam/pack10.h"
+#include "rawcam/bit_depth.h"
 
 namespace rawcam {
 
-void pack10(const uint16_t* src, size_t count, uint8_t* dst) {
+void pack10(const uint16_t* src, size_t count, uint8_t* dst, uint32_t shift, uint32_t newWhite) {
   for (size_t i = 0; i < count; i += 4) {
-    uint16_t a = src[i] & 0x3FF, b = src[i + 1] & 0x3FF,
-             c = src[i + 2] & 0x3FF, d = src[i + 3] & 0x3FF;
+    uint16_t a = reduceSample(src[i], shift, newWhite) & 0x3FF,
+             b = reduceSample(src[i + 1], shift, newWhite) & 0x3FF,
+             c = reduceSample(src[i + 2], shift, newWhite) & 0x3FF,
+             d = reduceSample(src[i + 3], shift, newWhite) & 0x3FF;
     dst[0] = (uint8_t)a;
     dst[1] = (uint8_t)b;
     dst[2] = (uint8_t)c;
@@ -26,9 +29,10 @@ void unpack10(const uint8_t* src, size_t count, uint16_t* dst) {
   }
 }
 
-void pack12(const uint16_t* src, size_t count, uint8_t* dst) {
+void pack12(const uint16_t* src, size_t count, uint8_t* dst, uint32_t shift, uint32_t newWhite) {
   for (size_t i = 0; i < count; i += 2) {
-    uint16_t a = src[i] & 0xFFF, b = src[i + 1] & 0xFFF;
+    uint16_t a = reduceSample(src[i], shift, newWhite) & 0xFFF,
+             b = reduceSample(src[i + 1], shift, newWhite) & 0xFFF;
     dst[0] = (uint8_t)a;
     dst[1] = (uint8_t)((a >> 8) | ((b & 0x0F) << 4));
     dst[2] = (uint8_t)(b >> 4);

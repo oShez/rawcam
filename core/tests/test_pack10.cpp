@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 #include "rawcam/pack10.h"
+#include "rawcam/bit_depth.h"
 #include <vector>
 
 using namespace rawcam;
@@ -34,4 +35,24 @@ TEST_CASE("count==0 is a no-op, not a crash") {
   unpack10(&dummy, 0, nullptr);
   CHECK(dummy == 0xAB);  // loop body never ran, buffer untouched
   CHECK(packed10Size(0) == 0);
+}
+
+TEST_CASE("pack10 reduces samples before packing") {
+  std::vector<uint16_t> src = {4095, 2048, 7, 4};
+  const uint32_t shift = 2, newWhite = 1023;
+  std::vector<uint8_t> packed(rawcam::packed10Size(src.size()));
+  rawcam::pack10(src.data(), src.size(), packed.data(), shift, newWhite);
+
+  std::vector<uint16_t> back(src.size());
+  rawcam::unpack10(packed.data(), src.size(), back.data());
+  for (size_t i = 0; i < src.size(); i++)
+    CHECK(back[i] == rawcam::reduceSample(src[i], shift, newWhite));
+}
+
+TEST_CASE("pack10 with shift 0 is unchanged") {
+  std::vector<uint16_t> src = {1023, 512, 3, 0};
+  std::vector<uint8_t> a(rawcam::packed10Size(src.size())), b(a.size());
+  rawcam::pack10(src.data(), src.size(), a.data());
+  rawcam::pack10(src.data(), src.size(), b.data(), 0, 1023);
+  CHECK(a == b);
 }
