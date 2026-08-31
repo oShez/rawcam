@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 #include "rawcam/rawv.h"
@@ -43,6 +44,25 @@ inline uint32_t applyBitDepth(FileHeader& h, uint32_t requestedDepth) {
   h.whiteLevel = reducedWhiteLevel(h.whiteLevel, shift);
   for (int i = 0; i < 4; i++) h.blackLevel[i] = reduceLevel(h.blackLevel[i], shift);
   return shift;
+}
+
+// Reduces a whole plane of samples in place. `shift == 0` is a no-op.
+//
+// This exists for ONE caller: the compressed path's uncompressed fallback, which
+// writes its raw copy verbatim and would otherwise put full-depth samples under a
+// reduced header -- frames that export several stops too bright, silently. That
+// caller lives in capture.cpp, which has no host harness, so the arithmetic lives
+// here where it can be tested and only the call site stays uncovered. Same reason
+// applyBitDepth is here rather than inlined into Capture::start.
+//
+// NOT for the encode path: that reduces on READ, one sample at a time inside the
+// predictor, precisely to avoid a separate whole-plane pass over ~25 MB a frame.
+// Calling this per frame would reintroduce the memory traffic the design avoids.
+inline void reducePlaneInPlace(uint16_t* samples, size_t count, uint32_t shift,
+                               uint32_t newWhite) {
+  if (shift == 0) return;
+  for (size_t i = 0; i < count; i++)
+    samples[i] = reduceSample(samples[i], shift, newWhite);
 }
 
 }  // namespace rawcam

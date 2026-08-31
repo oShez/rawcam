@@ -357,12 +357,12 @@ void Capture::finishLoop() {
       // thread. frameSizeBytes is exactly what rawCopy holds -- the de-strided
       // crop when cropped, the delivered plane at 1x -- so frameSizeBytes / 2
       // is the right sample count in both cases.
-      if (sampleShift_ != 0) {
-        uint16_t* s = reinterpret_cast<uint16_t*>(job.rawCopy.data());
-        const size_t sampleCount = headerTemplate_.frameSizeBytes / 2;
-        for (size_t i = 0; i < sampleCount; i++)
-          s[i] = rawcam::reduceSample(s[i], sampleShift_, newWhite_);
-      }
+      // The loop itself lives in core as reducePlaneInPlace so it can be unit
+      // tested; capture.cpp has no host harness, so only this call site is
+      // uncovered. It no-ops at shift 0, which is the Native default.
+      rawcam::reducePlaneInPlace(reinterpret_cast<uint16_t*>(job.rawCopy.data()),
+                                 headerTemplate_.frameSizeBytes / 2, sampleShift_,
+                                 newWhite_);
       meta.payloadBytes = headerTemplate_.frameSizeBytes;
       meta.compressed = 0;
       ok = writer_->writeFrame(meta, job.rawCopy.data(), headerTemplate_.frameSizeBytes);

@@ -92,3 +92,38 @@ TEST_CASE("applyBitDepth clamps a request the sensor cannot reach") {
   CHECK(h.whiteLevel == 255);
   for (int i = 0; i < 4; i++) CHECK(h.blackLevel[i] == 16);  // rounded, not truncated (15)
 }
+
+// reducePlaneInPlace is the compressed path's uncompressed-fallback reduction.
+// That caller is in capture.cpp, which has no host harness, so these cases are
+// the only automated coverage the arithmetic gets -- the wiring is verified
+// on-device. Without them the fallback is the one path in this feature that can
+// write visibly wrong frames (several stops bright) with nothing testing it.
+TEST_CASE("reducePlaneInPlace reduces every sample and clamps at saturation") {
+  const uint32_t shift = 2, newWhite = reducedWhiteLevel(16383, shift);  // 4095
+  std::vector<uint16_t> plane = {0, 4, 6, 1024, 16383, 65535};
+  std::vector<uint16_t> expected;
+  for (uint16_t v : plane) expected.push_back(reduceSample(v, shift, newWhite));
+
+  reducePlaneInPlace(plane.data(), plane.size(), shift, newWhite);
+  CHECK(plane == expected);
+  // Spelled out too, so this fails loudly if reduceSample's contract ever drifts:
+  CHECK(plane[0] == 0);
+  CHECK(plane[1] == 1);
+  CHECK(plane[2] == 2);          // rounds up
+  CHECK(plane[3] == 256);
+  CHECK(plane[4] == newWhite);   // 4096 unclamped -- would need 13 bits
+  CHECK(plane[5] == newWhite);   // a saturated sensor sample, clamped
+}
+
+TEST_CASE("reducePlaneInPlace is an exact no-op at shift 0") {
+  std::vector<uint16_t> plane = {0, 1, 1024, 16383, 65535};
+  const std::vector<uint16_t> before = plane;
+  reducePlaneInPlace(plane.data(), plane.size(), 0, 0);
+  CHECK(plane == before);  // newWhite 0 must NOT clamp everything to zero
+}
+
+TEST_CASE("reducePlaneInPlace tolerates an empty plane") {
+  std::vector<uint16_t> plane;
+  reducePlaneInPlace(plane.data(), 0, 2, 4095);  // must not read or write
+  CHECK(plane.empty());
+}
