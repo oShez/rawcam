@@ -318,3 +318,70 @@ Also on-device:
 - A 16:9 capture crop (a separate ~25% pixel reduction, noted as the other
   remaining lever).
 - The unmeasured landing rate under zoom (open item #2 from the zoom work).
+
+---
+
+## Result (device verification, 2026-08-31) — PARTIAL
+
+Xiaomi 14 Ultra (24030PN60G), main camera 23mm, 4096x3072, 1x zoom, 24fps,
+compression ON, audio ON. **The A/B in Step 4 has NOT been run** — see "Not yet
+established" below. Nothing here settles whether the feature reduces frame drops.
+
+### Confirmed on hardware
+
+**The header arithmetic is correct, including the three-way asymmetry.** A Native
+reference clip was recorded first so the sensor's real black level came from a
+measurement rather than an assumption:
+
+| Field | Native clip | 12-bit clip | Rule |
+|-------|-------------|-------------|------|
+| `packMode@20` | 3 | 3 | CompressedPredictive both |
+| `whiteLevel@28` | 16383 | **4095** | TRUNCATED — 4096 would need 13 bits |
+| `blackLevel@32` | 1024 x4 | **256** x4 | ROUNDED — `(1024 + 2) >> 2` |
+| derived depth | 14 | **12** | `32 - clz(whiteLevel)` |
+| frames | 981 | 271 | |
+
+`whiteLevel` landing on 4095 rather than 4096 is the specific failure the Global
+Constraints exist to prevent: a rounded white level would have run the codec one
+bit wider than its own samples.
+
+**The file genuinely shrinks.** Bytes per frame, which is independent of take
+length: Native 16,118,336; 12-bit 12,991,008 — **19.4% smaller**. The shift is
+reaching the compressed encoder in a real recording, not only in host tests.
+
+**arm64 NEON is correct.** The whole core suite was built for arm64 and run on the
+device: `test_bit_depth` 8 cases / 212 assertions, `test_rawv_codec` 40 cases /
+3043 assertions, `test_pack10` 5/13, `test_pack12` 5/11 — all pass. Until now every
+result came from the x86 ARM_NEON_2_SSE shim, and `reduce4`'s vectorized reduction
+(`vaddq_s32` bias, `vshlq_s32` variable right shift, `vminq_s32` clamp) had never
+executed on an ARM core.
+
+**Encode CPU does scale with bit depth, contrary to this spec's own prediction.**
+The on-device timing gate measured reduced-depth encoding at 0.0256 s against
+Native's 0.0644 s — roughly **2.5x faster**, not merely equal. This spec argued
+above that encode CPU would not scale, because the Rice fast path is one append per
+pixel regardless of depth; that reasoning understated how much a lower `k` reduces
+accumulator-flush frequency. Note the x86 shim reports the *opposite* (~2.2x
+slower) because it emulates `vshlq_s32` lane-by-lane, so only the arm64 number is
+meaningful. Caveat: synthetic gradient-plus-noise frame, not sensor data.
+
+### Not yet established
+
+- **The frame-drop win — the entire reason this feature exists.** The two takes
+  recorded this session are *not* an A/B: Native ran first at 36.2 C battery (610
+  frames, 35 dropped at 0:27) and 12-bit second at 39.0 C (234 frames, 54 dropped
+  at 0:12). The second arm looks worse purely because it ran later and hotter. That
+  is precisely the confound that invalidated rounds 3 and 4, and no drop-rate
+  conclusion may be drawn from it.
+- **Step 3**, the DNG export levels check — the guard against a wrong `blackLevel`
+  scale being visually plausible and quietly wrong.
+- **The compressed-overflow fallback under a shift.** It has no host test, and it
+  is the one path where a bug produces visibly wrong frames rather than merely
+  wrong metadata. It must be provoked with a high-entropy scene, not waited for.
+
+### Blocker for the A/B
+
+`/sdcard` is 97% full with ~16 GB free. At the Native rate measured above, the
+spec's protocol (four 60 s takes) needs roughly **92 GB**. The A/B cannot run as
+specified until space is freed; this session's own 15.8 GB Native test clip is the
+largest disposable item.
