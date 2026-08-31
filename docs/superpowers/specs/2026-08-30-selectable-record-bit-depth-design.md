@@ -356,14 +356,35 @@ result came from the x86 ARM_NEON_2_SSE shim, and `reduce4`'s vectorized reducti
 (`vaddq_s32` bias, `vshlq_s32` variable right shift, `vminq_s32` clamp) had never
 executed on an ARM core.
 
-**Encode CPU does scale with bit depth, contrary to this spec's own prediction.**
-The on-device timing gate measured reduced-depth encoding at 0.0256 s against
-Native's 0.0644 s — roughly **2.5x faster**, not merely equal. This spec argued
-above that encode CPU would not scale, because the Rice fast path is one append per
-pixel regardless of depth; that reasoning understated how much a lower `k` reduces
-accumulator-flush frequency. Note the x86 shim reports the *opposite* (~2.2x
-slower) because it emulates `vshlq_s32` lane-by-lane, so only the arm64 number is
-meaningful. Caveat: synthetic gradient-plus-noise frame, not sensor data.
+**Encode CPU is not worse at reduced depth, and may be better — but the size of
+the effect is not established.** The on-device timing gate measured reduced depth
+at 0.0256 s against Native's 0.0644 s. Read that as a direction, not a magnitude,
+for three reasons found while checking it:
+
+- **The gate was measuring sequentially.** It timed every Native sample, then every
+  reduced sample. Across several hundred encodes on a phone, DVFS and temperature
+  drift, and the arm measured *last* — reduced — is favoured. That is the same
+  confound the A/B protocol below forbids ("not as a single sequential pair"),
+  committed inside the unit test. The gate now interleaves the arms; the number
+  above predates that fix and should be re-taken.
+- **The obvious structural explanation was checked and ruled out.** A plausible
+  story was that a lower `bitDepth` shrinks `worstCaseRiceRowBytes` — which is
+  exponential in depth, `2^(bitDepth+1-k)` — letting round 5's unchecked fast
+  packer engage at 12-bit where it could not at 14-bit. Measured directly: both
+  arms pick a workable `k` (9 Native, 7 reduced) and **both take the fast path**,
+  at the test's 512-wide frame and at a real 4096-wide capture band for every `k`
+  from 2 to 8. The speedup is not a fast-path threshold effect.
+- **The output only shrinks ~19%** (10.55 → 8.55 bits/sample on the same frame,
+  matching the 19.4% file shrink measured above). A 19% smaller bitstream does not
+  by itself explain a 2.5x time difference, and `Reduce=true` does strictly *more*
+  per-sample work than `Reduce=false`. The residual gap is unexplained.
+
+So the honest reading is that this document's earlier prediction — that encode CPU
+would not scale with bit depth, because the Rice fast path is one append per pixel
+regardless — is **not overturned by evidence this weak**. Reduced depth is at least
+not slower. Note also that the x86 shim reports the opposite (~2.2x slower) because
+it emulates `vshlq_s32` lane-by-lane, so only an arm64 run means anything here.
+Caveat throughout: synthetic gradient-plus-noise frame, not sensor data.
 
 ### Not yet established
 

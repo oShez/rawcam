@@ -694,16 +694,23 @@ TEST_CASE("reduced-depth encoding is not pathologically slower than Native") {
   // minimum is the run least disturbed by the rest of the machine, which is the
   // honest estimate of what the code costs. Without it the two arms swing ~40%
   // run to run and the ratio is dominated by scheduling, not by the encoder.
-  auto bestOf = [&](bool reduced) {
-    double best = timeIt(reduced);
-    for (int i = 0; i < 4; i++) best = std::min(best, timeIt(reduced));
-    return best;
-  };
-
-  bestOf(false);  // warm caches, clocks and the worker threads; discard
-  bestOf(true);
-  const double nativeSecs = bestOf(false);
-  const double reducedSecs = bestOf(true);
+  //
+  // INTERLEAVED, not all-of-one-then-all-of-the-other. This case is also run on
+  // the phone -- the host shim inverts the ratio (see the note above), so the
+  // arm64 run is the only meaningful one -- and there several hundred encodes is
+  // long enough for DVFS and temperature to drift. Measuring every Native sample
+  // before every reduced sample silently credits whichever arm ran under the
+  // better clocks, biasing in favour of whichever goes LAST. That is the same
+  // confound this feature's own device A/B protocol forbids ("order 14, 12, 14,
+  // 12 ... not as a single sequential pair"), and it applies here for the same
+  // reason. Alternating gives both arms the same thermal and clock trajectory.
+  timeIt(false);  // warm caches, clocks and the worker threads; discard
+  timeIt(true);
+  double nativeSecs = 1e9, reducedSecs = 1e9;
+  for (int round = 0; round < 5; round++) {
+    nativeSecs = std::min(nativeSecs, timeIt(false));
+    reducedSecs = std::min(reducedSecs, timeIt(true));
+  }
   CHECK(reducedSecs < nativeSecs * 3.0);
 }
 
