@@ -53,7 +53,6 @@ data class Settings(
     val defaultFps: Int = 24,
     val defaultLensIndex: Int = -1,          // -1 = device main
     val defaultSizeIndex: Int = 0,
-    val rememberLastState: Boolean = true,
     val freeSpaceReserveSeconds: Int = 35,   // 5..120 step 5
     val maxClipLengthSeconds: Int = 0,       // 0=off, 30, 60, 300, 600
     val recordBitDepth: Int = 0,             // 0=Native, 14, 12, 10, 8
@@ -85,7 +84,7 @@ data class Settings(
 
 /**
  * Snapshot of in-progress capture controls, saved so the next launch can restore where
- * the user left off (when [Settings.rememberLastState] is enabled). `anchorR/G/B <= 0f`
+ * the user left off. `anchorR/G/B <= 0f`
  * means no white-balance anchor was set.
  */
 data class CaptureState(
@@ -146,7 +145,6 @@ object SettingsRepository {
     private val KEY_DEFAULT_FPS = intPreferencesKey("defaultFps")
     private val KEY_DEFAULT_LENS_INDEX = intPreferencesKey("defaultLensIndex")
     private val KEY_DEFAULT_SIZE_INDEX = intPreferencesKey("defaultSizeIndex")
-    private val KEY_REMEMBER_LAST_STATE = booleanPreferencesKey("rememberLastState")
     private val KEY_FREE_SPACE_RESERVE_SECONDS = intPreferencesKey("freeSpaceReserveSeconds")
     private val KEY_MAX_CLIP_LENGTH_SECONDS = intPreferencesKey("maxClipLengthSeconds")
     private val KEY_RECORD_BIT_DEPTH = intPreferencesKey("recordBitDepth")
@@ -207,7 +205,6 @@ object SettingsRepository {
             defaultFps = this[KEY_DEFAULT_FPS] ?: fallback.defaultFps,
             defaultLensIndex = this[KEY_DEFAULT_LENS_INDEX] ?: fallback.defaultLensIndex,
             defaultSizeIndex = this[KEY_DEFAULT_SIZE_INDEX] ?: fallback.defaultSizeIndex,
-            rememberLastState = this[KEY_REMEMBER_LAST_STATE] ?: fallback.rememberLastState,
             freeSpaceReserveSeconds = this[KEY_FREE_SPACE_RESERVE_SECONDS] ?: fallback.freeSpaceReserveSeconds,
             maxClipLengthSeconds = this[KEY_MAX_CLIP_LENGTH_SECONDS] ?: fallback.maxClipLengthSeconds,
             recordBitDepth = this[KEY_RECORD_BIT_DEPTH] ?: fallback.recordBitDepth,
@@ -260,7 +257,6 @@ object SettingsRepository {
             prefs[KEY_DEFAULT_FPS] = next.defaultFps
             prefs[KEY_DEFAULT_LENS_INDEX] = next.defaultLensIndex
             prefs[KEY_DEFAULT_SIZE_INDEX] = next.defaultSizeIndex
-            prefs[KEY_REMEMBER_LAST_STATE] = next.rememberLastState
             prefs[KEY_FREE_SPACE_RESERVE_SECONDS] = next.freeSpaceReserveSeconds
             prefs[KEY_MAX_CLIP_LENGTH_SECONDS] = next.maxClipLengthSeconds
             prefs[KEY_RECORD_BIT_DEPTH] = next.recordBitDepth

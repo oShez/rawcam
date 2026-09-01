@@ -441,8 +441,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         // same values a fresh install would use -- rather than an out-of-bounds
         // list read.
         cameraOps.launch {
-            val remember = SettingsRepository.settings.first().rememberLastState
-            val saved = if (remember) SettingsRepository.captureState.first() else null
+            // Always restore. This used to be gated on a "Remember last settings"
+            // toggle that defaulted to ON, which forced the settings screen to also
+            // carry a full set of "default ISO / shutter / WB / lens / resolution"
+            // rows for the off case -- rows that duplicated this screen's own rail
+            // and, for anyone who left the toggle alone, never applied at all.
+            // Reopening where you left off is what a camera should do; a fresh
+            // install (nothing saved) still falls through to the Settings defaults.
+            val saved = SettingsRepository.captureState.first()
             val result = controller.initialize()
             val report = CompatibilityReport.render(result, Build.MODEL, Build.VERSION.SDK_INT)
             if (result is DeviceProfile.Unsupported) {
@@ -629,7 +635,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     /** True once the init{} restore block has determined a [CaptureState] was
      * actually applied at launch (vs. falling through to settings defaults because
-     * nothing was saved, or [Settings.rememberLastState] was off). Written exactly
+     * nothing was saved -- a fresh install). Written exactly
      * once, on cameraOps, before rawSpec is published (so before openCamera() can
      * possibly be called -- see openCamera's onReady comment); read on the camera
      * thread by the [StartupMeter.IF_NO_SAVED] check above. @Volatile makes that
@@ -961,7 +967,8 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Debounced write-through of the current manual controls into
-     * [SettingsRepository.saveCaptureState], gated on [Settings.rememberLastState].
+     * [SettingsRepository.saveCaptureState]. Unconditional: capture state is always
+     * remembered, so the app reopens where the user left off.
      * Called from every setter that changes a persisted field (setIso,
      * setShutterIndex, setFocus, setKelvin, setTint, setFps, setMode) and from the
      * meter-apply block in [meterAt]'s onResult. 500ms debounce (cancel-and-relaunch
@@ -972,7 +979,6 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
      * what a later restore should reproduce, not a derived kelvin/tint slider value.
      */
     private fun persistCaptureState() {
-        if (!_uiState.value.settings.rememberLastState) return
         persistJob?.cancel()
         persistJob = viewModelScope.launch {
             delay(500)

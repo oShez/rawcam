@@ -50,8 +50,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shez.rawcam.NativeBridge
-import com.shez.rawcam.audio.AudioDeviceCatalog
-import com.shez.rawcam.audio.AudioInputDevice
 import com.shez.rawcam.export.ExportPaths
 import com.shez.rawcam.settings.MainsFreq
 import com.shez.rawcam.settings.MeterRegion
@@ -76,8 +74,6 @@ import java.io.File
 fun SettingsScreen(
     onBack: () -> Unit = {},
     viewModel: RecordViewModel = viewModel(),
-    onRequestAudioPermission: () -> Unit = {},
-    audioInputs: () -> List<AudioInputDevice> = { emptyList() },
 ) {
     BackHandler(onBack = onBack)
     val scope = rememberCoroutineScope()
@@ -134,90 +130,24 @@ fun SettingsScreen(
         // Width-capped: full-bleed rows put a label and its value ~1870px apart on this
         // screen, so reading one row meant crossing the display. See ScreenBody.
         ScreenBody(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            SectionHeader("CAPTURE DEFAULTS")
-            EnumRow(
-                title = "Startup metering", subtitle = null,
-                options = listOf(
-                    StartupMeter.ALWAYS to "Always",
-                    StartupMeter.IF_NO_SAVED to "If nothing saved",
-                    StartupMeter.NEVER to "Never",
-                ),
-                selected = settings.startupMeter,
-                onSelect = { v -> apply { it.copy(startupMeter = v) } },
-            )
-            SliderRow(
-                title = "Default white balance", stops = KELVIN_STOPS, selected = settings.defaultKelvin,
-                labelFor = { "${it}K" },
-                onSelect = { v -> apply { it.copy(defaultKelvin = v) } },
-            )
-            SliderRow(
-                title = "Default tint", stops = TINT_STOPS, selected = settings.defaultTint,
-                labelFor = { if (it > 0) "+$it" else "$it" },
-                onSelect = { v -> apply { it.copy(defaultTint = v) } },
-            )
-            EnumRow(
-                title = "Default ISO", subtitle = null,
-                options = listOf(0 to "Device min", 100 to "100", 200 to "200", 400 to "400", 800 to "800"),
-                selected = settings.defaultIso,
-                onSelect = { v -> apply { it.copy(defaultIso = v) } },
-            )
-            EnumRow(
-                title = "Default shutter", subtitle = null,
-                options = listOf(48 to "1/48", 60 to "1/60", 120 to "1/120"),
-                selected = settings.defaultShutterDenom,
-                onSelect = { v -> apply { it.copy(defaultShutterDenom = v) } },
-            )
-            EnumRow(
-                title = "Default frame rate", subtitle = null,
-                options = listOf(24 to "24", 30 to "30", 48 to "48", 60 to "60"),
-                selected = settings.defaultFps,
-                onSelect = { v -> apply { it.copy(defaultFps = v) } },
-            )
-            EnumRow(
-                title = "Default lens", subtitle = "Falls back to Main if out of range",
-                options = listOf(-1 to "Main", 0 to "First", 1 to "Second", 2 to "Third"),
-                selected = settings.defaultLensIndex,
-                onSelect = { v -> apply { it.copy(defaultLensIndex = v) } },
-            )
-            // The setting stores an INDEX, not a resolution, because it has to mean
-            // something on every lens and each lens offers different sizes. But
-            // "Full / 2nd / 3rd" told you the rank and not what you would actually
-            // get, so each rank now shows the dimensions it resolves to on the lens
-            // currently in use, and the subtitle names that lens so the numbers are
-            // not mistaken for a global truth. Ranks that lens does not have keep
-            // their ordinal name -- there is no resolution to show for them.
+            // Only what CANNOT be reached from the record screen lives here. ISO,
+            // shutter, white balance, tint, lens, resolution, frame rate and the
+            // whole audio group are all one tap away on the rail, so duplicating
+            // them here was two places to change one value -- and the "default"
+            // copies were dead besides, since capture state is always restored now.
+            //
+            // activeLens gates the per-lens bit-depth options below.
             val activeLens = recordUiState.lenses.getOrNull(recordUiState.lensIndex)
-            val activeSizes = activeLens?.sizes.orEmpty()
-            EnumRow(
-                title = "Default resolution",
-                subtitle = if (activeLens == null) "Sizes are ranked largest-first per lens"
-                else "Ranked largest-first per lens; dimensions shown for ${activeLens.label}",
-                options = listOf(0 to "Full", 1 to "2nd", 2 to "3rd", 3 to "Smallest")
-                    .map { (index, ordinal) -> index to (activeSizes.getOrNull(index)?.label ?: ordinal) },
-                selected = settings.defaultSizeIndex,
-                onSelect = { v -> apply { it.copy(defaultSizeIndex = v) } },
-            )
 
-            SectionHeader("REMEMBER")
-            ToggleRow(
-                title = "Remember last settings",
-                subtitle = "Reopen with your last ISO, shutter, WB, focus, lens and frame rate",
-                checked = settings.rememberLastState,
-                onChange = { v -> apply { it.copy(rememberLastState = v) } },
-            )
-
+            // Format first: compression and depth decide what a clip IS, and they
+            // interact (8-bit only saves space with compression on), so they sit
+            // together at the top. Limits and housekeeping follow.
             SectionHeader("RECORDING")
-            SliderRow(
-                title = "Free-space reserve", stops = (5..120 step 5).toList(),
-                selected = settings.freeSpaceReserveSeconds,
-                labelFor = { "${it}s" },
-                onSelect = { v -> apply { it.copy(freeSpaceReserveSeconds = v) } },
-            )
-            EnumRow(
-                title = "Max clip length", subtitle = null,
-                options = listOf(0 to "Off", 30 to "30s", 60 to "1m", 300 to "5m", 600 to "10m"),
-                selected = settings.maxClipLengthSeconds,
-                onSelect = { v -> apply { it.copy(maxClipLengthSeconds = v) } },
+            ToggleRow(
+                title = "Compress recordings",
+                subtitle = "Lossless compression to shrink .rawv file size",
+                checked = settings.compressRecordings,
+                onChange = { v -> apply { it.copy(compressRecordings = v) } },
             )
             // 0 when no lens is known yet (enumeration still running): every explicit depth
             // is then disabled and only Native is selectable, which is the safe default.
@@ -235,6 +165,18 @@ fun SettingsScreen(
                 onSelect = { v -> apply { it.copy(recordBitDepth = v) } },
                 // Native is never disabled; an explicit depth above what this lens delivers is.
                 isEnabled = { v -> v == 0 || v <= activeLensNativeDepth },
+            )
+            EnumRow(
+                title = "Max clip length", subtitle = null,
+                options = listOf(0 to "Off", 30 to "30s", 60 to "1m", 300 to "5m", 600 to "10m"),
+                selected = settings.maxClipLengthSeconds,
+                onSelect = { v -> apply { it.copy(maxClipLengthSeconds = v) } },
+            )
+            SliderRow(
+                title = "Free-space reserve", stops = (5..120 step 5).toList(),
+                selected = settings.freeSpaceReserveSeconds,
+                labelFor = { "${it}s" },
+                onSelect = { v -> apply { it.copy(freeSpaceReserveSeconds = v) } },
             )
             ToggleRow(
                 title = "Thermal auto-stop",
@@ -254,56 +196,25 @@ fun SettingsScreen(
                 selected = settings.oisMode,
                 onSelect = { v -> apply { it.copy(oisMode = v) } },
             )
-            ToggleRow(
-                title = "Compress recordings",
-                subtitle = "Lossless compression to shrink .rawv file size",
-                checked = settings.compressRecordings,
-                onChange = { v -> apply { it.copy(compressRecordings = v) } },
-            )
             TextFieldRow(
                 title = "Clip name prefix", value = settings.clipPrefix,
                 onCommit = { v -> apply { it.copy(clipPrefix = v) } },
             )
 
-            SectionHeader("AUDIO")
-            ToggleRow(
-                title = "Record audio",
-                subtitle = "Writes a synced .wav beside each clip",
-                checked = settings.recordAudio,
-                onChange = { v ->
-                    // Ask at the toggle, never at record time: a permission dialog
-                    // appearing as the user hits record is how takes get lost.
-                    if (v) onRequestAudioPermission()
-                    apply { it.copy(recordAudio = v) }
-                },
+            // Startup metering belongs with the tap-to-meter rows: all four decide
+            // when and how the app meters, and it is NOT a duplicate of anything on
+            // the rail -- it governs launch behaviour, which has no on-screen control.
+            SectionHeader("METERING")
+            EnumRow(
+                title = "Meter on launch", subtitle = null,
+                options = listOf(
+                    StartupMeter.ALWAYS to "Always",
+                    StartupMeter.IF_NO_SAVED to "If nothing saved",
+                    StartupMeter.NEVER to "Never",
+                ),
+                selected = settings.startupMeter,
+                onSelect = { v -> apply { it.copy(startupMeter = v) } },
             )
-            if (settings.recordAudio) {
-                val inputs = remember { audioInputs() }
-                EnumRow(
-                    title = "Input",
-                    subtitle = if (settings.audioInputKey.isNotEmpty() &&
-                        AudioDeviceCatalog.resolve(inputs, settings.audioInputKey) == null
-                    ) "Saved input unavailable -- using default" else null,
-                    // Zipped against displayNamesFor rather than reading displayName per
-                    // device: names that collide (two built-in mics) are numbered, and
-                    // that numbering can only be worked out across the whole list.
-                    options = listOf("" to "System default") +
-                        inputs.zip(AudioDeviceCatalog.displayNamesFor(inputs)) { d, n -> d.key to n },
-                    selected = settings.audioInputKey,
-                    onSelect = { v -> apply { it.copy(audioInputKey = v) } },
-                )
-                EnumRow(
-                    title = "Gain", subtitle = null,
-                    options = listOf(
-                        -20f to "-20 dB", -12f to "-12 dB", -6f to "-6 dB", 0f to "0 dB",
-                        6f to "+6 dB", 12f to "+12 dB", 20f to "+20 dB", 30f to "+30 dB",
-                    ),
-                    selected = settings.audioGainDb,
-                    onSelect = { v -> apply { it.copy(audioGainDb = v) } },
-                )
-            }
-
-            SectionHeader("TAP-TO-METER")
             EnumRow(
                 title = "Tap adjusts", subtitle = null,
                 options = listOf(
@@ -352,14 +263,6 @@ fun SettingsScreen(
                 selected = settings.shutterDisplay,
                 onSelect = { v -> apply { it.copy(shutterDisplay = v) } },
             )
-            ToggleRow(
-                title = "Stats sidebar", subtitle = null, checked = settings.showStatsSidebar,
-                onChange = { v -> apply { it.copy(showStatsSidebar = v) } },
-            )
-            ToggleRow(
-                title = "BENCH button", subtitle = null, checked = settings.showBench,
-                onChange = { v -> apply { it.copy(showBench = v) } },
-            )
 
             SectionHeader("CLIPS & EXPORT")
             ToggleRow(
@@ -377,7 +280,19 @@ fun SettingsScreen(
                 onChange = { v -> apply { it.copy(autoExport = v) } },
             )
 
+            // Stats sidebar and BENCH moved here from VIEWFINDER: they are
+            // diagnostics, not framing aids, and sat oddly beside grid and zebras.
+            // DEVICE folded in too -- one place for everything a normal user never
+            // needs to open.
             SectionHeader("ADVANCED")
+            ToggleRow(
+                title = "Stats sidebar", subtitle = null, checked = settings.showStatsSidebar,
+                onChange = { v -> apply { it.copy(showStatsSidebar = v) } },
+            )
+            ToggleRow(
+                title = "BENCH button", subtitle = null, checked = settings.showBench,
+                onChange = { v -> apply { it.copy(showBench = v) } },
+            )
             ToggleRow(
                 title = "Diagnostic logging", subtitle = "Verbose meter/WB logs", checked = settings.debugLogging,
                 onChange = { v -> apply { it.copy(debugLogging = v) } },
@@ -389,7 +304,6 @@ fun SettingsScreen(
                 Text("Reset all settings", color = RawCamColors.Accent, fontSize = 15.sp)
             }
 
-            SectionHeader("DEVICE")
             ActionRow(
                 title = "Compatibility report",
                 subtitle = "What RawCam found on this phone, and why",

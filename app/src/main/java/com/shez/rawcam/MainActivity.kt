@@ -93,13 +93,13 @@ class MainActivity : ComponentActivity() {
                             else ClipViewerScreen(clip = c, onBack = { screen = Screen.Clips })
                         }
                         Screen.Exports -> ExportsScreen(onBack = { screen = Screen.Record })
+                        // Audio moved off Settings entirely -- the record screen's
+                        // AUDIO chip owns the toggle, input and gain, and asks for
+                        // the mic permission itself, so this screen needs neither
+                        // the launcher nor the device list any more.
                         Screen.Settings -> SettingsScreen(
                             onBack = { screen = Screen.Record },
                             viewModel = viewModel,
-                            onRequestAudioPermission = {
-                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            },
-                            audioInputs = { AudioRecorder(this).listInputs() },
                         )
                     }
                 }
