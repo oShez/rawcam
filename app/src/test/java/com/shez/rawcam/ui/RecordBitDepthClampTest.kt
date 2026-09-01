@@ -49,6 +49,20 @@ class RecordBitDepthClampTest {
         assertEquals(10, effectiveBitDepth(ultraWide, 14))
     }
 
+    @Test fun aNegativeStoredDepthResolvesToNativeLikeTheNativeSideDoes() {
+        // Settings.coerced() runs on WRITE only, so a corrupted DataStore value
+        // reaches this unclamped. capture.cpp receives the same value as an
+        // unsigned int, where -1 becomes 4294967295, exceeds the sensor's native
+        // depth, and records Native. If this returned -1 instead, frameRecordBytes
+        // would take its `bitDepth <= 10` branch and size the frame at 1.25 B/px
+        // against a clip really written at ~2 B/px -- an optimistic time-left and
+        // an under-sized free-space reserve. The two sides must agree on EVERY
+        // Int, not only the five the picker can produce.
+        assertEquals(14, effectiveBitDepth(main, -1))
+        assertEquals(10, effectiveBitDepth(ultraWide, -1))
+        assertEquals(14, effectiveBitDepth(main, Int.MIN_VALUE))
+    }
+
     @Test fun depthIsAnAxisOfTheCaptureRateKey() {
         // Without this, a rate measured at 14-bit mispredicts a 12-bit take and
         // re-breaks the time-left readout.

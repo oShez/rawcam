@@ -1324,7 +1324,17 @@ private fun formatTimer(totalSeconds: Int): String {
 internal fun effectiveBitDepth(whiteLevel: Int, requested: Int): Int {
     if (whiteLevel <= 0) return 0
     val native = 32 - Integer.numberOfLeadingZeros(whiteLevel)
-    return if (requested == 0 || requested >= native) native else requested
+    // `<= 0`, not `== 0`: a NEGATIVE requested depth must resolve to Native, to
+    // match what the native side does with it. Settings.coerced() runs only on
+    // write, so a corrupted DataStore value is read back unclamped and lands
+    // here. capture.cpp takes this as a uint32_t, so -1 arrives as 4294967295,
+    // trips shiftForDepth's `requestedDepth >= nativeDepth` guard, and records
+    // Native. Returning -1 here instead would make frameRecordBytes size the
+    // frame as Packed10 (1.25 B/px) against a clip actually written at ~2 B/px,
+    // leaving both the time-left readout and the free-space reserve optimistic.
+    // The two sides have to agree for every Int, not just the five the picker
+    // offers.
+    return if (requested <= 0 || requested >= native) native else requested
 }
 
 /**
