@@ -456,11 +456,15 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
                 return@launch
             }
             _uiState.update { it.copy(reportText = report) }
-            val s0 = SettingsRepository.settings.first()
+            // Fresh-install fallbacks are constants, not settings. They used to read
+            // Settings.default* fields whose rows were deleted as duplicates of this
+            // screen's own rail, which left fields nothing could write but this still
+            // read -- worse than either keeping the rows or dropping them. The values
+            // here are exactly what those fields defaulted to.
             val lensCount = controller.lenses.size
-            val lensIndex = (saved?.lensIndex ?: s0.defaultLensIndex)
+            val lensIndex = (saved?.lensIndex ?: controller.defaultLensIndex)
                 .let { if (it in 0 until lensCount) it else controller.defaultLensIndex }
-            val sizeIndex = (saved?.sizeIndex ?: s0.defaultSizeIndex)
+            val sizeIndex = (saved?.sizeIndex ?: 0)
                 .let { if (it in controller.lenses[lensIndex].sizes.indices) it else 0 }
             if (lensIndex != controller.defaultLensIndex || sizeIndex != 0) controller.selectMode(lensIndex, sizeIndex)
             // AFTER the mode is settled: the ladder is built by
@@ -470,19 +474,19 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
             // clamping has removed silently stays at 1x.
             saved?.zoomStop?.let { controller.setZoomIndex(it) }
             val lens = controller.lenses.getOrNull(lensIndex)
-            val fps = (saved?.fps ?: s0.defaultFps)
+            val fps = (saved?.fps ?: 24)
                 .let { f -> fpsOptions(controller.rawSpec).let { o -> if (f in o) f else o.first() } }
             // shutterStopsFor(fps, lens?.exposureRangeNs), not shutterStops(fps): at this
             // point _uiState.value.exposureRangeNs is still the pre-init default (null),
             // since it's only published below -- reading it here would restore an
             // unfiltered index for one frame on lenses with a narrower sensor range.
             val stops = shutterStopsFor(fps, lens?.exposureRangeNs)
-            val denom = saved?.shutterDenom ?: s0.defaultShutterDenom
+            val denom = saved?.shutterDenom ?: 48
             val shutterIndex = stops.indexOf(stops.minByOrNull { kotlin.math.abs(it - denom) } ?: stops.first()).coerceAtLeast(0)
-            val iso = (saved?.iso ?: if (s0.defaultIso == 0) controller.rawSpec.isoRange.start else s0.defaultIso)
+            val iso = (saved?.iso ?: controller.rawSpec.isoRange.start)
                 .coerceIn(controller.rawSpec.isoRange)
-            val kelvin = KELVIN_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.kelvin ?: s0.defaultKelvin)) } ?: 5600
-            val tint = TINT_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.tint ?: s0.defaultTint)) } ?: 0
+            val kelvin = KELVIN_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.kelvin ?: 5600)) } ?: 5600
+            val tint = TINT_STOPS.minByOrNull { kotlin.math.abs(it - (saved?.tint ?: 0)) } ?: 0
             val focus = (saved?.focusDiopters ?: 0f).coerceIn(0f, maxOf(controller.rawSpec.minFocusDiopters, 0f))
             if (saved != null && saved.anchorG > 0f)
                 controller.restoreWbAnchor(RggbChannelVector(saved.anchorR, saved.anchorG, saved.anchorG, saved.anchorB), saved.anchorKelvin)

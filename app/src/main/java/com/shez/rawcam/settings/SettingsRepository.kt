@@ -46,13 +46,6 @@ enum class MeterRegion { SMALL, MEDIUM, LARGE }
  */
 data class Settings(
     val startupMeter: StartupMeter = StartupMeter.IF_NO_SAVED,
-    val defaultKelvin: Int = 5600,
-    val defaultTint: Int = 0,
-    val defaultIso: Int = 0,                 // 0 = device minimum
-    val defaultShutterDenom: Int = 48,
-    val defaultFps: Int = 24,
-    val defaultLensIndex: Int = -1,          // -1 = device main
-    val defaultSizeIndex: Int = 0,
     val freeSpaceReserveSeconds: Int = 35,   // 5..120 step 5
     val maxClipLengthSeconds: Int = 0,       // 0=off, 30, 60, 300, 600
     val recordBitDepth: Int = 0,             // 0=Native, 14, 12, 10, 8
@@ -138,13 +131,6 @@ object SettingsRepository {
 
     // ---- Settings keys (key name == field name) ----
     private val KEY_STARTUP_METER = stringPreferencesKey("startupMeter")
-    private val KEY_DEFAULT_KELVIN = intPreferencesKey("defaultKelvin")
-    private val KEY_DEFAULT_TINT = intPreferencesKey("defaultTint")
-    private val KEY_DEFAULT_ISO = intPreferencesKey("defaultIso")
-    private val KEY_DEFAULT_SHUTTER_DENOM = intPreferencesKey("defaultShutterDenom")
-    private val KEY_DEFAULT_FPS = intPreferencesKey("defaultFps")
-    private val KEY_DEFAULT_LENS_INDEX = intPreferencesKey("defaultLensIndex")
-    private val KEY_DEFAULT_SIZE_INDEX = intPreferencesKey("defaultSizeIndex")
     private val KEY_FREE_SPACE_RESERVE_SECONDS = intPreferencesKey("freeSpaceReserveSeconds")
     private val KEY_MAX_CLIP_LENGTH_SECONDS = intPreferencesKey("maxClipLengthSeconds")
     private val KEY_RECORD_BIT_DEPTH = intPreferencesKey("recordBitDepth")
@@ -198,13 +184,6 @@ object SettingsRepository {
         val fallback = Settings()
         return Settings(
             startupMeter = decodeEnum(this[KEY_STARTUP_METER], fallback.startupMeter),
-            defaultKelvin = this[KEY_DEFAULT_KELVIN] ?: fallback.defaultKelvin,
-            defaultTint = this[KEY_DEFAULT_TINT] ?: fallback.defaultTint,
-            defaultIso = this[KEY_DEFAULT_ISO] ?: fallback.defaultIso,
-            defaultShutterDenom = this[KEY_DEFAULT_SHUTTER_DENOM] ?: fallback.defaultShutterDenom,
-            defaultFps = this[KEY_DEFAULT_FPS] ?: fallback.defaultFps,
-            defaultLensIndex = this[KEY_DEFAULT_LENS_INDEX] ?: fallback.defaultLensIndex,
-            defaultSizeIndex = this[KEY_DEFAULT_SIZE_INDEX] ?: fallback.defaultSizeIndex,
             freeSpaceReserveSeconds = this[KEY_FREE_SPACE_RESERVE_SECONDS] ?: fallback.freeSpaceReserveSeconds,
             maxClipLengthSeconds = this[KEY_MAX_CLIP_LENGTH_SECONDS] ?: fallback.maxClipLengthSeconds,
             recordBitDepth = this[KEY_RECORD_BIT_DEPTH] ?: fallback.recordBitDepth,
@@ -250,13 +229,6 @@ object SettingsRepository {
             val updated = transform(prefs.toSettings())
             val next = updated.coerced()
             prefs[KEY_STARTUP_METER] = next.startupMeter.name
-            prefs[KEY_DEFAULT_KELVIN] = next.defaultKelvin
-            prefs[KEY_DEFAULT_TINT] = next.defaultTint
-            prefs[KEY_DEFAULT_ISO] = next.defaultIso
-            prefs[KEY_DEFAULT_SHUTTER_DENOM] = next.defaultShutterDenom
-            prefs[KEY_DEFAULT_FPS] = next.defaultFps
-            prefs[KEY_DEFAULT_LENS_INDEX] = next.defaultLensIndex
-            prefs[KEY_DEFAULT_SIZE_INDEX] = next.defaultSizeIndex
             prefs[KEY_FREE_SPACE_RESERVE_SECONDS] = next.freeSpaceReserveSeconds
             prefs[KEY_MAX_CLIP_LENGTH_SECONDS] = next.maxClipLengthSeconds
             prefs[KEY_RECORD_BIT_DEPTH] = next.recordBitDepth
@@ -293,21 +265,29 @@ object SettingsRepository {
                 if (prefs[KEY_CS_SAVED] != true) {
                     null
                 } else {
-                    val fallback = Settings()
+                    // Per-field fallbacks for a partially-written record (one key
+                    // missing, not the whole state). These used to read a
+                    // default-constructed Settings()'s default* fields; those are
+                    // gone -- nothing could write them once their UI rows were
+                    // deleted as rail duplicates -- so the same values are spelled
+                    // out. lensIndex -1 still means "device main": the restore path
+                    // maps any out-of-range index onto CameraController
+                    // .defaultLensIndex. iso 0 means "device minimum" and is coerced
+                    // into the sensor's range by the caller.
                     CaptureState(
-                        iso = prefs[KEY_CS_ISO] ?: fallback.defaultIso,
-                        shutterDenom = prefs[KEY_CS_SHUTTER_DENOM] ?: fallback.defaultShutterDenom,
+                        iso = prefs[KEY_CS_ISO] ?: 0,
+                        shutterDenom = prefs[KEY_CS_SHUTTER_DENOM] ?: 48,
                         focusDiopters = prefs[KEY_CS_FOCUS_DIOPTERS] ?: 0f,
-                        kelvin = prefs[KEY_CS_KELVIN] ?: fallback.defaultKelvin,
-                        tint = prefs[KEY_CS_TINT] ?: fallback.defaultTint,
-                        fps = prefs[KEY_CS_FPS] ?: fallback.defaultFps,
-                        lensIndex = prefs[KEY_CS_LENS_INDEX] ?: fallback.defaultLensIndex,
-                        sizeIndex = prefs[KEY_CS_SIZE_INDEX] ?: fallback.defaultSizeIndex,
+                        kelvin = prefs[KEY_CS_KELVIN] ?: 5600,
+                        tint = prefs[KEY_CS_TINT] ?: 0,
+                        fps = prefs[KEY_CS_FPS] ?: 24,
+                        lensIndex = prefs[KEY_CS_LENS_INDEX] ?: -1,
+                        sizeIndex = prefs[KEY_CS_SIZE_INDEX] ?: 0,
                         zoomStop = prefs[KEY_CS_ZOOM_STOP] ?: 0,
                         anchorR = prefs[KEY_CS_ANCHOR_R] ?: 0f,
                         anchorG = prefs[KEY_CS_ANCHOR_G] ?: 0f,
                         anchorB = prefs[KEY_CS_ANCHOR_B] ?: 0f,
-                        anchorKelvin = prefs[KEY_CS_ANCHOR_KELVIN] ?: fallback.defaultKelvin,
+                        anchorKelvin = prefs[KEY_CS_ANCHOR_KELVIN] ?: 5600,
                     )
                 }
             }

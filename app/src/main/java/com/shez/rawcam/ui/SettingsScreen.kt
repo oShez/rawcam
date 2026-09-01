@@ -142,7 +142,7 @@ fun SettingsScreen(
             // Format first: compression and depth decide what a clip IS, and they
             // interact (8-bit only saves space with compression on), so they sit
             // together at the top. Limits and housekeeping follow.
-            SectionHeader("RECORDING")
+            SectionHeader("RECORDING", divider = false)
             ToggleRow(
                 title = "Compress recordings",
                 subtitle = "Lossless compression to shrink .rawv file size",
@@ -195,10 +195,6 @@ fun SettingsScreen(
                 options = listOf(OisMode.AUTO to "Auto", OisMode.ON to "On", OisMode.OFF to "Off"),
                 selected = settings.oisMode,
                 onSelect = { v -> apply { it.copy(oisMode = v) } },
-            )
-            TextFieldRow(
-                title = "Clip name prefix", value = settings.clipPrefix,
-                onCommit = { v -> apply { it.copy(clipPrefix = v) } },
             )
 
             // Startup metering belongs with the tap-to-meter rows: all four decide
@@ -264,7 +260,14 @@ fun SettingsScreen(
                 onSelect = { v -> apply { it.copy(shutterDisplay = v) } },
             )
 
+            // Clip name prefix leads here rather than sitting in RECORDING: it names
+            // the FILES, which is what the rest of this section is about, and it is
+            // not a recording limit like the rows it used to sit among.
             SectionHeader("CLIPS & EXPORT")
+            TextFieldRow(
+                title = "Clip name prefix", value = settings.clipPrefix,
+                onCommit = { v -> apply { it.copy(clipPrefix = v) } },
+            )
             ToggleRow(
                 title = "Confirm before delete", subtitle = null, checked = settings.confirmDelete,
                 onChange = { v -> apply { it.copy(confirmDelete = v) } },
@@ -304,6 +307,11 @@ fun SettingsScreen(
                 Text("Reset all settings", color = RawCamColors.Accent, fontSize = 15.sp)
             }
 
+            // Split back out of ADVANCED. Folding DEVICE in traded a coherent
+            // grouping for one fewer header and made ADVANCED a junk drawer: these
+            // three OPEN something -- a report, a file dialog, a system permission
+            // screen -- while everything above is a preference you set and leave.
+            SectionHeader("DEVICE")
             ActionRow(
                 title = "Compatibility report",
                 subtitle = "What RawCam found on this phone, and why",
@@ -353,10 +361,21 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SectionHeader(title: String) {
+private fun SectionHeader(title: String, divider: Boolean = true) {
+    // A hairline above the label, not just whitespace. This list scrolls well past
+    // a screen, and spacing alone left the boundary between two groups reading as
+    // one more gap between rows. Outline is the same low-contrast token the
+    // disabled row text uses, so it separates without competing with the content.
+    //
+    // `divider = false` for the FIRST header only: a rule there would hang directly
+    // under the screen title with no group above it to close off.
+    if (divider) {
+        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.fillMaxWidth().height(1.dp).background(RawCamColors.Outline))
+    }
     Text(
         title, color = RawCamColors.Muted, style = RawCamType.Label,
-        modifier = Modifier.padding(top = 20.dp, bottom = 6.dp),
+        modifier = Modifier.padding(top = if (divider) 14.dp else 20.dp, bottom = 6.dp),
     )
 }
 
@@ -402,7 +421,18 @@ private fun <T> EnumRow(
                 Row(
                     Modifier
                         .then(if (enabled) Modifier.clickable { onSelect(value) } else Modifier)
-                        .background(if (on) RawCamColors.SurfaceVariant else Color.Transparent)
+                        // `on && enabled`, not just `on`. Depth is stored as
+                        // REQUESTED, so a value can be both selected and undeliverable
+                        // -- pick 12 on the main camera, switch to the 10-bit
+                        // ultra-wide, and 12 is still the stored choice while being
+                        // disabled. Painting the selected background there made a
+                        // greyed, untappable option read as the active one. It now
+                        // shows as plainly disabled; the take records Native, and the
+                        // stored value is still there when a lens that can deliver it
+                        // comes back.
+                        .background(
+                            if (on && enabled) RawCamColors.SurfaceVariant else Color.Transparent,
+                        )
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                 ) {
                     Text(
