@@ -786,3 +786,63 @@ TEST_CASE("ParallelFrameEncoder at shift 0 is unchanged by the new parameters") 
   CHECK(bare == explicitZero);
   CHECK(std::equal(a.begin(), a.begin() + bare, b.begin()));
 }
+
+// Every other bit-depth case here uses one geometry (64x16, 512x256, 512x512) at
+// a single shift of 2. The reduction rides a 4-lane NEON interior loop and a
+// predictor with a 2-pixel stride, so the breakage it could plausibly hide lives
+// at sizes those never reach: width below the vector width, width or height
+// below the predictor's reach, odd and prime widths, and a white level that is
+// not 2^n - 1. Sweeping them found no defect -- this case exists to keep it that
+// way, since a regression here corrupts samples silently rather than loudly.
+//
+// Deliberately does NOT require the parallel encoder to succeed: its per-band
+// buffer is sized at 4 bytes/sample, which incompressible noise beats on a
+// 1-pixel-wide frame, so it correctly returns 0 (caller stores uncompressed) for
+// a few of these. That is pre-existing and unrelated to bit depth -- it happens
+// at shift 0 too. When it DOES encode, its bytes must match the serial encoder's.
+TEST_CASE("reduction is exact across tiny, odd and non-power-of-two geometry") {
+  std::srand(20260901);
+  const uint32_t widths[] = {1, 2, 3, 5, 7, 9, 13, 33, 64, 127};
+  const uint32_t heights[] = {1, 2, 3, 5, 16};
+  const uint32_t whites[] = {255, 1023, 4095, 16383, 4000};  // 4000 is not 2^n - 1
+  const uint32_t requests[] = {0, 8, 10, 12, 14};
+
+  for (uint32_t w : widths) {
+    for (uint32_t h : heights) {
+      for (uint32_t nativeWhite : whites) {
+        for (uint32_t requested : requests) {
+          const uint32_t shift = shiftForDepth(nativeWhite, requested);
+          const uint32_t newWhite = shift ? reducedWhiteLevel(nativeWhite, shift) : 0;
+          const uint32_t effWhite = shift ? (nativeWhite >> shift) : nativeWhite;
+          const uint32_t depth = 32u - (uint32_t)__builtin_clz(effWhite);
+
+          std::vector<uint16_t> src((size_t)w * h);
+          for (auto& v : src) v = (uint16_t)(std::rand() % (int)(nativeWhite + 1));
+          src[src.size() / 2] = (uint16_t)nativeWhite;  // force the clamp to fire
+
+          std::vector<uint16_t> expected(src.size());
+          for (size_t i = 0; i < src.size(); i++)
+            expected[i] = shift ? reduceSample(src[i], shift, newWhite) : src[i];
+
+          const uint32_t cap = (uint32_t)(src.size() * 4 + 8192);
+          std::vector<uint8_t> enc(cap);
+          uint32_t n = encodeFrame(src.data(), w, h, w, depth, enc.data(), cap,
+                                   shift, newWhite);
+          if (n == 0) continue;  // would not fit; the caller stores uncompressed
+
+          std::vector<uint16_t> back(src.size());
+          REQUIRE(decodeFrame(enc.data(), n, back.data(), w, h, w, depth));
+          REQUIRE(back == expected);
+
+          std::vector<uint8_t> par(cap);
+          ParallelFrameEncoder pe(w, h, 4);
+          uint32_t pn = pe.encode(src.data(), w, depth, par.data(), cap, shift, newWhite);
+          if (pn != 0) {
+            REQUIRE(pn == n);
+            REQUIRE(std::equal(enc.begin(), enc.begin() + n, par.begin()));
+          }
+        }
+      }
+    }
+  }
+}
