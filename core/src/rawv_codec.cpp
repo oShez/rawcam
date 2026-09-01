@@ -90,7 +90,9 @@ class BitWriter {
   // Unchecked twin of writeBits: identical bit output, no capacity guard. Only
   // safe when the caller has proven headroom (see computeAndPackBand's per-row
   // worstCaseRiceRowBytes check).
-  void putUnchecked(uint32_t bits, uint32_t nbits) {
+  // always_inline for the same reason as writeRiceUnchecked below -- it is that
+  // function's entire body, so leaving this one out of line would undo the fix.
+  __attribute__((always_inline)) inline void putUnchecked(uint32_t bits, uint32_t nbits) {
     if (nbits == 0) return;
     acc_ = (acc_ << nbits) | static_cast<uint64_t>(bits & maskFor(nbits));
     accBits_ += nbits;
@@ -98,7 +100,18 @@ class BitWriter {
   }
 
   // Unchecked twin of writeRice: bit-identical to writeRice (same q==0 fast path).
-  void writeRiceUnchecked(uint32_t value, uint32_t k) {
+  //
+  // always_inline is load-bearing here, not a hint. This is round 5's hot loop --
+  // one call per pixel, 12.6 M pixels a frame at 24 fps -- and it was fully
+  // inlined until the bit-depth work added two template instantiations each of
+  // the band body, selectRiceParam and encodeFrameImpl to this file. That pushed
+  // clang past its -O2 inline budget and it began emitting this out of line: a
+  // `bl` per pixel, plus the BitWriter state spilled to the stack instead of
+  // living in registers across the row. Verified by diffing arm64 assembly
+  // against the pre-feature commit (0 calls before, 2 after). The app ships
+  // RelWithDebInfo (-O2), so -O3's larger budget would not save it. Native pays
+  // this too, which makes it a breach of the plan's cost-identical constraint.
+  __attribute__((always_inline)) inline void writeRiceUnchecked(uint32_t value, uint32_t k) {
     uint32_t q = value >> k;
     if (q == 0) { putUnchecked(value, k + 1); return; }
     while (q >= 32) { putUnchecked(0xFFFFFFFFu, 32); q -= 32; }
