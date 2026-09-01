@@ -1,11 +1,9 @@
 package com.shez.rawcam
 
-import android.Manifest
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -45,12 +43,6 @@ class MainActivity : ComponentActivity() {
     // Which clip the viewer is showing. Held beside `screen` rather than inside
     // the enum so returning to the list does not have to re-derive it.
     private var viewerClip by mutableStateOf<File?>(null)
-
-    // A denial surfaces at record time via AudioResult/AudioStatus.PERMISSION_DENIED,
-    // never as a blocked recording -- video always wins over audio.
-    private val audioPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result
-            surfaces at record time via AudioStatus.PERMISSION_DENIED */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,10 +85,11 @@ class MainActivity : ComponentActivity() {
                             else ClipViewerScreen(clip = c, onBack = { screen = Screen.Clips })
                         }
                         Screen.Exports -> ExportsScreen(onBack = { screen = Screen.Record })
-                        // Audio moved off Settings entirely -- the record screen's
-                        // AUDIO chip owns the toggle, input and gain, and asks for
-                        // the mic permission itself, so this screen needs neither
-                        // the launcher nor the device list any more.
+                        // Audio moved off Settings entirely: the record screen's
+                        // AUDIO chip owns the toggle, input and gain, and requests
+                        // the mic permission through its own launcher. This
+                        // Activity's audioPermissionLauncher existed only to serve
+                        // the Settings row and went with it.
                         Screen.Settings -> SettingsScreen(
                             onBack = { screen = Screen.Record },
                             viewModel = viewModel,
