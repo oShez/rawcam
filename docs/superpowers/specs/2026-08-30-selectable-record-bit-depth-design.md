@@ -321,7 +321,7 @@ Also on-device:
 
 ---
 
-## Result (device verification, 2026-08-31) — PARTIAL
+## Result (device verification, 2026-08-31) — PARTIAL (superseded by the 2026-09-08 section below)
 
 Xiaomi 14 Ultra (24030PN60G), main camera 23mm, 4096x3072, 1x zoom, 24fps,
 compression ON, audio ON. **The A/B in Step 4 has NOT been run** — see "Not yet
@@ -400,9 +400,207 @@ Caveat throughout: synthetic gradient-plus-noise frame, not sensor data.
   is the one path where a bug produces visibly wrong frames rather than merely
   wrong metadata. It must be provoked with a high-entropy scene, not waited for.
 
-### Blocker for the A/B
+### Blocker for the A/B — RESOLVED 2026-09-08 (space freed; the A/B ran)
 
 `/sdcard` is 97% full with ~16 GB free. At the Native rate measured above, the
 spec's protocol (four 60 s takes) needs roughly **92 GB**. The A/B cannot run as
 specified until space is freed; this session's own 15.8 GB Native test clip is the
 largest disposable item.
+
+---
+
+## Result (device verification, 2026-09-08) — COMPLETE
+
+Xiaomi 14 Ultra (24030PN60G), main camera 23mm, 4096x3072, 1x zoom, 24 fps,
+compression ON, audio ON, focus fixed at infinity, max clip length 1 m, thermal
+auto-stop OFF. Scene: a library shelf wall — sharp book spines, high spatial
+entropy, unchanged across all takes.
+
+**Headline: 12-bit does not reduce dropped frames. It increases them, by at
+least 8.2 percentage points.** The feature works exactly as designed at the
+format level, and the files really are ~21% smaller, but the thermal benefit
+this feature was built to deliver is not there — the sign is backwards.
+
+### Deviations from the Step 4 protocol
+
+Three, all of which cost confidence and are stated here so the result is read at
+its true strength:
+
+1. **Order is ABBA (14, 12, 12, 14), not the plan's ABAB.** With equal spacing
+   ABBA gives both arms the same mean position (2.5), so linear drift cancels
+   exactly; ABAB puts 14-bit at mean position 2 and 12-bit at 3, biasing against
+   12-bit. ABBA also yields a *drift control* ABAB cannot: two 14-bit takes at
+   the extreme positions, so `14b - 14a` measures total run drift directly.
+2. **No cool start and no cooldowns between takes** (user instruction: too
+   tedious). Replaced with *preheat to plateau* — discarded takes first, so the
+   measured takes sit high on the thermal curve rather than climbing from cold.
+   This is weaker than the plan's protocol and is the main limitation below.
+3. **Measured takes ran plugged in, not unplugged.** Wi-Fi adb is blocked on
+   this network (client isolation), so no session could survive an unplug, and
+   detached survival across USB disconnect was unproven. Running plugged also
+   kept thermal conditions continuous with the preheat. Absolute drop rates are
+   therefore pessimistic and NOT representative of unplugged use; the relative
+   comparison stands, because both arms sat in identical conditions.
+
+### Thermal state is the dominant variable — and 0-dropped is confirmed
+
+Three 14-bit takes, identical settings and scene, differing only in how hot the
+device already was:
+
+| 14-bit take | Battery temp at start | Dropped | Rate |
+|-------------|----------------------|---------|------|
+| cold (first of the day) | 31.2 C | 0 / 1443 | **0.00%** |
+| warm | 35.3 C | 44 / 1442 | 3.05% |
+| at plateau | 37.4 C | 130 / 1443 | 9.01% |
+
+The cold take is the first clean **zero-dropped 60 s compressed 4096x3072 take
+on this device**. Round 5's optimized Rice packer was recorded as "plausibly
+closes 0-dropped but UNCONFIRMED" on the strength of a 78-91% landing rate under
+adverse conditions; this confirms it, on a cool start.
+
+It also means a drop-rate A/B is only meaningful under thermal load: on a cold
+device both arms land 100% and the comparison is a floor effect, not a null
+result.
+
+### The A/B: four takes, ABBA, at the plateau
+
+Every take verified from its own header rather than from the tap that requested
+it (`whiteLevel@28` = 16383 vs 4095 — a missed chip tap would record the wrong
+depth and is detectable, not silent). All four: `packMode@20` = 3, zero frames
+fell back to uncompressed.
+
+| Take | Position | Depth | Landed | Dropped | Rate | B/frame |
+|------|----------|-------|--------|---------|------|---------|
+| 14a | 1 | 14 (white 16383) | 1301 | 143 | 9.90% | 14,686,246 |
+| 12a | 2 | 12 (white 4095) | 1134 | 310 | 21.47% | 11,557,639 |
+| 12b | 3 | 12 (white 4095) | 1070 | 374 | 25.90% | 11,579,950 |
+| 14b | 4 | 14 (white 16383) | 1140 | 303 | 21.00% | 14,741,435 |
+
+Matched 10 s windows — never whole-take averages, because the arms spend
+different fractions of a take throttled. 12-bit is worse in **every** window:
+
+| Window | 14a | 12a | 12b | 14b | 14 avg | 12 avg | delta |
+|--------|-----|-----|-----|-----|--------|--------|-------|
+| 0-10 s | 0.4% | 7.1% | 13.6% | 9.5% | 5.0% | 10.3% | +5.4 |
+| 10-20 s | 5.8% | 19.5% | 28.3% | 19.2% | 12.5% | 23.9% | +11.4 |
+| 20-30 s | 10.9% | 20.5% | 25.1% | 18.5% | 14.7% | 22.8% | +8.1 |
+| 30-40 s | 12.5% | 28.5% | 23.4% | 24.4% | 18.4% | 25.9% | +7.5 |
+| 40-50 s | 13.8% | 29.2% | 31.8% | 27.2% | 20.5% | 30.5% | +10.0 |
+| 50-60 s | 16.2% | 24.6% | 33.8% | 27.6% | 21.9% | 29.2% | +7.3 |
+| **total** | 9.9% | 21.5% | 25.9% | 21.0% | 15.5% | 23.7% | **+8.2** |
+
+### Separating drift from depth
+
+Drift across the run was large — `14b - 14a` = **+11.09 pp**, i.e. the device
+degraded by more between the first and last take than the depth effect itself.
+That is exactly what dropping the cooldowns cost, and it is why the raw take
+order cannot be read directly. But ABBA cancels *linear* drift by construction,
+so the two can be separated. Least squares on the four takes,
+`rate = intercept + slope*position + delta*is12bit`:
+
+| Parameter | Value |
+|-----------|-------|
+| intercept | 6.02 pp |
+| drift slope | **+3.77 pp per take position** |
+| delta (12-bit) | **+8.23 pp** |
+| RMS residual | **0.24 pp** (effect is 34x the residual) |
+
+| Take | Observed | Fit | Residual |
+|------|----------|-----|----------|
+| 14a | 9.90% | 9.79% | +0.11 |
+| 12a | 21.47% | 21.80% | -0.33 |
+| 12b | 25.90% | 25.57% | +0.33 |
+| 14b | 21.00% | 21.11% | -0.11 |
+
+A model of "steady linear thermal drift plus a constant 12-bit penalty" explains
+all four takes to within a third of a percentage point. The residual bounds
+curvature and take-to-take noise together.
+
+**Why +8.23 pp is a lower bound, not a point estimate.** ABBA cancels only the
+linear component. The preheat ramp was convex (0.00 -> 3.05 -> 9.01%), and on a
+convex rising curve the mean of the outer positions exceeds the mean of the inner
+ones — which biases the *outer* arm (14-bit) to look worse. The observed effect
+runs against that bias, so the true 12-bit penalty is at least this large.
+
+### Step 2 — bytes per frame
+
+Independent of take length, and the one part of the feature that delivers:
+
+| Depth | B/frame | MB/s at 24 fps |
+|-------|---------|----------------|
+| 14-bit (mean of 14a, 14b) | 14,713,841 | 353.1 |
+| 12-bit (mean of 12a, 12b) | 11,568,795 | 277.7 |
+| **reduction** | **21.4%** | |
+
+Larger than the 19.4% measured 2026-08-31 on a dimmer scene, as expected: this
+scene carries more real detail, so more of the discarded low bits were noise.
+
+### Step 3 — DNG export levels
+
+Exported from the 12a clip; frame 000000.dng, 4096x3072, 16 bits/sample.
+
+| Tag | DNG | `.rawv` header | Rule |
+|-----|-----|----------------|------|
+| 50714 BlackLevel | [256, 256, 256, 256] | 256 x4 | ROUNDED, `(1024+2) >> 2` |
+| 50717 WhiteLevel | 4095 | 4095 | TRUNCATED, `16383 >> 2` |
+
+They match. Pixel statistics stand in for the naked-eye check, and are stricter:
+
+- **Crushed blacks: none.** 0.014% of pixels at or below BlackLevel, and the
+  frame minimum is 248 — *below* the 256 black point. Noise straddling black is
+  what an uncrushed image looks like; a clamped one would pile up at exactly 256.
+- **Clipped highlights: none.** 0.000% at WhiteLevel.
+- **No colour cast.** Raw channel means (black-subtracted) R 308.1, G 661.6,
+  B 330.7; applying the reciprocal of `AsShotNeutral` (0.4734, 1.0, 0.4790)
+  gives R/G 0.984 and B/G 1.044, both within ~4% of neutral. Green balance
+  G1/G2 = 0.9990.
+
+### Why 12-bit is slower — hypothesis, NOT measured
+
+The effect is measured; the mechanism is not. The leading candidate, from
+reading `core/src/rawv_codec.cpp`:
+
+`predictAt<Reduce=true>` applies `reduceSample()` to each of the three MED
+predictor neighbours, and the caller applies it once more to the sample itself —
+**four reductions per pixel**, because neighbours are recomputed rather than
+cached (a deliberate trade: holding a full-frame residual buffer was rejected as
+more expensive). At 12.6 M pixels x 24 fps that is ~1.2 G extra `reduceSample`
+calls per second, each an add, a shift, a compare and a select. The `Reduce`
+template correctly hoists the *branch* to compile time — `Reduce=false` is
+instruction-identical to before the feature existed, and the C1/C2 codegen fixes
+verified that — but it cannot hoist the *arithmetic*.
+
+Against this: the bitstream is 21% smaller, and `writeRice` pack was previously
+measured at ~84% of encode cost, so 12-bit should save materially on the
+dominant stage. For the net to come out 8 pp worse, the added predictor work must
+outweigh that saving. This does not obviously add up and **should be profiled
+before anyone acts on it.** Nothing here should be treated as a diagnosis.
+
+### Consequences
+
+- **The default is NOT changed.** It stays Native, per this plan's instruction
+  that the default is a separate, evidence-backed decision. The evidence now
+  available argues for keeping it — but this is one session, one device, one
+  scene, one thermal regime.
+- **The Settings subtitle is now contradicted by measurement.** "Lower depth
+  shrinks files and eases sustained writes" is half right: files shrink 21.4%,
+  but sustained recording gets *worse*, not easier. The clause also asserts an
+  I/O mechanism, while the bottleneck was previously established as encode CPU
+  (`writeRice` pack ~84%). Both halves of that sentence want revisiting; not
+  done here, as it is a user-facing copy change outside this task.
+- **12-bit remains defensible as a storage feature**, which is what it now
+  demonstrably is: 21.4% smaller files, at a real cost in dropped frames under
+  thermal load, and at no cost at all on a cool device where both arms land 100%.
+
+### Limitations
+
+- One device, one scene, one session. No repeat run.
+- Cooldowns were dropped, so drift was +3.77 pp per take position — large
+  relative to the effect. ABBA plus the least-squares fit separates them, and the
+  residual is small, but a cool-start protocol with cooldowns would need no such
+  modelling.
+- Measured takes ran plugged in; absolute rates are pessimistic.
+- The mechanism is unverified (above).
+- The compressed-overflow fallback is **still not provoked** — zero uncompressed
+  frames across all seven takes recorded today, including at 25%+ drop rates.
+  It remains the one path where a bug yields visibly wrong frames.
