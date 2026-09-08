@@ -154,8 +154,13 @@ fun SettingsScreen(
             val activeLensNativeDepth = effectiveBitDepth(activeLens?.whiteLevel ?: 0, 0)
             EnumRow(
                 title = "Record bit depth",
-                subtitle = "Lower depth shrinks files and eases sustained writes. " +
-                    "8-bit only saves space with compression on.",
+                // "shrinks files" is measured (21.4% at 12-bit); the old copy also
+                // claimed it "eases sustained writes", which the 2026-09-08 device A/B
+                // showed is BACKWARDS -- 12-bit drops >=8.2 pp MORE frames than 14-bit
+                // under thermal load. See the Result section of
+                // docs/superpowers/specs/2026-08-30-selectable-record-bit-depth-design.md.
+                subtitle = "Lower depth shrinks files, but drops more frames once the " +
+                    "phone is warm. 8-bit only saves space with compression on.",
                 // Derived from RECORD_BIT_DEPTHS -- SettingsRepository's coercion whitelist --
                 // rather than a second hardcoded list, so the two cannot drift: an entry
                 // added to one and not the other would offer a value coerced() silently
