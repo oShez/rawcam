@@ -109,7 +109,19 @@ struct FileHeader {
   uint32_t audioStatus;           // bitfield, see kAudio* above
   uint32_t audioSource;           // MediaRecorder.AudioSource actually opened
   char     audioFileName[64];     // NUL-terminated sidecar basename
-  uint8_t  reserved[180];
+  // ---- Take-start anchor (timecode auto-sync). Carved out of the reserved
+  // block, NOT appended: kVersion stays 5, so every clip already on a device
+  // still opens, and an older build reading a newer file simply ignores these
+  // bytes as the reserved padding they used to be.
+  // Wall-clock UTC nanoseconds at the take's first frame, plus the local UTC
+  // offset in force at that moment. Both are 0 in any file written before this
+  // existed (the reserved block was zero-filled), and 0 is the "no anchor"
+  // sentinel -- 1970 is not a plausible capture time. The DATE matters as much
+  // as the time of day: the WAV side's BWF bext chunk carries OriginationDate
+  // alongside OriginationTime, so a time-of-day-only anchor could not fill it.
+  int64_t  startEpochNs;
+  int32_t  tzOffsetSec;
+  uint8_t  reserved[168];
 };
 
 struct FrameMeta {
