@@ -1,5 +1,6 @@
 #include "rawcam/dng_writer.h"
 #include "rawcam/file_io.h"
+#include "rawcam/timecode.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -180,6 +181,26 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   if (hdr.illuminant2 != 0) {
     d.addShort(50779, (uint16_t)hdr.illuminant2);
     d.addRationals(50722, SRATIONAL, hdr.colorMatrix2, 9);
+  }
+  // TimeCode (SMPTE 12M), the DNG half of audio/video auto-sync: every frame
+  // of the take carries the take-start anchor advanced by its own index, and
+  // the sidecar WAV is stamped from that SAME anchor, so an NLE lines the two
+  // up on import instead of the operator dragging audio into place. Nominal
+  // alignment only -- it does not correct the known sub-frame A/V residual.
+  //
+  // Eight bytes cannot live inline in a TIFF entry (the value field is 4), so
+  // this goes through addRaw and its data-area offset, not addBytes.
+  //
+  // A zero anchor is the header sentinel for "the clock was never read" (and
+  // for every clip recorded before this existed). Stamping those 00:00:00:00
+  // would read to an NLE as a genuine take beginning at midnight, which it
+  // would then sync audio against; emitting no tag is the honest answer.
+  if (hdr.startEpochNs != 0) {
+    uint8_t tc[8];
+    if (packTimecode(nsSinceLocalMidnight(hdr.startEpochNs, hdr.tzOffsetSec),
+                     meta.frameIndex, hdr.fpsNum, hdr.fpsDen, tc)) {
+      d.addRaw(51043, BYTE, tc, 8);
+    }
   }
   // XMP packet carrying the real capture frame rate (xmpDM:videoFrameRate),
   // the standard CinemaDNG convention DaVinci Resolve reads to auto-set an

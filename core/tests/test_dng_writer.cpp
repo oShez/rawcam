@@ -185,3 +185,103 @@ TEST_CASE("dng omits the XMP tag when fpsDen is zero (no known frame rate)") {
   CHECK(tags.count(700) == 0);
   std::remove("no_fps.dng");
 }
+
+// ---- TimeCode (tag 51043). Eight bytes will not fit in a TIFF entry's 4-byte
+// value field, so the entry must hold an OFFSET into the data area -- reading
+// the timecode back through that offset is what these tests actually prove.
+
+// A header whose take-start anchor is 20000 days past the epoch at 12:33:33,
+// in a zone with no UTC offset, recorded at exactly 24 fps.
+static FileHeader anchoredHeader() {
+  FileHeader h{};
+  h.magic = kMagic; h.version = kVersion;
+  h.width = 2; h.height = 2; h.rowStrideBytes = 4;
+  h.cfa = (uint32_t)Cfa::RGGB; h.whiteLevel = 1023;
+  h.colorMatrix1[0] = 1.0f; h.colorMatrix1[4] = 1.0f; h.colorMatrix1[8] = 1.0f;
+  h.fpsNum = 24; h.fpsDen = 1;
+  h.startEpochNs = 20000LL * 86400000000000LL + 45213000000000LL;
+  h.tzOffsetSec = 0;
+  std::strcpy(h.deviceName, "Timecode Test");
+  return h;
+}
+
+static std::vector<uint8_t> writeAndRead(const char* path, const FileHeader& h,
+                                         const FrameMeta& m) {
+  uint8_t src[8] = {};
+  REQUIRE(writeDng(path, h, m, src));
+  int fd = io::openRead(path);
+  REQUIRE(fd >= 0);
+  std::vector<uint8_t> b((size_t)io::fileSize(fd));
+  io::readAll(fd, b.data(), b.size());
+  io::closeFd(fd);
+  std::remove(path);
+  return b;
+}
+
+// Eight bytes cannot fit in a TIFF entry, so the value field must be a real
+// data-area OFFSET. Bounds-check it before dereferencing: if this is ever
+// routed through an inline entry instead, the field holds timecode bytes
+// reinterpreted as an offset, and that mistake should fail legibly here
+// rather than reading off the end of the file buffer.
+static const uint8_t* timecodeAt(const std::vector<uint8_t>& b, const TagVal& t) {
+  REQUIRE(t.type == 1);  // BYTE
+  REQUIRE(t.count == 8);
+  REQUIRE(t.valueOrOffset >= 8);
+  REQUIRE((size_t)t.valueOrOffset + 8 <= b.size());
+  return &b[t.valueOrOffset];
+}
+
+TEST_CASE("dng stamps frame 0 with the take-start timecode") {
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_frame0.dng", anchoredHeader(), m);
+  auto tags = parseIfd(b);
+
+  REQUIRE(tags.count(51043) == 1);
+  // BCD, so the bytes read like a clock in hex: 12:33:33:00.
+  const uint8_t* tc = timecodeAt(b, tags.at(51043));
+  CHECK(tc[0] == 0x00);  // frames
+  CHECK(tc[1] == 0x33);  // seconds
+  CHECK(tc[2] == 0x33);  // minutes
+  CHECK(tc[3] == 0x12);  // hours
+  CHECK(tc[4] == 0x00);
+  CHECK(tc[5] == 0x00);
+  CHECK(tc[6] == 0x00);
+  CHECK(tc[7] == 0x00);
+}
+
+TEST_CASE("each frame is stamped with its own position in the take") {
+  FrameMeta m{}; m.frameIndex = 25;  // one second and one frame in, at 24 fps
+  auto b = writeAndRead("tc_frame25.dng", anchoredHeader(), m);
+  auto tags = parseIfd(b);
+  REQUIRE(tags.count(51043) == 1);
+  const uint8_t* tc = timecodeAt(b, tags.at(51043));
+  CHECK(tc[0] == 0x01);  // frames
+  CHECK(tc[1] == 0x34);  // seconds ticked over
+  CHECK(tc[2] == 0x33);
+  CHECK(tc[3] == 0x12);
+}
+
+TEST_CASE("dng omits the timecode when the take carries no start anchor") {
+  FileHeader h = anchoredHeader();
+  h.startEpochNs = 0;  // a clip recorded before the anchor existed
+  h.tzOffsetSec = 0;
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_none.dng", h, m);
+  // Stamping 00:00:00:00 here would read to an NLE as a genuine take that
+  // began at midnight, and it would sync the audio confidently against it.
+  // No tag at all is the honest answer.
+  CHECK(parseIfd(b).count(51043) == 0);
+}
+
+TEST_CASE("the take's local zone, not UTC, decides the stamped hour") {
+  FileHeader h = anchoredHeader();  // the anchor instant is 12:33:33 UTC
+  h.tzOffsetSec = -5 * 3600;        // ...but the take was shot in New York,
+  FrameMeta m{}; m.frameIndex = 0;  //    where the wall clock read 07:33:33.
+  auto b = writeAndRead("tc_tz.dng", h, m);
+  auto tags = parseIfd(b);
+  REQUIRE(tags.count(51043) == 1);
+  const uint8_t* tc = timecodeAt(b, tags.at(51043));
+  CHECK(tc[3] == 0x07);
+  CHECK(tc[2] == 0x33);
+  CHECK(tc[1] == 0x33);
+}
