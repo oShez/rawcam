@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
 #include "rawcam/bit_depth.h"
+#include <vector>
 
 using namespace rawcam;
 
