@@ -82,3 +82,39 @@ TEST_CASE("an unusable frame rate is rejected without touching the buffer") {
   // A rejected call must not half-write a timecode the caller might still emit.
   for (int i = 0; i < 8; i++) CHECK(tc[i] == 0xEE);
 }
+
+// ---- nsSinceLocalMidnight: the .rawv header's take-start anchor (UTC epoch ns
+// + the local UTC offset in force at that moment) reduced to what both stamped
+// sides need -- nanoseconds since LOCAL midnight.
+
+TEST_CASE("the take's local zone, not UTC, decides the time of day") {
+  // 23:30 UTC recorded in New York (UTC-5) happened at 18:30 on the operator's
+  // wall clock, and the operator's wall clock is what an NLE shows and what the
+  // WAV's OriginationTime will say. Reading it as 23:30 would put the take on
+  // the wrong side of midnight as well as five hours out.
+  CHECK(nsSinceLocalMidnight(nsAt(23, 30, 0), -5 * 3600) == nsAt(18, 30, 0));
+}
+
+TEST_CASE("the date is discarded -- only the time of day survives") {
+  const uint64_t kDay = 86400ull * 1000000000ull;
+  // A real anchor is ~1.7e18 ns, tens of thousands of days past the epoch;
+  // timecode has nowhere to put the date, so it must reduce to the day.
+  CHECK(nsSinceLocalMidnight((int64_t)(20000 * kDay + nsAt(12, 33, 33)), 0) ==
+        nsAt(12, 33, 33));
+}
+
+TEST_CASE("a zone offset that crosses midnight rolls into the neighbouring day") {
+  // 23:30 UTC in Tokyo (UTC+9) is 08:30 the NEXT local day.
+  CHECK(nsSinceLocalMidnight(nsAt(23, 30, 0), 9 * 3600) == nsAt(8, 30, 0));
+  // 02:00 UTC in New York (UTC-5) is 21:00 the PREVIOUS local day. With an
+  // epoch-day anchor the local instant goes negative, and C's remainder is
+  // truncated rather than floored -- so this must not fall out of a bare `%`.
+  CHECK(nsSinceLocalMidnight(nsAt(2, 0, 0), -5 * 3600) == nsAt(21, 0, 0));
+}
+
+TEST_CASE("a zone offset that is not a whole hour is honoured") {
+  // India is UTC+5:30 and Nepal UTC+5:45; an offset handled in whole hours
+  // would put both takes half an hour or more from the operator's clock.
+  CHECK(nsSinceLocalMidnight(nsAt(2, 0, 0), 5 * 3600 + 1800) == nsAt(7, 30, 0));
+  CHECK(nsSinceLocalMidnight(nsAt(2, 0, 0), 5 * 3600 + 2700) == nsAt(7, 45, 0));
+}

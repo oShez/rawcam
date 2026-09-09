@@ -59,4 +59,21 @@ inline bool packTimecode(uint64_t startNsSinceMidnight, uint64_t frameIndex,
   return true;
 }
 
+// Reduces the .rawv header's take-start anchor -- wall-clock UTC nanoseconds
+// plus the local UTC offset in force at that moment -- to nanoseconds since
+// LOCAL midnight, which is what packTimecode() and the WAV side both want.
+inline uint64_t nsSinceLocalMidnight(int64_t epochNs, int32_t tzOffsetSec) {
+  const int64_t kDay = 86400ll * 1000000000ll;
+  // A real anchor is ~1.7e18 ns and the largest zone offset is 5.0e13, so the
+  // sum stays well inside int64.
+  const int64_t local = epochNs + (int64_t)tzOffsetSec * 1000000000ll;
+  // Floor-mod, not C's truncating `%`: a west-of-UTC offset can push an
+  // early-morning UTC instant into the previous local day, and there the
+  // truncated remainder is negative -- which as an unsigned ns-of-day is not
+  // merely off by a day but arbitrary.
+  int64_t ns = local % kDay;
+  if (ns < 0) ns += kDay;
+  return (uint64_t)ns;
+}
+
 }  // namespace rawcam
