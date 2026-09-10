@@ -10,6 +10,7 @@ import android.media.MediaScannerConnection
 import android.os.IBinder
 import android.util.Log
 import com.shez.rawcam.NativeBridge
+import com.shez.rawcam.audio.WavTimebase
 import com.shez.rawcam.audio.WavWriter
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -173,7 +174,14 @@ class ExportService : Service() {
                                 "sidecar WAV is unrepairable (too short or bad RIFF/data tag)"
                             )
                         }
-                        srcWav.copyTo(dst, overwrite = true)
+                        // Conform rather than copy: drift-correct the audio and
+                        // make it exactly the picture's duration, so the pair drops
+                        // into a timeline as a matched clip. Falls back to a plain
+                        // copy whenever the timebase is unknown or conforming fails
+                        // -- shipping the audio uncorrected beats shipping none.
+                        if (!conformAudio(rawvPath, srcWav, dst)) {
+                            srcWav.copyTo(dst, overwrite = true)
+                        }
                         wavCopied = dst
                     } catch (e: Exception) {
                         Log.e(TAG, "failed to copy sidecar WAV for $rawvPath", e)
@@ -258,6 +266,46 @@ class ExportService : Service() {
     // for a clip already resolved on disk, while this one derives from the raw
     // path string onStartCommand is handed.
     private fun wavSiblingOf(rawvPath: String) = File(rawvPath.removeSuffix(".rawv") + ".wav")
+
+    /**
+     * Writes [dst] as [src] put on the clip's own timebase: resampled by the
+     * measured mic-clock drift, and exactly as long as the picture.
+     *
+     * Returns false when the clip's timebase cannot be established, leaving the
+     * caller to fall back to a byte copy. An unreadable header reports all
+     * zeroes, and zero frames or zero fps is "unknown", NOT "no drift" -- silently
+     * treating the two alike would conform a clip to a length of nothing.
+     */
+    private fun conformAudio(rawvPath: String, src: File, dst: File): Boolean {
+        val tb = try {
+            NativeBridge.nativeClipAudioTimebase(rawvPath)
+        } catch (e: Exception) {
+            Log.e(TAG, "could not read clip timebase for ${'$'}rawvPath", e)
+            return false
+        }
+        if (tb.size < 5) return false
+        val frames = tb[0]
+        val fpsNum = tb[1]
+        val fpsDen = tb[2]
+        val driftPpm = tb[3]
+        val sampleRate = tb[4]
+        if (frames <= 0L || fpsNum <= 0L || fpsDen <= 0L || sampleRate <= 0L) {
+            Log.w(TAG, "clip timebase unknown (frames=${'$'}frames fps=${'$'}fpsNum/${'$'}fpsDen " +
+                "rate=${'$'}sampleRate); copying audio unconformed")
+            return false
+        }
+        // The picture's duration in audio frames. Rounded to nearest so a clip
+        // whose duration is not a whole number of samples is not consistently
+        // short by up to one.
+        val targetFrames =
+            (frames * sampleRate * fpsDen + fpsNum / 2) / fpsNum
+        return try {
+            WavTimebase.conform(src, dst, driftPpm.toInt(), targetFrames)
+        } catch (e: Exception) {
+            Log.e(TAG, "conforming audio failed for ${'$'}rawvPath", e)
+            false
+        }
+    }
 
     override fun onDestroy() {
         // Whole-instance teardown (system reclaim, or nothing left outstanding):

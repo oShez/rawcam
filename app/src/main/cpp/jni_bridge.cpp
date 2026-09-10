@@ -198,6 +198,31 @@ Java_com_shez_rawcam_NativeBridge_nativeClipInfo(JNIEnv* env, jobject, jstring j
   return arr;
 }
 
+// Everything the exporter needs to put a clip's sidecar WAV on the clip's own
+// timebase: how long the picture is, and how far the mic clock ran off.
+// Returns {frameCount, fpsNum, fpsDen, audioDriftPpm, audioSampleRate}, all zero
+// if the clip cannot be read -- which the caller must treat as "do not conform",
+// not as "no drift".
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_shez_rawcam_NativeBridge_nativeClipAudioTimebase(JNIEnv* env, jobject, jstring jPath) {
+  const char* pathChars = env->GetStringUTFChars(jPath, nullptr);
+  std::string path(pathChars ? pathChars : "");
+  env->ReleaseStringUTFChars(jPath, pathChars);
+
+  jlongArray arr = env->NewLongArray(5);
+  auto reader = rawcam::RawvReader::open(path);
+  if (!reader) {
+    jlong zero[5] = {0, 0, 0, 0, 0};
+    env->SetLongArrayRegion(arr, 0, 5, zero);
+    return arr;
+  }
+  const rawcam::FileHeader& h = reader->header();
+  jlong values[5] = {(jlong)reader->frameCount(), (jlong)h.fpsNum, (jlong)h.fpsDen,
+                     (jlong)h.audioDriftPpm, (jlong)h.audioSampleRate};
+  env->SetLongArrayRegion(arr, 0, 5, values);
+  return arr;
+}
+
 // Owns a reader for the life of a decoding session. RawvReader::open scans the
 // whole file to build its offset index, so opening per frame would make every
 // decode pay for a full-file scan.

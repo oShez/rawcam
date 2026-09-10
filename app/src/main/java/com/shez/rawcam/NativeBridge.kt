@@ -56,6 +56,12 @@ object NativeBridge {
     // Returns intArrayOf(width, height, fps, frameCount), or all-zero if unreadable.
     external fun nativeClipInfo(path: String): IntArray
 
+    // Everything needed to put a clip's sidecar WAV on the clip's own timebase:
+    // longArrayOf(frameCount, fpsNum, fpsDen, audioDriftPpm, audioSampleRate).
+    // All zero if the clip cannot be read, which means "do not conform" rather
+    // than "no drift" -- the two are not the same and must not be conflated.
+    external fun nativeClipAudioTimebase(path: String): LongArray
+
     // Opens a clip for preview decoding, returning an opaque handle (0 = failure).
     // RawvReader builds its frame-offset index on open, so a handle MUST be held
     // across a decoding session rather than opened per frame. Every successful
