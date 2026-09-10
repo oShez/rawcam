@@ -186,6 +186,10 @@ class AudioRecorder(private val context: Context) {
     // clock reads separated by however long arming took.
     private var startEpochNs = 0L
     private var tzOffsetSec = 0
+    // The take's frame rate, needed only so TimeReference can be snapped to the
+    // same frame the DNG side stamps -- see TakeAnchor.timeReferenceSamples.
+    private var fpsNum = 0
+    private var fpsDen = 0
     @Volatile private var writer: WavWriter? = null
 
     /** Live input list, Bluetooth already filtered out. Safe to call any time. */
@@ -218,6 +222,8 @@ class AudioRecorder(private val context: Context) {
         cameraSourceIsRealtime: Boolean,
         startEpochNs: Long,
         tzOffsetSec: Int,
+        fpsNum: Int,
+        fpsDen: Int,
     ): Boolean {
         // Not atomic with the setup below -- this assumes start()/stop() are
         // only ever invoked serially from a single (UI) thread, same as the
@@ -241,6 +247,8 @@ class AudioRecorder(private val context: Context) {
         this.wavFile = wavFile
         this.startEpochNs = startEpochNs
         this.tzOffsetSec = tzOffsetSec
+        this.fpsNum = fpsNum
+        this.fpsDen = fpsDen
         sourceIsRealtime = cameraSourceIsRealtime
         // A corrupt persisted float (NaN) would otherwise survive coerceIn
         // (NaN.coerceIn(..) is NaN) and silently produce an all-zero, never-
@@ -635,7 +643,12 @@ class AudioRecorder(private val context: Context) {
         firstFrameHandled = true
         val f = wavFile ?: return
         val w = try {
-            WavWriter(f, sampleRate, channels)
+            // The anchor goes in NOW, not only at close(): every time field in
+            // it is already final (they describe the take's start), and writing
+            // them here is what keeps the WAV's timecode correct on the paths
+            // below that never reach close(). close() refreshes the payload so
+            // the description picks up the final status/drift provenance.
+            WavWriter(f, sampleRate, channels, buildBext())
         } catch (e: Exception) {
             Log.e(TAG, "could not open WAV", e)
             addStatus(AudioStatus.ENDED_EARLY)
@@ -764,7 +777,10 @@ class AudioRecorder(private val context: Context) {
             // BufferedOutputStream/RandomAccessFile. Leave the file with its
             // placeholder RIFF/data sizes instead -- WavWriter.repairIfTruncated
             // exists precisely to recover a file left in this state, which
-            // beats risking corruption.
+            // beats risking corruption. The bext chunk is NOT lost with it: the
+            // anchor was written into the header at construction, so this file
+            // still carries the same timecode the exported DNGs do. Only the
+            // description's final status/drift provenance is missing.
             Log.e(TAG, "audio write thread did not terminate within ${THREAD_JOIN_MS}ms; skipping close to avoid racing a live append()")
             addStatus(AudioStatus.ENDED_EARLY)
         } else {
@@ -826,7 +842,7 @@ class AudioRecorder(private val context: Context) {
         originationDate = TakeAnchor.originationDate(startEpochNs, tzOffsetSec),
         originationTime = TakeAnchor.originationTime(startEpochNs, tzOffsetSec),
         timeReferenceSamples =
-            TakeAnchor.timeReferenceSamples(startEpochNs, tzOffsetSec, sampleRate),
+            TakeAnchor.timeReferenceSamples(startEpochNs, tzOffsetSec, sampleRate, fpsNum, fpsDen),
     )
 
     private fun result(present: Boolean) = AudioResult(

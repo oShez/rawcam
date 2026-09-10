@@ -26,7 +26,8 @@ object NativeBridge {
         deviceName: String, compressRecordings: Boolean,
         requestedBitDepth: Int,
         // The take-start anchor: one wall-clock instant (UTC epoch ns) plus the
-        // local UTC offset in force at that moment, read ONCE by the caller and
+        // local UTC offset in force at that moment, read ONCE by the caller at
+        // ARMING (not at frame 0 -- see FileHeader.startEpochNs in rawv.h) and
         // given to the sidecar WAV as well, so both halves of the take are
         // stamped from the same number. 0 means no anchor.
         startEpochNs: Long, tzOffsetSec: Int): android.view.Surface?

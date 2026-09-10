@@ -113,10 +113,24 @@ struct FileHeader {
   // block, NOT appended: kVersion stays 5, so every clip already on a device
   // still opens, and an older build reading a newer file simply ignores these
   // bytes as the reserved padding they used to be.
-  // Wall-clock UTC nanoseconds at the take's first frame, plus the local UTC
-  // offset in force at that moment. Both are 0 in any file written before this
-  // existed (the reserved block was zero-filled), and 0 is the "no anchor"
-  // sentinel -- 1970 is not a plausible capture time. The DATE matters as much
+  // Wall-clock UTC nanoseconds captured when the take was ARMED, plus the
+  // local UTC offset in force at that moment.
+  //
+  // NOT frame 0's exposure. Arming precedes both the audio recorder starting
+  // and session configuration, which blocks for hundreds of ms, so this runs
+  // early of the first frame by roughly that much. That is structural rather
+  // than an oversight: the sidecar WAV's bext chunk is written when the WAV is
+  // CREATED -- which is what keeps a take's timecode intact when the audio
+  // write thread wedges and close() is skipped -- and creation happens before
+  // frame 0 exists. Relative A/V sync is unaffected, since both sides are
+  // stamped from this same value; the cost is absolute accuracy, so matching
+  // these clips against an EXTERNAL timecode source (a jam-synced recorder, a
+  // second camera) runs early by the arm-to-first-frame latency.
+  //
+  // Both are 0 in any file written before this existed (the reserved block was
+  // zero-filled), and 0 is the "no anchor" sentinel -- 1970 is not a plausible
+  // capture time. hasTakeAnchor() in timecode.h defines what else counts as no
+  // anchor, since neither field is range-checked by headerSane(). The DATE matters as much
   // as the time of day: the WAV side's BWF bext chunk carries OriginationDate
   // alongside OriginationTime, so a time-of-day-only anchor could not fill it.
   int64_t  startEpochNs;

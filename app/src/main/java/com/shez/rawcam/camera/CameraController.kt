@@ -616,7 +616,12 @@ class CameraController(private val context: Context) {
         // nativeStartRecording, from which the DNG exporter stamps tag 51043.
         // Reading the clock separately on each side would leave them apart by
         // however long arming took, which is the whole thing this avoids -- so
-        // this must stay ONE read feeding both, above the audio arm.
+        // this must stay ONE read feeding both, and it must stay ABOVE the
+        // audio arm: WavWriter stamps bext when it creates the file, so the
+        // anchor has to exist before the recorder starts. That is why this is
+        // the arming instant rather than frame 0's, and why every clip's
+        // absolute timecode runs early by the arm-to-first-frame latency --
+        // harmless for linking the pair, wrong for matching external timecode.
         // Nominal alignment only: it does not correct the known sub-frame A/V
         // residual and must not be described as doing so.
         // The offset is captured per take rather than assumed constant, so a
@@ -638,7 +643,9 @@ class CameraController(private val context: Context) {
             audioArmed = try {
                 audioRecorder.start(
                     wav, audioInputKey, audioGainDb, sensorTimestampIsRealtime,
-                    startEpochNs, tzOffsetSec,
+                    // Same fpsNum/fpsDen the .rawv header gets below, so the
+                    // WAV's TimeReference snaps to the frame the DNG stamps.
+                    startEpochNs, tzOffsetSec, /* fpsNum = */ fps, /* fpsDen = */ 1,
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "audio start threw; recording video only", e)
