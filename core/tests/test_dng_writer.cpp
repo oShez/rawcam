@@ -285,3 +285,24 @@ TEST_CASE("the take's local zone, not UTC, decides the stamped hour") {
   CHECK(tc[2] == 0x33);
   CHECK(tc[1] == 0x33);
 }
+
+TEST_CASE("an anchor with an impossible zone offset is treated as no anchor") {
+  FileHeader h = anchoredHeader();
+  h.tzOffsetSec = 2000000000;  // no zone on earth; a corrupt or crafted header
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_bad_tz.dng", h, m);
+  // The .rawv header is corruption-controlled input and neither anchor field is
+  // range-checked by headerSane(). A wild offset threatens no memory -- it
+  // produces a confident, WRONG timecode in every exported frame, which is the
+  // one thing this feature must not do. Rejecting the whole clip over it would
+  // be worse, since the footage itself is fine, so a bad anchor is no anchor.
+  CHECK(parseIfd(b).count(51043) == 0);
+}
+
+TEST_CASE("a negative anchor is treated as no anchor") {
+  FileHeader h = anchoredHeader();
+  h.startEpochNs = -1;
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_neg.dng", h, m);
+  CHECK(parseIfd(b).count(51043) == 0);
+}

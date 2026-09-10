@@ -3,6 +3,31 @@
 
 namespace rawcam {
 
+// Widest offset any real zone uses is UTC+14; java.time's ZoneOffset caps at
+// 18h and so do we.
+constexpr int32_t kMaxTzOffsetSec = 18 * 3600;
+
+// True when a .rawv header's take-start anchor is usable at all.
+//
+// The header is corruption-controlled input (see rawv_reader.cpp) and neither
+// anchor field is range-checked by headerSane(). Unlike the geometry fields
+// these size no buffers, so a wild value threatens no memory -- what it does is
+// put a confident, WRONG timecode on every exported frame, which is precisely
+// what this feature must never do. Rejecting the whole clip over it would be
+// the worse trade, since the footage itself is fine: an invalid anchor is
+// simply NO anchor, and the caller emits no timecode, exactly as for a clip
+// recorded before the anchor existed.
+//
+// The upper bound on startEpochNs is not arbitrary: it is what keeps the
+// addition in nsSinceLocalMidnight() from overflowing, given the offset bound
+// above caps the added term below one day.
+inline bool hasTakeAnchor(int64_t startEpochNs, int32_t tzOffsetSec) {
+  constexpr int64_t kDayNs = 86400ll * 1000000000ll;
+  if (startEpochNs <= 0) return false;  // 0 is the "unset" sentinel
+  if (startEpochNs > INT64_MAX - kDayNs) return false;
+  return tzOffsetSec >= -kMaxTzOffsetSec && tzOffsetSec <= kMaxTzOffsetSec;
+}
+
 // SMPTE 12M timecode, as DNG tag 51043 (TimeCode) wants it: 8 bytes, the first
 // four holding frames/seconds/minutes/hours as packed BCD, the last four the
 // (unused) binary groups.
@@ -62,6 +87,9 @@ inline bool packTimecode(uint64_t startNsSinceMidnight, uint64_t frameIndex,
 // Reduces the .rawv header's take-start anchor -- wall-clock UTC nanoseconds
 // plus the local UTC offset in force at that moment -- to nanoseconds since
 // LOCAL midnight, which is what packTimecode() and the WAV side both want.
+//
+// Call hasTakeAnchor() first: this assumes an anchor that passed it, which is
+// what bounds the addition below away from signed overflow.
 inline uint64_t nsSinceLocalMidnight(int64_t epochNs, int32_t tzOffsetSec) {
   const int64_t kDay = 86400ll * 1000000000ll;
   // A real anchor is ~1.7e18 ns and the largest zone offset is 5.0e13, so the

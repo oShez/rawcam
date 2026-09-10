@@ -192,10 +192,11 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   // this goes through addRaw and its data-area offset, not addBytes.
   //
   // A zero anchor is the header sentinel for "the clock was never read" (and
-  // for every clip recorded before this existed). Stamping those 00:00:00:00
-  // would read to an NLE as a genuine take beginning at midnight, which it
-  // would then sync audio against; emitting no tag is the honest answer.
-  if (hdr.startEpochNs != 0) {
+  // for every clip recorded before this existed); a corrupt one is no better.
+  // Stamping either as 00:00:00:00 would read to an NLE as a genuine take
+  // beginning at midnight, which it would then sync audio against. Emitting no
+  // tag is the honest answer -- see hasTakeAnchor().
+  if (hasTakeAnchor(hdr.startEpochNs, hdr.tzOffsetSec)) {
     uint8_t tc[8];
     if (packTimecode(nsSinceLocalMidnight(hdr.startEpochNs, hdr.tzOffsetSec),
                      meta.frameIndex, hdr.fpsNum, hdr.fpsDen, tc)) {
