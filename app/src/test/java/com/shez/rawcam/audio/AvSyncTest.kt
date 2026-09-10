@@ -44,25 +44,59 @@ class AvSyncTest {
         assertEquals(-12_000L, AvSync.trimSamples(6_000_000_000L, 6_250_000_000L, 48_000))
     }
 
+    // One anchor per second across [seconds], with the boottime clock running
+    // [ppm] parts-per-million long. Spans the full MIN_DRIFT_SPAN_NS, because
+    // shorter runs are now deliberately reported as unmeasured. 35s rather than
+    // exactly 30: at -100 ppm, 30s of SAMPLES spans only 29.997s of wall clock,
+    // and the guard is on wall clock.
+    private fun anchorsOver(seconds: Int, ppm: Long = 0L) = (0..seconds).map { i ->
+        AudioAnchor(i.toLong() * 48_000L, i.toLong() * (1_000_000_000L + ppm * 1_000L))
+    }
+
     @Test
     fun `perfect clock has zero drift`() {
-        val anchors = listOf(
-            AudioAnchor(0L, 0L),
-            AudioAnchor(48_000L, 1_000_000_000L),
-            AudioAnchor(96_000L, 2_000_000_000L),
-        )
-        assertEquals(0, AvSync.driftPpm(anchors, 48_000))
+        assertEquals(0, AvSync.driftPpm(anchorsOver(35), 48_000))
     }
 
     @Test
     fun `slow mic clock yields positive ppm`() {
         // Wall time runs 100ppm longer than the sample count implies.
-        val anchors = listOf(
+        assertEquals(100, AvSync.driftPpm(anchorsOver(35, 100), 48_000))
+    }
+
+    @Test
+    fun `a fast mic clock yields negative ppm`() {
+        assertEquals(-100, AvSync.driftPpm(anchorsOver(35, -100), 48_000))
+    }
+
+    @Test
+    fun `an anchor span too short to out-measure its own noise reports no drift`() {
+        // AudioRecord.getTimestamp() carries roughly a millisecond of jitter, and
+        // over a short span that jitter IS the answer: a 2 s span turns 1 ms of it
+        // into ~1000 ppm of apparent drift with none present -- ten times the
+        // threshold that toasts the user and latches DRIFT_HIGH. Below the span
+        // where the estimate can beat its own noise floor, the honest report is
+        // the same one given for too few anchors: none.
+        val jittered = listOf(
             AudioAnchor(0L, 0L),
-            AudioAnchor(48_000L, 1_000_100_000L),
-            AudioAnchor(96_000L, 2_000_200_000L),
+            AudioAnchor(48_000L, 1_000_000_000L),
+            AudioAnchor(96_000L, 2_001_000_000L), // one anchor a millisecond late
         )
-        assertEquals(100, AvSync.driftPpm(anchors, 48_000))
+        assertEquals(0, AvSync.driftPpm(jittered, 48_000))
+    }
+
+    @Test
+    fun `jitter on the first anchor alone does not tilt the whole estimate`() {
+        // The fit carries an intercept instead of being forced through the first
+        // anchor. Through the origin that one reading is the pivot, so its own
+        // jitter tilts every estimate: with the base anchor a single millisecond
+        // late over a 35 s span and no real drift at all, the pivoting fit reports
+        // -42 ppm where this one reports -5.
+        val baseLateByOneMs = (0..35).map { i ->
+            val ns = if (i == 0) 0L else i.toLong() * 1_000_000_000L - 1_000_000L
+            AudioAnchor(i.toLong() * 48_000L, ns)
+        }
+        assertEquals(-5, AvSync.driftPpm(baseLateByOneMs, 48_000))
     }
 
     @Test

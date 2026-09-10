@@ -60,6 +60,25 @@ object AvSync {
     const val SUSPEND_TOLERANCE_NS = 5_000_000L
 
     /**
+     * Shortest anchor span from which a drift estimate can out-measure its own
+     * noise. AudioRecord.getTimestamp() carries roughly a millisecond of jitter,
+     * and the estimate's uncertainty scales as that jitter divided by the span,
+     * so a short take reports its own measurement error as drift. Simulated at
+     * zero true drift, 95th percentile of |ppm| reported:
+     *
+     *     jitter |   10s    20s    30s    45s    60s
+     *     0.5 ms |    89     36     20     11      7
+     *     1.0 ms |   191     71     39     22     14
+     *     2.0 ms |   365    139     78     43     28
+     *
+     * DRIFT_WARN_PPM is 100, so anything under ~30s would toast the user about
+     * drift that is not there. Thirty seconds holds the line up to about 2 ms of
+     * jitter; past that no span in a normal take would save it, and the estimate
+     * should not be trusted at all.
+     */
+    const val MIN_DRIFT_SPAN_NS = 30_000_000_000L
+
+    /**
      * Converts a camera `SENSOR_TIMESTAMP` to CLOCK_BOOTTIME. When the camera
      * reports SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME the value is already
      * boottime and passes through untouched; otherwise it is monotonic and is
@@ -84,20 +103,45 @@ object AvSync {
      * Mic clock error in parts per million, by least-squares slope of elapsed
      * wall time against elapsed time implied by the sample count. Positive means
      * wall time ran longer than the samples account for -- the mic clock is slow,
-     * so audio gradually lags video. Returns 0 for fewer than two anchors.
+     * so audio gradually lags video.
+     *
+     * Returns 0 -- "not measured" -- for fewer than two anchors OR for a span
+     * shorter than [MIN_DRIFT_SPAN_NS], because below that the answer is mostly
+     * the timestamp jitter rather than the clock. Reporting a number the method
+     * cannot resolve is worse than reporting none: it latches DRIFT_HIGH and
+     * tells the operator their audio is broken when it is fine.
+     *
+     * Note this measures drift; nothing corrects it. A real 100 ppm is 6 ms per
+     * minute, so it crosses a whole frame at 24 fps after about seven minutes.
      */
     fun driftPpm(anchors: List<AudioAnchor>, sampleRate: Int): Int {
         if (anchors.size < 2) return 0
         val base = anchors.first()
+        if (anchors.last().bootNs - base.bootNs < MIN_DRIFT_SPAN_NS) return 0
+
+        // Fitted with an intercept rather than forced through the first anchor.
+        // Regression through the origin pivots the whole line on that one
+        // reading, so its jitter tilts every estimate; letting the intercept
+        // absorb it is 2-3x tighter at every span (the table above is the fit
+        // with an intercept; without one, 30s reads 104 ppm where this reads 39).
+        val n = anchors.size
+        val xs = DoubleArray(n)
+        val ys = DoubleArray(n)
+        for (i in 0 until n) {
+            // Expected elapsed ns from the sample count alone.
+            xs[i] = (anchors[i].framePosition - base.framePosition).toDouble() *
+                1_000_000_000.0 / sampleRate
+            // Actual elapsed ns on the boottime clock.
+            ys[i] = (anchors[i].bootNs - base.bootNs).toDouble()
+        }
+        val meanX = xs.average()
+        val meanY = ys.average()
         var sxx = 0.0
         var sxy = 0.0
-        for (a in anchors) {
-            // Expected elapsed ns from the sample count alone.
-            val x = (a.framePosition - base.framePosition).toDouble() * 1_000_000_000.0 / sampleRate
-            // Actual elapsed ns on the boottime clock.
-            val y = (a.bootNs - base.bootNs).toDouble()
-            sxx += x * x
-            sxy += x * y
+        for (i in 0 until n) {
+            val dx = xs[i] - meanX
+            sxx += dx * dx
+            sxy += dx * (ys[i] - meanY)
         }
         if (sxx == 0.0) return 0
         return (((sxy / sxx) - 1.0) * 1_000_000.0).roundToInt()
