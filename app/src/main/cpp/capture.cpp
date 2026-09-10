@@ -4,7 +4,6 @@
 #include <android/native_window_jni.h>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 
 #include "rawcam/bit_depth.h"
 #include "rawcam/crop.h"
@@ -388,7 +387,8 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
                        const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                        const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
                        const std::string& deviceName, bool compressRecordings,
-                       int32_t requestedBitDepth) {
+                       int32_t requestedBitDepth, int64_t startEpochNs,
+                       int32_t tzOffsetSec) {
   if (reader_ != nullptr) return nullptr;  // already recording
 
   width_ = cropW;
@@ -519,27 +519,18 @@ jobject Capture::start(JNIEnv* env, const std::string& path, int32_t fullW, int3
   hdr.frameSizeBytes = 0;  // filled in on first frame
   hdr.frameCount = 0;
   std::snprintf(hdr.deviceName, sizeof(hdr.deviceName), "%s", deviceName.c_str());
-  // Take-start anchor for timecode auto-sync: ONE wall-clock instant, read
-  // once here, so the exported DNG sequence and the sidecar WAV can both be
-  // stamped from the same number instead of each reading the clock for
-  // itself. The shared VALUE is what lines the two sides up, so whatever
-  // stamps the audio side must read this back out of the header --
-  // re-deriving it over there would reintroduce exactly the arm-to-start gap
-  // this removes. Nominal alignment only: it does not correct the known
-  // sub-frame A/V residual, and must not be described as doing so.
-  {
-    struct timespec ts{};
-    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-      hdr.startEpochNs = (int64_t)ts.tv_sec * 1000000000ll + (int64_t)ts.tv_nsec;
-      std::tm lt{};
-      // tm_gmtoff already folds in DST, which is why the offset is captured
-      // per take rather than assumed a device-lifetime constant.
-      if (localtime_r(&ts.tv_sec, &lt) != nullptr) hdr.tzOffsetSec = (int32_t)lt.tm_gmtoff;
-    }
-    // A clock that refuses to be read leaves both fields 0 -- the "no anchor"
-    // sentinel. Consumers must emit no timecode at all for that, never stamp
-    // the take as if it had begun at midnight.
-  }
+  // Take-start anchor for timecode auto-sync. Supplied by the caller rather
+  // than read here: CameraController reads the clock ONCE per take and hands
+  // the same instant to the sidecar WAV's bext chunk and to this header, so
+  // the two sides are stamped from one number by construction instead of from
+  // two clock reads separated by however long arming took.
+  // Nominal alignment only: it does not correct the known sub-frame A/V
+  // residual, and must not be described as doing so.
+  // Zero remains the "no anchor" sentinel -- what every clip recorded before
+  // this existed reads back as. Consumers must emit no timecode for it rather
+  // than stamp the take as having begun at midnight.
+  hdr.startEpochNs = startEpochNs;
+  hdr.tzOffsetSec = tzOffsetSec;
   headerTemplate_ = hdr;
 
   if (hdr.packMode == (uint32_t)PackMode::CompressedPredictive) {

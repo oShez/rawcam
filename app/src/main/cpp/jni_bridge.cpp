@@ -31,7 +31,7 @@ Java_com_shez_rawcam_NativeBridge_nativeStartRecording(
     jint whiteLevel, jintArray jblackLevel, jfloatArray jcolorMatrix1,
     jint illuminant1, jint illuminant2, jfloatArray jcolorMatrix2,
     jint fpsNum, jint fpsDen, jstring jdeviceName, jboolean compressRecordings,
-    jint requestedBitDepth) {
+    jint requestedBitDepth, jlong startEpochNs, jint tzOffsetSec) {
   const char* pathChars = env->GetStringUTFChars(jpath, nullptr);
   std::string path(pathChars ? pathChars : "");
   env->ReleaseStringUTFChars(jpath, pathChars);
@@ -65,7 +65,8 @@ Java_com_shez_rawcam_NativeBridge_nativeStartRecording(
                                             cropH, cfa, whiteLevel, blackLevel, colorMatrix1,
                                             illuminant1, illuminant2, colorMatrix2, fpsNum,
                                             fpsDen, deviceName, compressRecordings == JNI_TRUE,
-                                            (int32_t)requestedBitDepth);
+                                            (int32_t)requestedBitDepth, (int64_t)startEpochNs,
+                                            (int32_t)tzOffsetSec);
 }
 
 extern "C" JNIEXPORT void JNICALL

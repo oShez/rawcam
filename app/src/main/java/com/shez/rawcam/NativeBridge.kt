@@ -24,7 +24,12 @@ object NativeBridge {
         colorMatrix1: FloatArray /*9*/, illuminant1: Int, illuminant2: Int,
         colorMatrix2: FloatArray /*9*/, fpsNum: Int, fpsDen: Int,
         deviceName: String, compressRecordings: Boolean,
-        requestedBitDepth: Int): android.view.Surface?
+        requestedBitDepth: Int,
+        // The take-start anchor: one wall-clock instant (UTC epoch ns) plus the
+        // local UTC offset in force at that moment, read ONCE by the caller and
+        // given to the sidecar WAV as well, so both halves of the take are
+        // stamped from the same number. 0 means no anchor.
+        startEpochNs: Long, tzOffsetSec: Int): android.view.Surface?
     external fun nativePushFrameMeta(timestampNs: Long, iso: Int, exposureNs: Long,
         focusDistance: Float, wbR: Float, wbG: Float, wbB: Float)
     // Records audio parameters and sync provenance into the .rawv header. MUST be

@@ -16,9 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -183,6 +180,12 @@ class AudioRecorder(private val context: Context) {
     private var prerollSamples = 0L
 
     private var wavFile: File? = null
+    // The take-start anchor, handed in at [start] rather than read here. The
+    // .rawv header carries the same two values, so the bext chunk below and the
+    // exported DNGs' timecode are stamped from one instant instead of from two
+    // clock reads separated by however long arming took.
+    private var startEpochNs = 0L
+    private var tzOffsetSec = 0
     @Volatile private var writer: WavWriter? = null
 
     /** Live input list, Bluetooth already filtered out. Safe to call any time. */
@@ -213,6 +216,8 @@ class AudioRecorder(private val context: Context) {
         deviceKey: String,
         gainDb: Float,
         cameraSourceIsRealtime: Boolean,
+        startEpochNs: Long,
+        tzOffsetSec: Int,
     ): Boolean {
         // Not atomic with the setup below -- this assumes start()/stop() are
         // only ever invoked serially from a single (UI) thread, same as the
@@ -234,6 +239,8 @@ class AudioRecorder(private val context: Context) {
         driftPpm = 0
         writer = null
         this.wavFile = wavFile
+        this.startEpochNs = startEpochNs
+        this.tzOffsetSec = tzOffsetSec
         sourceIsRealtime = cameraSourceIsRealtime
         // A corrupt persisted float (NaN) would otherwise survive coerceIn
         // (NaN.coerceIn(..) is NaN) and silently produce an all-zero, never-
@@ -808,16 +815,19 @@ class AudioRecorder(private val context: Context) {
         _liveStatus.value = status.updateAndGet { it or bit }
     }
 
-    private fun buildBext(): BextInfo {
-        val now = Date()
-        return BextInfo(
-            description = "RawCam offsetNs=$offsetNs driftPpm=$driftPpm status=${status.get()} " +
-                "source=$audioSource rate=$sampleRate ch=$channels",
-            originationDate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(now),
-            originationTime = SimpleDateFormat("HH:mm:ss", Locale.US).format(now),
-            timeReferenceSamples = 0L,
-        )
-    }
+    // Every time field here describes when the take STARTED, not when it
+    // stopped -- which is both what BWF means by origination and what makes
+    // TimeReference agree with the timecode stamped into the exported DNGs.
+    // This runs at close(), so the take-end clock was the easy value to reach
+    // for and the wrong one.
+    private fun buildBext(): BextInfo = BextInfo(
+        description = "RawCam offsetNs=$offsetNs driftPpm=$driftPpm status=${status.get()} " +
+            "source=$audioSource rate=$sampleRate ch=$channels",
+        originationDate = TakeAnchor.originationDate(startEpochNs, tzOffsetSec),
+        originationTime = TakeAnchor.originationTime(startEpochNs, tzOffsetSec),
+        timeReferenceSamples =
+            TakeAnchor.timeReferenceSamples(startEpochNs, tzOffsetSec, sampleRate),
+    )
 
     private fun result(present: Boolean) = AudioResult(
         present = present,

@@ -51,7 +51,7 @@ class Capture {
                  const float colorMatrix1[9], int32_t illuminant1, int32_t illuminant2,
                  const float colorMatrix2[9], int32_t fpsNum, int32_t fpsDen,
                  const std::string& deviceName, bool compressRecordings,
-                 int32_t requestedBitDepth);
+                 int32_t requestedBitDepth, int64_t startEpochNs, int32_t tzOffsetSec);
 
   // Records per-frame metadata keyed by exact sensor timestamp, for the writer
   // thread to match against arriving AImages. Callable from any thread.

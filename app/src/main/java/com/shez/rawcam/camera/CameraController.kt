@@ -30,6 +30,8 @@ import com.shez.rawcam.audio.AudioStatus
 import com.shez.rawcam.audio.MeterLevels
 import com.shez.rawcam.settings.OisMode
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -609,6 +611,21 @@ class CameraController(private val context: Context) {
         if (device == null) return false
         clipsDir.mkdirs() // idempotent; the actual write (below, via `path`) needs this to exist
 
+        // The take-start anchor, read ONCE here and handed to both halves of the
+        // take: the sidecar WAV's BWF bext chunk below, and the .rawv header via
+        // nativeStartRecording, from which the DNG exporter stamps tag 51043.
+        // Reading the clock separately on each side would leave them apart by
+        // however long arming took, which is the whole thing this avoids -- so
+        // this must stay ONE read feeding both, above the audio arm.
+        // Nominal alignment only: it does not correct the known sub-frame A/V
+        // residual and must not be described as doing so.
+        // The offset is captured per take rather than assumed constant, so a
+        // clip exported after a DST change still reads back the wall clock it
+        // was actually shot against.
+        val startInstant = Instant.now()
+        val startEpochNs = startInstant.epochSecond * 1_000_000_000L + startInstant.nano
+        val tzOffsetSec = ZoneId.systemDefault().rules.getOffset(startInstant).totalSeconds
+
         // Arm audio BEFORE the native writer and the session -- see this function's
         // kdoc for why the ordering matters. A failure never blocks the take.
         firstFrameSeen = false
@@ -619,7 +636,10 @@ class CameraController(private val context: Context) {
         if (recordAudio) {
             val wav = File(path.removeSuffix(".rawv") + ".wav")
             audioArmed = try {
-                audioRecorder.start(wav, audioInputKey, audioGainDb, sensorTimestampIsRealtime)
+                audioRecorder.start(
+                    wav, audioInputKey, audioGainDb, sensorTimestampIsRealtime,
+                    startEpochNs, tzOffsetSec,
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "audio start threw; recording video only", e)
                 false
@@ -655,6 +675,7 @@ class CameraController(private val context: Context) {
             spec.colorMatrix2, /* fpsNum = */ fps, /* fpsDen = */ 1,
             spec.deviceName, compressRecordings,
             /* requestedBitDepth = */ requestedBitDepth,
+            startEpochNs, tzOffsetSec,
         ) ?: run {
             if (audioArmed) {
                 lastAudioResult = try {
