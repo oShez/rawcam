@@ -62,6 +62,13 @@ class WavWriter(
 
     init {
         out.write(buildHeader(initialBext))
+        // Flushed at once, not left in the 64 KB buffer. Without this the header
+        // does not reach the OS until the 4th append (FLUSH_EVERY_N_APPENDS), so
+        // a kill or a wedge inside the first few hundred ms leaves a 0-byte file
+        // that repairIfTruncated rejects on its length check -- and the whole
+        // point of writing bext up front is to survive exactly those paths.
+        // One syscall per take.
+        out.flush()
     }
 
     /**

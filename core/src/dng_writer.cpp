@@ -196,7 +196,22 @@ bool writeDng(const std::string& path, const FileHeader& hdr,
   // Stamping either as 00:00:00:00 would read to an NLE as a genuine take
   // beginning at midnight, which it would then sync audio against. Emitting no
   // tag is the honest answer -- see hasTakeAnchor().
-  if (hasTakeAnchor(hdr.startEpochNs, hdr.tzOffsetSec)) {
+  // ...and suppressed outright when the take HAS audio whose head alignment was
+  // never verified. That bit means the trim was not applied, so the WAV's sample
+  // 0 is not frame 0 -- it is roughly the arming instant, hundreds of ms earlier
+  // (session configuration blocks that long). Both halves still carry the same
+  // anchor, so an NLE would line them up confidently and be wrong by that whole
+  // latency. On the healthy path the early anchor is self-cancelling because
+  // sample 0 IS frame 0; here it is not, and no timecode at all returns the
+  // operator to the hand-sync they were doing before this feature existed.
+  //
+  // Narrow on purpose: kAudioPadded means a trim WAS applied (with silence), and
+  // kAudioOverruns means the head is fine and the take diverges later -- neither
+  // is fixed by withholding the stamp. Only "sample 0 is not where we say it is"
+  // is. A take with no audio has nothing to mis-sync and keeps its timecode.
+  const bool audioMisaligned =
+      hdr.audioPresent != 0 && (hdr.audioStatus & kAudioAlignmentUnverified) != 0;
+  if (!audioMisaligned && hasTakeAnchor(hdr.startEpochNs, hdr.tzOffsetSec)) {
     uint8_t tc[8];
     if (packTimecode(nsSinceLocalMidnight(hdr.startEpochNs, hdr.tzOffsetSec),
                      meta.frameIndex, hdr.fpsNum, hdr.fpsDen, tc)) {

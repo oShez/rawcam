@@ -96,4 +96,23 @@ class TakeAnchorTest {
             TakeAnchor.timeReferenceSamples(anchor, 0, 48_000, 24, 1),
         )
     }
+
+    @Test
+    fun `an unusable anchor reports the same nothing the DNG side does`() {
+        // hasTakeAnchor() in core/include/rawcam/timecode.h emits NO timecode for
+        // a non-positive or out-of-range anchor. Without the same rule here the
+        // WAV would assert 1970-01-01 and a real TimeReference for a take whose
+        // DNG sequence carries no timecode at all -- the two halves disagreeing
+        // about whether the take even has an anchor, which is the one outcome
+        // this class exists to prevent. A device booted before NTP fixes its
+        // clock is the realistic way in.
+        assertEquals(0L, TakeAnchor.timeReferenceSamples(0L, 0, 48_000, 24, 1))
+        assertEquals(0L, TakeAnchor.timeReferenceSamples(-1L, 0, 48_000, 24, 1))
+        assertEquals("", TakeAnchor.originationDate(0L, 0))
+        assertEquals("", TakeAnchor.originationTime(0L, 0))
+        // An offset no zone on earth uses is equally unusable.
+        assertEquals(0L, TakeAnchor.timeReferenceSamples(epochNsAt(12, 0, 0), 2_000_000_000, 48_000, 24, 1))
+        assertEquals("", TakeAnchor.originationDate(epochNsAt(12, 0, 0), 2_000_000_000))
+    }
+
 }

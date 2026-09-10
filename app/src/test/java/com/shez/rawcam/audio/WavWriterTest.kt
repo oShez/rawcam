@@ -208,4 +208,18 @@ class WavWriterTest {
             ByteBuffer.wrap(b, 44 + 338, 8).order(ByteOrder.LITTLE_ENDIAN).long,
         )
     }
+
+    @Test
+    fun `the header reaches disk before any audio is appended`() {
+        // The up-front bext only protects a killed or wedged take once the header
+        // has actually left the 64 KB BufferedOutputStream. Without an explicit
+        // flush that does not happen until the 4th append (FLUSH_EVERY_N_APPENDS),
+        // so a kill inside the first few hundred ms leaves a 0-byte file that
+        // repairIfTruncated then rejects on its length check -- and the claim that
+        // the timecode survives would be false exactly when it is needed.
+        val f = tmp.newFile("j.wav")
+        WavWriter(f, 48_000, 1, bext)
+        assertTrue(f.length() >= WavWriter.HEADER_BYTES)
+    }
+
 }

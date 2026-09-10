@@ -184,12 +184,17 @@ class AudioRecorder(private val context: Context) {
     // .rawv header carries the same two values, so the bext chunk below and the
     // exported DNGs' timecode are stamped from one instant instead of from two
     // clock reads separated by however long arming took.
-    private var startEpochNs = 0L
-    private var tzOffsetSec = 0
+    // @Volatile like every other cross-thread field here: buildBext() reads
+    // these from flushFirstFrame() on the WRITE thread, while start() assigns
+    // them on the caller's. Safe today only because startThreads() runs after
+    // the assignment; marking them says so instead of leaving it to be
+    // rediscovered when someone moves either side.
+    @Volatile private var startEpochNs = 0L
+    @Volatile private var tzOffsetSec = 0
     // The take's frame rate, needed only so TimeReference can be snapped to the
     // same frame the DNG side stamps -- see TakeAnchor.timeReferenceSamples.
-    private var fpsNum = 0
-    private var fpsDen = 0
+    @Volatile private var fpsNum = 0
+    @Volatile private var fpsDen = 0
     @Volatile private var writer: WavWriter? = null
 
     /** Live input list, Bluetooth already filtered out. Safe to call any time. */
@@ -648,7 +653,7 @@ class AudioRecorder(private val context: Context) {
             // them here is what keeps the WAV's timecode correct on the paths
             // below that never reach close(). close() refreshes the payload so
             // the description picks up the final status/drift provenance.
-            WavWriter(f, sampleRate, channels, buildBext())
+            WavWriter(f, sampleRate, channels, buildBext(provisional = true))
         } catch (e: Exception) {
             Log.e(TAG, "could not open WAV", e)
             addStatus(AudioStatus.ENDED_EARLY)
@@ -836,8 +841,16 @@ class AudioRecorder(private val context: Context) {
     // TimeReference agree with the timecode stamped into the exported DNGs.
     // This runs at close(), so the take-end clock was the easy value to reach
     // for and the wrong one.
-    private fun buildBext(): BextInfo = BextInfo(
-        description = "RawCam offsetNs=$offsetNs driftPpm=$driftPpm status=${status.get()} " +
+    private fun buildBext(provisional: Boolean = false): BextInfo = BextInfo(
+        // provisional=1 while the numbers after it are not final yet. driftPpm is
+        // only computed in stop(), and status still gains bits, so the up-front
+        // copy would otherwise read as a positive claim of a clean, drift-free,
+        // fully-verified take -- on precisely the two paths (wedged writer,
+        // killed process) that never reach close() to correct it. All-zero was
+        // at least obviously absent; plausibly false is worse. Same trap
+        // hasTakeAnchor() avoids on the DNG side.
+        description = (if (provisional) "RawCam provisional=1 " else "RawCam ") +
+            "offsetNs=$offsetNs driftPpm=$driftPpm status=${status.get()} " +
             "source=$audioSource rate=$sampleRate ch=$channels",
         originationDate = TakeAnchor.originationDate(startEpochNs, tzOffsetSec),
         originationTime = TakeAnchor.originationTime(startEpochNs, tzOffsetSec),

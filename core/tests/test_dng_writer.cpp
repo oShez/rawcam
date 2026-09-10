@@ -306,3 +306,27 @@ TEST_CASE("a negative anchor is treated as no anchor") {
   auto b = writeAndRead("tc_neg.dng", h, m);
   CHECK(parseIfd(b).count(51043) == 0);
 }
+
+TEST_CASE("no timecode when the take's audio alignment was never verified") {
+  FileHeader h = anchoredHeader();
+  h.audioPresent = 1;
+  h.audioStatus = kAudioAlignmentUnverified;
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_unverified.dng", h, m);
+  // This bit means the head trim was never applied, so the WAV's sample 0 is
+  // NOT frame 0 -- it is roughly the arming instant, hundreds of ms earlier.
+  // Both halves still carry the same anchor, so an NLE would line them up
+  // confidently and be wrong by that whole latency. Without a timecode there is
+  // nothing to auto-sync on and the operator syncs by hand, which is exactly
+  // what they did before this feature existed.
+  CHECK(parseIfd(b).count(51043) == 0);
+}
+
+TEST_CASE("a video-only take keeps its timecode regardless of audio status bits") {
+  FileHeader h = anchoredHeader();
+  h.audioPresent = 0;  // no audio at all: nothing to mis-sync against
+  h.audioStatus = kAudioAlignmentUnverified;
+  FrameMeta m{}; m.frameIndex = 0;
+  auto b = writeAndRead("tc_videoonly.dng", h, m);
+  CHECK(parseIfd(b).count(51043) == 1);
+}

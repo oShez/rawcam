@@ -22,6 +22,23 @@ import java.time.format.DateTimeFormatter
 object TakeAnchor {
 
     private const val DAY_NS = 86_400_000_000_000L
+
+    /** Widest offset any real zone uses is UTC+14; ZoneOffset itself caps at 18h. */
+    private const val MAX_TZ_OFFSET_SEC = 18 * 3600
+
+    /**
+     * Mirrors hasTakeAnchor() in core/include/rawcam/timecode.h, which decides
+     * whether the DNG side emits a timecode at all. The two MUST agree: if this
+     * side stamped 1970-01-01 and a real TimeReference for an anchor the C++
+     * side rejects, the WAV would assert a timecode its own DNG sequence does
+     * not carry. A device booted before NTP fixes its clock is the realistic
+     * way in. The accessors below all return their "unset" value when this is
+     * false, so the sentinel means the same thing in both languages.
+     */
+    private fun hasAnchor(startEpochNs: Long, tzOffsetSec: Int): Boolean =
+        startEpochNs > 0L &&
+            startEpochNs <= Long.MAX_VALUE - DAY_NS &&
+            tzOffsetSec >= -MAX_TZ_OFFSET_SEC && tzOffsetSec <= MAX_TZ_OFFSET_SEC
     private val DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     private val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
@@ -44,6 +61,7 @@ object TakeAnchor {
         fpsNum: Int,
         fpsDen: Int,
     ): Long {
+        if (!hasAnchor(startEpochNs, tzOffsetSec)) return 0L
         val ns = nsSinceLocalMidnight(startEpochNs, tzOffsetSec)
         val fps = nominalFps(fpsNum, fpsDen)
         // Whole seconds and the sub-second remainder are converted separately,
@@ -67,11 +85,13 @@ object TakeAnchor {
 
     /** The take's local calendar day, as BWF OriginationDate wants it. */
     fun originationDate(startEpochNs: Long, tzOffsetSec: Int): String =
-        localDateTime(startEpochNs, tzOffsetSec).format(DATE)
+        if (!hasAnchor(startEpochNs, tzOffsetSec)) ""
+        else localDateTime(startEpochNs, tzOffsetSec).format(DATE)
 
     /** The take's local time of day, as BWF OriginationTime wants it. */
     fun originationTime(startEpochNs: Long, tzOffsetSec: Int): String =
-        localDateTime(startEpochNs, tzOffsetSec).format(TIME)
+        if (!hasAnchor(startEpochNs, tzOffsetSec)) ""
+        else localDateTime(startEpochNs, tzOffsetSec).format(TIME)
 
     // The offset is applied explicitly rather than through the device's default
     // zone: the anchor records the offset that was in force when the take
