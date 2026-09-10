@@ -186,4 +186,26 @@ class WavWriterTest {
         assertEquals((WavWriter.HEADER_BYTES + 4 * 3).toLong(), f.length())
         w.close(null)
     }
+
+    @Test
+    fun `a writer given the anchor up front carries bext without any close`() {
+        // Two real paths never reach close(bext): AudioRecorder skips it when the
+        // write thread is wedged (it would race a live append()), and a killed
+        // process leaves repairIfTruncated to patch only the size fields. If the
+        // payload is written only at close, those files report TimeReference 0
+        // and an empty date while their DNGs carry real timecode -- and an NLE
+        // syncing on timecode drops the audio at 00:00:00, hours from picture.
+        val f = tmp.newFile("i.wav")
+        val w = WavWriter(f, 48_000, 1, bext)
+        w.append(FloatArray(2), 2)
+        // Deliberately NOT closed with a bext, standing in for the wedged path.
+        w.close(null)
+        val b = bytes(f)
+        assertEquals("2026-08-17", ascii(b, 44 + 320, 10))
+        assertEquals("12:00:00", ascii(b, 44 + 330, 8))
+        assertEquals(
+            48_000L,
+            ByteBuffer.wrap(b, 44 + 338, 8).order(ByteOrder.LITTLE_ENDIAN).long,
+        )
+    }
 }

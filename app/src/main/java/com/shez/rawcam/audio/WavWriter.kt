@@ -43,6 +43,15 @@ class WavWriter(
     private val file: File,
     private val sampleRate: Int,
     private val channels: Int,
+    // Written into the header immediately, then refreshed by [close]. Supplying
+    // it up front is what keeps a take's timecode intact on the paths that
+    // never reach close(): AudioRecorder skips close() when the write thread is
+    // wedged, and a killed process leaves only repairIfTruncated, which patches
+    // sizes alone. A payload written solely at close would leave those files
+    // claiming TimeReference 0 while their DNGs carry a real timecode -- an NLE
+    // syncing on timecode then drops the audio at 00:00:00, hours from picture.
+    // Null still means "leave it zeroed" for callers with no anchor.
+    initialBext: BextInfo? = null,
 ) : Closeable {
 
     private val out = BufferedOutputStream(FileOutputStream(file), BUFFER_BYTES)
@@ -52,7 +61,7 @@ class WavWriter(
     private var appendsSinceFlush = 0
 
     init {
-        out.write(buildHeader())
+        out.write(buildHeader(initialBext))
     }
 
     /**
@@ -121,7 +130,7 @@ class WavWriter(
         }
     }
 
-    private fun buildHeader(): ByteArray {
+    private fun buildHeader(bext: BextInfo?): ByteArray {
         val h = ByteArray(HEADER_BYTES)
         val bb = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN)
         bb.put("RIFF".toByteArray(Charsets.US_ASCII))
@@ -137,7 +146,10 @@ class WavWriter(
         bb.putShort(24)
         bb.put("bext".toByteArray(Charsets.US_ASCII))
         bb.putInt(BEXT_PAYLOAD_BYTES)
-        bb.position(BEXT_PAYLOAD_OFFSET + BEXT_PAYLOAD_BYTES)  // payload stays zeroed
+        // Position is now BEXT_PAYLOAD_OFFSET exactly, so the payload either
+        // fills the field or is skipped over and left zeroed.
+        if (bext != null) bb.put(encodeBext(bext))
+        else bb.position(BEXT_PAYLOAD_OFFSET + BEXT_PAYLOAD_BYTES)
         bb.put("data".toByteArray(Charsets.US_ASCII))
         bb.putInt(0)                       // patched at close
         return h
