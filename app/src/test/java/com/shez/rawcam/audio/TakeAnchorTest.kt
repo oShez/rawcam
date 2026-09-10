@@ -17,7 +17,7 @@ class TakeAnchorTest {
         // line the two up on import.
         assertEquals(
             45_213L * 48_000L, // 12:33:33 is 45213 s into the day, at 48 kHz
-            TakeAnchor.timeReferenceSamples(epochNsAt(12, 33, 33), 0, 48_000),
+            TakeAnchor.timeReferenceSamples(epochNsAt(12, 33, 33), 0, 48_000, 24, 1),
         )
     }
 
@@ -28,7 +28,7 @@ class TakeAnchorTest {
         // alignment is any use.
         assertEquals(
             45_213L * 48_000L + 24_000L,
-            TakeAnchor.timeReferenceSamples(epochNsAt(12, 33, 33) + 500_000_000L, 0, 48_000),
+            TakeAnchor.timeReferenceSamples(epochNsAt(12, 33, 33) + 500_000_000L, 0, 48_000, 24, 1),
         )
     }
 
@@ -54,7 +54,7 @@ class TakeAnchorTest {
         assertEquals("20:30:00", TakeAnchor.originationTime(anchor, -4 * 3600))
         assertEquals(
             (20L * 3600 + 30 * 60) * 48_000L,
-            TakeAnchor.timeReferenceSamples(anchor, -4 * 3600, 48_000),
+            TakeAnchor.timeReferenceSamples(anchor, -4 * 3600, 48_000, 24, 1),
         )
     }
 
@@ -79,7 +79,21 @@ class TakeAnchorTest {
         assertEquals("21:00:00", TakeAnchor.originationTime(twoAmUtcOnEpochDay, -5 * 3600))
         assertEquals(
             21L * 3600 * 48_000L,
-            TakeAnchor.timeReferenceSamples(twoAmUtcOnEpochDay, -5 * 3600, 48_000),
+            TakeAnchor.timeReferenceSamples(twoAmUtcOnEpochDay, -5 * 3600, 48_000, 24, 1),
+        )
+    }
+    @Test
+    fun `time reference lands on the frame boundary the DNG timecode will stamp`() {
+        // SMPTE 12M cannot express .900 of a second: packTimecode floors frame 0
+        // to .875 at 24 fps. If the WAV kept the true .900 the NLE would place
+        // audio 25 ms late -- and up to 41.7 ms at worst, larger than the
+        // sub-frame residual this feature explicitly does not fix. Sharing one
+        // number is only worth anything if both sides ROUND it the same way.
+        val anchor = epochNsAt(12, 33, 33) + 900_000_000L
+        val frame0 = 45_213L * 24 + 21 // exactly what packTimecode() derives
+        assertEquals(
+            frame0 * 48_000L / 24,
+            TakeAnchor.timeReferenceSamples(anchor, 0, 48_000, 24, 1),
         )
     }
 }

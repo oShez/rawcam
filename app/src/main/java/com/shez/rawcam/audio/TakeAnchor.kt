@@ -27,17 +27,43 @@ object TakeAnchor {
 
     /**
      * Sample frames from local midnight to the take's start -- BWF's
-     * TimeReference field.
+     * TimeReference field -- snapped to the same video frame the DNG side will
+     * stamp on frame 0.
+     *
+     * The snapping is the point. SMPTE 12M cannot express a fraction of a
+     * frame, so packTimecode() floors the anchor to a whole frame; keeping the
+     * true sub-frame instant here instead would place the audio up to one frame
+     * late (41.7 ms at 24 fps) -- larger than the sub-frame A/V residual this
+     * feature does not fix, and injected by the very mechanism meant to remove
+     * guesswork. Sharing one number only helps if both sides ROUND it alike.
      */
-    fun timeReferenceSamples(startEpochNs: Long, tzOffsetSec: Int, sampleRate: Int): Long {
+    fun timeReferenceSamples(
+        startEpochNs: Long,
+        tzOffsetSec: Int,
+        sampleRate: Int,
+        fpsNum: Int,
+        fpsDen: Int,
+    ): Long {
         val ns = nsSinceLocalMidnight(startEpochNs, tzOffsetSec)
+        val fps = nominalFps(fpsNum, fpsDen)
         // Whole seconds and the sub-second remainder are converted separately,
-        // the same shape packTimecode() uses on the DNG side. A take almost
-        // never begins exactly on a second, and folding the remainder away
-        // would throw the audio a third of a second out at worst.
-        return ns / 1_000_000_000L * sampleRate +
-            (ns % 1_000_000_000L) * sampleRate / 1_000_000_000L
+        // the same shape packTimecode() uses. A take almost never begins exactly
+        // on a second, and folding the remainder away would lose a third of a
+        // second at worst -- far more than the frame quantisation below.
+        if (fps <= 0L) {
+            // An unusable frame rate means packTimecode() emits no tag at all,
+            // so there is no video timecode to agree with. Keep the true instant
+            // rather than snapping to a grid that does not exist.
+            return ns / 1_000_000_000L * sampleRate +
+                (ns % 1_000_000_000L) * sampleRate / 1_000_000_000L
+        }
+        val frame = ns / 1_000_000_000L * fps + (ns % 1_000_000_000L) * fps / 1_000_000_000L
+        return frame * sampleRate / fps
     }
+
+    /** The integer frame rate packTimecode() counts in; 0 if unusable. */
+    private fun nominalFps(fpsNum: Int, fpsDen: Int): Long =
+        if (fpsNum <= 0 || fpsDen <= 0) 0L else (fpsNum.toLong() + fpsDen / 2) / fpsDen
 
     /** The take's local calendar day, as BWF OriginationDate wants it. */
     fun originationDate(startEpochNs: Long, tzOffsetSec: Int): String =
