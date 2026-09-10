@@ -103,7 +103,11 @@ object AvSync {
      * Mic clock error in parts per million, by least-squares slope of elapsed
      * wall time against elapsed time implied by the sample count. Positive means
      * wall time ran longer than the samples account for -- the mic clock is slow,
-     * so audio gradually lags video.
+     * so fewer samples exist than real time warrants. Played at the nominal rate
+     * the take finishes early, so the audio LEADS the picture and grows further
+     * ahead as the take runs. (This said "lags" until 2026-09-10; it was wrong,
+     * and taking it at face value inverts the correction in DriftResampler --
+     * doubling the drift instead of removing it.)
      *
      * Returns 0 -- "not measured" -- for fewer than two anchors OR for a span
      * shorter than [MIN_DRIFT_SPAN_NS], because below that the answer is mostly
