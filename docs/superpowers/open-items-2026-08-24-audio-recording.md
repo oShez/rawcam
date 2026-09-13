@@ -140,3 +140,7 @@ analysis are still on the device and can be deleted.
 Drift resampling, VU/PPM meter ballistics, matched DNG/BWF timecode, and live gain
 adjustment during recording were all deferred in v1 and remain deferred. Drift is
 measured and reported in ppm but is not corrected.
+
+**Superseded 2026-09-13:** matched DNG/BWF timecode and drift resampling are now
+implemented -- drift is corrected at export, not only measured. See
+`open-items-2026-09-13-timecode-sync-and-drift.md`. Neither has been verified on a real take.
