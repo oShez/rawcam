@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>RawCam — manual RAW video for Android</title>
-<meta name="description" content="RawCam records uncompressed Bayer RAW video straight off your Android phone's camera sensor and exports CinemaDNG for DaVinci Resolve. Manual ISO, shutter, focus, and white balance." />
+<meta name="description" content="RawCam records Bayer RAW video straight off your Android phone's camera sensor and exports CinemaDNG for DaVinci Resolve. Manual ISO, shutter, focus, and white balance." />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link href="https://fonts.bunny.net/css?family=fragment-mono:400,400i" rel="stylesheet" />
 <style>
@@ -259,7 +259,7 @@
     <section class="hero" style="border-top:none; padding-top:64px;">
       <p class="kicker">Android &middot; manual RAW video</p>
       <h1><span class="word" style="animation-delay:0ms">Raw</span> <span class="word" style="animation-delay:80ms">sensor</span> <span class="word" style="animation-delay:160ms">data.</span> <span class="word" style="animation-delay:240ms">Straight</span> <span class="word" style="animation-delay:320ms">to</span> <span class="word" style="animation-delay:400ms">Resolve.</span></h1>
-      <p class="lede">RawCam records uncompressed Bayer video directly off your phone's camera sensor and exports CinemaDNG you can grade like a cinema camera. Manual ISO, shutter, focus, and white balance, with no auto-anything getting in the way.</p>
+      <p class="lede">RawCam records Bayer RAW video directly off your phone's camera sensor and exports CinemaDNG you can grade like a cinema camera. Manual ISO, shutter, focus, and white balance, with no auto-anything getting in the way.</p>
 
       <div class="cta-row">
         <a class="btn" href="https://github.com/oShez/rawcam/releases/download/v0.3.0/rawcam-v0.3.0.apk" id="download-link">
@@ -270,11 +270,31 @@
       <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>c15708fc530337476a0b4f06ec5ba650f413d4710821d2d0fd89595b5d456e23</code></p>
     </section>
 
+    <section aria-labelledby="new-h">
+      <h2 id="new-h">New in 0.3.0</h2>
+      <dl class="spec">
+        <dt>Long takes</dt>
+        <dd>No longer drop frames as the phone warms &mdash; compression is about twice as fast at the same clock speed. Three back-to-back 60&nbsp;s takes went from 0 / 0 / 64 frames dropped to 0 / 0 / 0.</dd>
+        <dt>Frame buffer</dt>
+        <dd>New setting &mdash; off, or 0.5&ndash;4&nbsp;GB of RAM holding frames so a brief stall no longer costs one</dd>
+        <dt>Cancel</dt>
+        <dd>Tap the shutter while it is arming to abandon the take; nothing is written</dd>
+        <dt>Reporting</dt>
+        <dd>Clips that lost frames show a dropped count, and battery saver is flagged before it costs you a take</dd>
+        <dt>Reliability</dt>
+        <dd>A take stops itself if writing fails, and recording continues if you leave the app</dd>
+        <dt>Interface</dt>
+        <dd>Every screen redesigned around the take, with explicit Arming and Saving states</dd>
+        <dt>Limits</dt>
+        <dd>Continuous takes are bounded by storage speed rather than compression &mdash; about 5 minutes compressed, nearer 8 at 10-bit uncompressed</dd>
+      </dl>
+    </section>
+
     <section aria-labelledby="spec-h">
       <h2 id="spec-h">Spec</h2>
       <dl class="spec">
         <dt>Capture</dt>
-        <dd>Bayer RAW off the sensor &mdash; Packed10 / Packed12 / Raw16, chosen automatically per lens</dd>
+        <dd>Bayer RAW off the sensor &mdash; lossless compressed, or Packed10 / Packed12 / Raw16 chosen automatically per lens</dd>
         <dt>Export</dt>
         <dd>CinemaDNG, dual-illuminant calibrated, parallel export pipeline</dd>
         <dt>Control</dt>
