@@ -262,29 +262,27 @@
       <p class="lede">RawCam records Bayer RAW video directly off your phone's camera sensor and exports CinemaDNG you can grade like a cinema camera. Manual ISO, shutter, focus, and white balance, with no auto-anything getting in the way.</p>
 
       <div class="cta-row">
-        <a class="btn" href="https://github.com/oShez/rawcam/releases/download/v0.3.0/rawcam-v0.3.0.apk" id="download-link">
+        <a class="btn" href="https://github.com/oShez/rawcam/releases/download/v0.3.1/rawcam-v0.3.1.apk" id="download-link">
           <span class="dot" aria-hidden="true"></span>
-          Download v0.3.0 &middot; APK &middot; 3.1 MB
+          Download v0.3.1 &middot; APK &middot; 3.2 MB
         </a>
       </div>
-      <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>c15708fc530337476a0b4f06ec5ba650f413d4710821d2d0fd89595b5d456e23</code></p>
+      <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>d9fd2c3deef2e73335fc2e427dae2a14ea7b053e45d462e0eaa1b1101b1cf1b3</code></p>
     </section>
 
     <section aria-labelledby="new-h">
-      <h2 id="new-h">New in 0.3.0</h2>
+      <h2 id="new-h">New in 0.3.1</h2>
       <dl class="spec">
-        <dt>Long takes</dt>
-        <dd>No longer drop frames as the phone warms &mdash; compression is about twice as fast at the same clock speed. Three back-to-back 60&nbsp;s takes went from 0 / 0 / 64 frames dropped to 0 / 0 / 0.</dd>
-        <dt>Frame buffer</dt>
-        <dd>New setting &mdash; off, or 0.5&ndash;4&nbsp;GB of RAM holding frames so a brief stall no longer costs one</dd>
-        <dt>Cancel</dt>
-        <dd>Tap the shutter while it is arming to abandon the take; nothing is written</dd>
-        <dt>Reporting</dt>
-        <dd>Clips that lost frames show a dropped count, and battery saver is flagged before it costs you a take</dd>
-        <dt>Reliability</dt>
-        <dd>A take stops itself if writing fails, and recording continues if you leave the app</dd>
-        <dt>Interface</dt>
-        <dd>Every screen redesigned around the take, with explicit Arming and Saving states</dd>
+        <dt>Frame rate</dt>
+        <dd>Modes offer only the frame rates the camera really delivers, and every take is labelled with the rate it ran at &mdash; 0.3.0 could label a 30&nbsp;fps take as 60, so it played back at double speed</dd>
+        <dt>Compressed DNGs</dt>
+        <dd>Exports are lossless-compressed by default &mdash; about half the size of uncompressed DNGs; a switch in Settings turns it off</dd>
+        <dt>Denoise</dt>
+        <dd>Optional temporal denoise on export, off by default: each frame is merged with its neighbours, aligned for handheld shots, about half the noise on still footage</dd>
+        <dt>Write meter</dt>
+        <dd>WRITE % shows whether storage is keeping up with the camera while you record</dd>
+        <dt>Export</dt>
+        <dd>Compressed clips export about twice as fast</dd>
         <dt>Limits</dt>
         <dd>Continuous takes are bounded by storage speed rather than compression &mdash; about 5 minutes compressed, nearer 8 at 10-bit uncompressed</dd>
       </dl>
@@ -296,7 +294,7 @@
         <dt>Capture</dt>
         <dd>Bayer RAW off the sensor &mdash; lossless compressed, or Packed10 / Packed12 / Raw16 chosen automatically per lens</dd>
         <dt>Export</dt>
-        <dd>CinemaDNG, dual-illuminant calibrated, parallel export pipeline</dd>
+        <dd>CinemaDNG, lossless-compressed or uncompressed, dual-illuminant calibrated, optional temporal denoise</dd>
         <dt>Control</dt>
         <dd>Manual ISO, shutter, focus, white balance (Kelvin + tint), with per-parameter locks</dd>
         <dt>Lenses</dt>
@@ -322,7 +320,7 @@
   </main>
 
   <footer>
-    <p>RawCam v0.3.0</p>
+    <p>RawCam v0.3.1</p>
     <p>Not distributed on Google Play. No INTERNET permission is requested by the app; this page is the only network activity involved anywhere in the RawCam experience.</p>
   </footer>
 </div>
