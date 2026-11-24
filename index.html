@@ -262,27 +262,25 @@
       <p class="lede">RawCam records Bayer RAW video directly off your phone's camera sensor and exports CinemaDNG you can grade like a cinema camera. Manual ISO, shutter, focus, and white balance, with no auto-anything getting in the way.</p>
 
       <div class="cta-row">
-        <a class="btn" href="https://github.com/oShez/rawcam/releases/download/v0.3.1/rawcam-v0.3.1.apk" id="download-link">
+        <a class="btn" href="https://github.com/oShez/rawcam/releases/download/v0.4.0/rawcam-v0.4.0.apk" id="download-link">
           <span class="dot" aria-hidden="true"></span>
-          Download v0.3.1 &middot; APK &middot; 3.2 MB
+          Download v0.4.0 &middot; APK &middot; 3.1 MB
         </a>
       </div>
-      <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>d9fd2c3deef2e73335fc2e427dae2a14ea7b053e45d462e0eaa1b1101b1cf1b3</code></p>
+      <p class="fineprint">Direct download, not on Google Play. SHA-256: <code>61c283c10a6865a024833dcc7c8bfd4812db433f6b501c745d241483c4483de8</code></p>
     </section>
 
     <section aria-labelledby="new-h">
-      <h2 id="new-h">New in 0.3.1</h2>
+      <h2 id="new-h">New in 0.4.0</h2>
       <dl class="spec">
-        <dt>Frame rate</dt>
-        <dd>Modes offer only the frame rates the camera really delivers, and every take is labelled with the rate it ran at &mdash; 0.3.0 could label a 30&nbsp;fps take as 60, so it played back at double speed</dd>
-        <dt>Compressed DNGs</dt>
-        <dd>Exports are lossless-compressed by default &mdash; about half the size of uncompressed DNGs; a switch in Settings turns it off</dd>
-        <dt>Denoise</dt>
-        <dd>Optional temporal denoise on export, off by default: each frame is merged with its neighbours, aligned for handheld shots, about half the noise on still footage</dd>
-        <dt>Write meter</dt>
-        <dd>WRITE % shows whether storage is keeping up with the camera while you record</dd>
-        <dt>Export</dt>
-        <dd>Compressed clips export about twice as fast</dd>
+        <dt>No file permission</dt>
+        <dd>Exports go straight to Download/RawCam with no &ldquo;All files access&rdquo; permission; the setting is gone, and exports saved in app storage by 0.3.x still show in Exports</dd>
+        <dt>Scrubbing</dt>
+        <dd>The clip viewer decodes at half resolution while you scrub and snaps back to full resolution when you let go</dd>
+        <dt>Android 16</dt>
+        <dd>Targets Android 16; recording is declared as a camera and microphone service</dd>
+        <dt>Update</dt>
+        <dd>Installs in place over 0.3.x and 0.2.0; clips and settings are kept</dd>
         <dt>Limits</dt>
         <dd>Continuous takes are bounded by storage speed rather than compression &mdash; about 5 minutes compressed, nearer 8 at 10-bit uncompressed</dd>
       </dl>
@@ -320,7 +318,7 @@
   </main>
 
   <footer>
-    <p>RawCam v0.3.1</p>
+    <p>RawCam v0.4.0</p>
     <p>Not distributed on Google Play. No INTERNET permission is requested by the app; this page is the only network activity involved anywhere in the RawCam experience.</p>
   </footer>
 </div>
